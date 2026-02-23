@@ -244,6 +244,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
 
   // Create task executor first (needed for callback closures)
   // wsClient will be assigned after construction
+  // eslint-disable-next-line prefer-const -- reassigned on line 530 after wsClient creation
   let taskExecutor: TaskExecutor;
 
   const wsClient = new WebSocketClient({
