@@ -27,20 +27,20 @@ Astro Backend (:3001)          Relay (:3002)            Agent Runner
 
 ## Installation
 
-The agent runner is included in the Astro monorepo. For local development, `npm run dev` starts it automatically.
-
-For standalone installation:
-
 ```bash
-# From the monorepo root
-npm run build:agent-runner
+# From npm (when published)
+npm install -g @astro/agent
 
-# Or build directly
-cd packages/agent-runner
+# Or from source
+git clone git@github.com:fuxialexander/astro-agent.git
+cd astro-agent
+npm install
 npm run build
 ```
 
-The CLI binary is `astro-agent` (or `npx astro-agent` from the monorepo).
+The CLI binary is `astro-agent`.
+
+> **Monorepo usage:** This repo is also included as a git submodule at `packages/agent-runner` in the main Astro repo. `npm run dev` in the monorepo starts it automatically.
 
 ## Quick Start
 
