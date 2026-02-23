@@ -27,6 +27,7 @@ interface StartOptions {
   allowNonGit?: boolean;
   useSandbox?: boolean;
   maxSandboxSize?: number;
+  verbose?: boolean;
 }
 
 // Get package version from package.json
@@ -123,7 +124,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
   const runnerId = config.getRunnerId();
   const machineId = config.getMachineId();
   const relayUrl = options.relay ?? config.getRelayUrl();
-  const maxTasks = options.maxTasks ?? 4;
+  const maxTasks = options.maxTasks ?? 20;
   const logLevel = options.logLevel ?? config.getLogLevel();
 
   // Background mode: spawn detached process
@@ -167,24 +168,27 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
   }
 
   // Foreground mode: run directly
+  const verbose = options.verbose ?? false;
+
   console.log(chalk.bold('\n🤖 Astro Agent Runner\n'));
 
   const version = await getVersion();
-  console.log(chalk.dim(`Version: ${version}`));
-  console.log(chalk.dim(`Runner ID: ${runnerId}`));
-  console.log(chalk.dim(`Machine ID: ${machineId}`));
-  console.log(chalk.dim(`Relay: ${relayUrl}`));
-  console.log(chalk.dim(`Max concurrent tasks: ${maxTasks}`));
-  console.log(chalk.dim(`Log level: ${logLevel}`));
-  console.log();
+  if (verbose) {
+    console.log(chalk.dim(`Version: ${version}`));
+    console.log(chalk.dim(`Runner ID: ${runnerId}`));
+    console.log(chalk.dim(`Machine ID: ${machineId}`));
+    console.log(chalk.dim(`Relay: ${relayUrl}`));
+    console.log(chalk.dim(`Max concurrent tasks: ${maxTasks}`));
+    console.log(chalk.dim(`Log level: ${logLevel}`));
+    console.log();
+  }
 
   // Set Claude OAuth token if configured (from `claude setup-token`)
   const claudeOauthToken = config.getClaudeOauthToken();
   if (claudeOauthToken && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = claudeOauthToken;
-    console.log(chalk.dim('Using stored Claude OAuth token'));
+    if (verbose) console.log(chalk.dim('Using stored Claude OAuth token'));
   }
-  console.log();
 
   // Detect resources
   const resourceSpinner = ora('Detecting machine resources...').start();
@@ -192,7 +196,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
   try {
     resources = await getMachineResources();
     resourceSpinner.succeed('Machine resources detected');
-    if (logLevel === 'debug') {
+    if (verbose) {
       console.log(chalk.dim(formatResourceSummary(resources)));
     }
   } catch (error) {

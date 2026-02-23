@@ -35,6 +35,7 @@ program
   .option('--with-ssh-config', 'Discover and configure remote hosts from SSH config')
   .option('--auto-start', 'Enable auto-start on login')
   .option('--install-mcp', 'Install MCP integration for Claude Code')
+  .option('--verbose', 'Show detailed debug output')
   .action(async (options) => {
     try {
       await setupCommand({
@@ -47,6 +48,7 @@ program
         withSshConfig: options.withSshConfig,
         autoStart: options.autoStart,
         installMcp: options.installMcp,
+        verbose: options.verbose,
       });
     } catch (error) {
       console.error('Setup failed:', error instanceof Error ? error.message : String(error));
@@ -66,6 +68,7 @@ program
   .option('--allow-non-git', 'Allow execution in non-git directories without prompting')
   .option('--sandbox', 'Always use sandbox mode (work on copies)')
   .option('--max-sandbox-size <mb>', 'Maximum sandbox size in MB (default: 100)', parseInt)
+  .option('--verbose', 'Show detailed debug output')
   .action(async (options) => {
     try {
       await startCommand({
@@ -77,6 +80,7 @@ program
         allowNonGit: options.allowNonGit,
         useSandbox: options.sandbox,
         maxSandboxSize: options.maxSandboxSize ? options.maxSandboxSize * 1024 * 1024 : undefined,
+        verbose: options.verbose,
       });
     } catch (error) {
       console.error('Start failed:', error instanceof Error ? error.message : String(error));
@@ -95,6 +99,7 @@ program
   .option('--allow-non-git', 'Allow execution in non-git directories without prompting')
   .option('--sandbox', 'Always use sandbox mode (work on copies)')
   .option('--max-sandbox-size <mb>', 'Maximum sandbox size in MB (default: 100)', parseInt)
+  .option('--verbose', 'Show detailed debug output')
   .action(async (options) => {
     try {
       await startCommand({
@@ -106,6 +111,7 @@ program
         allowNonGit: options.allowNonGit,
         useSandbox: options.sandbox,
         maxSandboxSize: options.maxSandboxSize ? options.maxSandboxSize * 1024 * 1024 : undefined,
+        verbose: options.verbose,
       });
     } catch (error) {
       console.error('Connect failed:', error instanceof Error ? error.message : String(error));
@@ -351,6 +357,7 @@ program
   .option('--max-sandbox-size <mb>', 'Maximum sandbox size in MB (default: 100)', parseInt)
   .option('--no-ssh-config', 'Skip SSH host discovery (enabled by default)')
   .option('--no-launch-all', 'Skip starting agents on remote hosts (enabled by default)')
+  .option('--verbose', 'Show detailed debug output')
   .action(async (options) => {
     try {
       const { config } = await import('./lib/config.js');
@@ -370,6 +377,7 @@ program
           skipAuth: options.skipAuth,
           withSshConfig,
           returnInstalledHosts: launchAll,
+          verbose: options.verbose,
         });
         if (launchAll && result.installedHosts) {
           remoteHosts = result.installedHosts;
@@ -395,7 +403,7 @@ program
             logLevel: options.logLevel,
             preserveWorktrees: options.preserveWorktrees,
           },
-          (host, msg) => console.log(chalk.dim(`  [${host}] ${msg}`)),
+          options.verbose ? (host, msg) => console.log(chalk.dim(`  [${host}] ${msg}`)) : () => {},
         );
 
         // Report results
@@ -423,6 +431,7 @@ program
         allowNonGit: options.allowNonGit,
         useSandbox: options.sandbox,
         maxSandboxSize: options.maxSandboxSize ? options.maxSandboxSize * 1024 * 1024 : undefined,
+        verbose: options.verbose,
       });
     } catch (error) {
       console.error('Launch failed:', error instanceof Error ? error.message : String(error));

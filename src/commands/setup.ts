@@ -28,6 +28,7 @@ export interface SetupOptions {
   autoStart?: boolean;
   installMcp?: boolean;
   returnInstalledHosts?: boolean;
+  verbose?: boolean;
 }
 
 export interface SetupResult {
@@ -35,19 +36,23 @@ export interface SetupResult {
 }
 
 export async function setupCommand(options: SetupOptions = {}): Promise<SetupResult> {
+  const verbose = options.verbose ?? false;
+
   console.log(chalk.bold('\n🚀 Astro Agent Runner Setup\n'));
 
   // Reset config to defaults so setup always starts fresh
   config.reset();
-  console.log(chalk.dim('Configuration reset to defaults.'));
+  if (verbose) console.log(chalk.dim('Configuration reset to defaults.'));
 
   // Step 0: Initialize hardware-based machine ID
-  console.log(chalk.dim('Generating stable machine identifier...'));
+  if (verbose) console.log(chalk.dim('Generating stable machine identifier...'));
   const hwId = await config.initializeMachineId();
-  const hwSource = hwId.source === 'uuid' ? 'Hardware UUID' :
-                   hwId.source === 'mac' ? 'MAC Address' : 'Random UUID';
-  console.log(chalk.green(`✓ Machine ID: ${hwId.id.slice(0, 16)}... (from ${hwSource})`));
-  console.log();
+  if (verbose) {
+    const hwSource = hwId.source === 'uuid' ? 'Hardware UUID' :
+                     hwId.source === 'mac' ? 'MAC Address' : 'Random UUID';
+    console.log(chalk.green(`✓ Machine ID: ${hwId.id.slice(0, 16)}... (from ${hwSource})`));
+    console.log();
+  }
 
   // Step 1: Detect machine resources
   const resourceSpinner = ora('Detecting machine resources...').start();
@@ -55,7 +60,9 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
   try {
     resources = await getMachineResources();
     resourceSpinner.succeed('Machine resources detected');
-    console.log(chalk.dim(formatResourceSummary(resources)));
+    if (verbose) {
+      console.log(chalk.dim(formatResourceSummary(resources)));
+    }
     console.log();
   } catch (error) {
     resourceSpinner.fail('Failed to detect machine resources');
@@ -68,8 +75,9 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
   try {
     detectedProviders = await detectProviders();
     if (detectedProviders.length > 0) {
-      providerSpinner.succeed(`Found ${detectedProviders.length} agent provider(s)`);
-      console.log(chalk.dim(formatProvidersSummary(detectedProviders)));
+      const providerNames = detectedProviders.filter(p => p.available).map(p => p.name).join(', ');
+      providerSpinner.succeed(`Found ${detectedProviders.length} agent provider(s)${providerNames ? `: ${providerNames}` : ''}`);
+      if (verbose) console.log(chalk.dim(formatProvidersSummary(detectedProviders)));
     } else {
       providerSpinner.warn('No agent providers detected');
       console.log(chalk.yellow('  Install Claude Code or Codex to enable task execution'));
@@ -90,7 +98,7 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
       discoveredHosts = await discoverRemoteHosts();
       if (discoveredHosts.length > 0) {
         sshSpinner.succeed(`Found ${discoveredHosts.length} remote host(s)`);
-        console.log(chalk.dim(formatDiscoveredHosts(discoveredHosts)));
+        if (verbose) console.log(chalk.dim(formatDiscoveredHosts(discoveredHosts)));
       } else {
         sshSpinner.info('No remote hosts discovered');
       }
@@ -105,13 +113,13 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
   // Priority: --api flag > env vars (ASTRO_SERVER_URL, VITE_API_BASE_URL, CLOUDFLARED_DOMAIN) > stored config
   const apiUrl = options.api ?? config.getApiUrl();
   config.setApiUrl(apiUrl);
-  console.log(chalk.green(`✓ API server: ${apiUrl}\n`));
+  if (verbose) console.log(chalk.green(`✓ API server: ${apiUrl}\n`));
 
   // Step 4b: Configure relay URL
   // Priority: --relay flag > env vars (ASTRO_RELAY_URL, VITE_API_BASE_URL, CLOUDFLARED_DOMAIN) > stored config
   const relayUrl = options.relay ?? config.getRelayUrl();
   config.setRelayUrl(relayUrl);
-  console.log(chalk.green(`✓ Relay server: ${relayUrl}\n`));
+  if (verbose) console.log(chalk.green(`✓ Relay server: ${relayUrl}\n`));
 
   // Step 5: Device authentication (if not skipped)
   if (!options.skipAuth) {
@@ -123,8 +131,10 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
 
     if (hasTokens && existingMachineId) {
       // Always re-authenticate to get fresh tokens (old ones may have expired)
-      console.log(chalk.dim(`  Previously authenticated as ${existingMachineId}, refreshing tokens...`));
-      console.log();
+      if (verbose) {
+        console.log(chalk.dim(`  Previously authenticated as ${existingMachineId}, refreshing tokens...`));
+        console.log();
+      }
       await runDeviceAuthFlow(apiUrl, relayUrl, resources, detectedProviders, !!options.relay, hwId);
     } else if (!options.nonInteractive) {
       const { authenticate } = await inquirer.prompt<{ authenticate: boolean }>([
@@ -216,7 +226,7 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
     ]);
 
     if (selectedHosts.length > 0) {
-      const installed = await installOnRemoteHosts(selectedHosts, discoveredHosts, apiUrl, relayUrl);
+      const installed = await installOnRemoteHosts(selectedHosts, discoveredHosts, apiUrl, relayUrl, verbose);
       // Save installed hosts to config for --launch-all reuse
       if (installed.length > 0) {
         config.setRemoteHosts(installed);
@@ -249,47 +259,50 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
   // Summary
   console.log();
   console.log(chalk.bold.green('✓ Setup Complete!\n'));
-  console.log('Configuration saved to:', chalk.dim(config.getConfigPath()));
-  console.log();
-  console.log('Runner ID:', chalk.cyan(config.getRunnerId()));
-  console.log('Machine ID:', chalk.cyan(config.getMachineId()));
-  console.log('API URL:  ', chalk.cyan(config.getApiUrl()));
-  console.log('Relay URL:', chalk.cyan(config.getRelayUrl()));
-  console.log(
-    'Auth:    ',
-    config.getAccessToken() ? chalk.green('authenticated') : chalk.yellow('not configured'),
-  );
-  // Detect Claude auth: stored token > env var > CLI session
-  let claudeAuthStatus: string;
-  if (config.getClaudeOauthToken()) {
-    claudeAuthStatus = chalk.green('OAuth token configured');
-  } else if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
-    claudeAuthStatus = chalk.green('env variable configured');
-  } else {
-    // Check if claude CLI is available (will use its session automatically)
-    let hasCli = false;
-    try {
-      const { stdout } = await execFile(
-        process.platform === 'win32' ? 'where' : 'which',
-        ['claude'],
-        { timeout: 3000 },
-      );
-      if (stdout.trim()) hasCli = true;
-    } catch { /* not installed */ }
-    claudeAuthStatus = hasCli
-      ? chalk.green('CLI session (auto-detected)')
-      : chalk.yellow('not configured — run `claude login` or set ANTHROPIC_API_KEY');
+
+  if (verbose) {
+    console.log('Configuration saved to:', chalk.dim(config.getConfigPath()));
+    console.log();
+    console.log('Runner ID:', chalk.cyan(config.getRunnerId()));
+    console.log('Machine ID:', chalk.cyan(config.getMachineId()));
+    console.log('API URL:  ', chalk.cyan(config.getApiUrl()));
+    console.log('Relay URL:', chalk.cyan(config.getRelayUrl()));
+    console.log(
+      'Auth:    ',
+      config.getAccessToken() ? chalk.green('authenticated') : chalk.yellow('not configured'),
+    );
+    // Detect Claude auth: stored token > env var > CLI session
+    let claudeAuthStatus: string;
+    if (config.getClaudeOauthToken()) {
+      claudeAuthStatus = chalk.green('OAuth token configured');
+    } else if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
+      claudeAuthStatus = chalk.green('env variable configured');
+    } else {
+      // Check if claude CLI is available (will use its session automatically)
+      let hasCli = false;
+      try {
+        const { stdout } = await execFile(
+          process.platform === 'win32' ? 'where' : 'which',
+          ['claude'],
+          { timeout: 3000 },
+        );
+        if (stdout.trim()) hasCli = true;
+      } catch { /* not installed */ }
+      claudeAuthStatus = hasCli
+        ? chalk.green('CLI session (auto-detected)')
+        : chalk.yellow('not configured — run `claude login` or set ANTHROPIC_API_KEY');
+    }
+    console.log('Claude:  ', claudeAuthStatus);
+    console.log(
+      'Providers:',
+      providerTypes.length > 0 ? chalk.cyan(providerTypes.join(', ')) : chalk.yellow('none'),
+    );
+    console.log(
+      'MCP:     ',
+      mcpConfigured ? chalk.green('configured for Claude Code') : chalk.yellow('not configured'),
+    );
+    console.log();
   }
-  console.log('Claude:  ', claudeAuthStatus);
-  console.log(
-    'Providers:',
-    providerTypes.length > 0 ? chalk.cyan(providerTypes.join(', ')) : chalk.yellow('none'),
-  );
-  console.log(
-    'MCP:     ',
-    mcpConfigured ? chalk.green('configured for Claude Code') : chalk.yellow('not configured'),
-  );
-  console.log();
   console.log(chalk.bold('Next steps:'));
   console.log('  1. Start the agent runner:');
   console.log(chalk.cyan('     npx @astroanywhere/agent start'));
@@ -558,6 +571,7 @@ async function installOnRemoteHosts(
   discoveredHosts: DiscoveredHost[],
   apiUrl: string,
   relayUrl: string,
+  verbose = false,
 ): Promise<DiscoveredHost[]> {
   const installedHosts: DiscoveredHost[] = [];
   console.log();
@@ -595,9 +609,11 @@ async function installOnRemoteHosts(
     try {
       // Register each remote host as a separate machine with its own ID
       spinner.text = `${hostName}: Registering machine...`;
-      console.log();
-      console.log(chalk.dim(`[setup] Registering ${hostName} (${host.hostname}) at ${remoteApiUrl}`));
-      console.log(chalk.dim(`[setup] Using access token: ${localAccessToken.slice(0, 20)}...`));
+      if (verbose) {
+        console.log();
+        console.log(chalk.dim(`[setup] Registering ${hostName} (${host.hostname}) at ${remoteApiUrl}`));
+        console.log(chalk.dim(`[setup] Using access token: ${localAccessToken.slice(0, 20)}...`));
+      }
 
       const regResponse = await registerMachine(remoteApiUrl, localAccessToken, {
         hostname: host.hostname,
@@ -606,10 +622,12 @@ async function installOnRemoteHosts(
         providers: [],
       });
 
-      console.log(chalk.dim(`[setup] ✓ Machine registered with ID: ${regResponse.machineId}`));
-      console.log(chalk.dim(`[setup]   Access token: ${regResponse.accessToken.slice(0, 20)}...`));
-      console.log(chalk.dim(`[setup]   Refresh token: ${regResponse.refreshToken.slice(0, 20)}...`));
-      console.log(chalk.dim(`[setup]   WS token: ${regResponse.wsToken.slice(0, 20)}...`));
+      if (verbose) {
+        console.log(chalk.dim(`[setup] ✓ Machine registered with ID: ${regResponse.machineId}`));
+        console.log(chalk.dim(`[setup]   Access token: ${regResponse.accessToken.slice(0, 20)}...`));
+        console.log(chalk.dim(`[setup]   Refresh token: ${regResponse.refreshToken.slice(0, 20)}...`));
+        console.log(chalk.dim(`[setup]   WS token: ${regResponse.wsToken.slice(0, 20)}...`));
+      }
 
       await packAndInstall(
         {
@@ -630,7 +648,7 @@ async function installOnRemoteHosts(
     } catch (err) {
       spinner.fail(`${hostName}: Installation failed`);
       console.error(chalk.red(`  ${err instanceof Error ? err.message : String(err)}`));
-      if (err instanceof Error && err.stack) {
+      if (verbose && err instanceof Error && err.stack) {
         console.error(chalk.dim(`[setup] Stack trace: ${err.stack}`));
       }
     }
