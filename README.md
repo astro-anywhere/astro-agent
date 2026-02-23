@@ -2,6 +2,10 @@
 
 > Connect your machines to [Astro](https://astroanywhere.com) and let AI execute your tasks.
 
+## Prerequisites
+
+Register an account at [astroanywhere.com](https://astroanywhere.com) before getting started.
+
 ## Install
 
 ```bash
