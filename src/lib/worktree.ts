@@ -101,6 +101,14 @@ export async function createWorktree(
     { env: withGitEnv(), timeout: 30_000 }
   );
 
+  // Initialize submodules if the repo uses them (non-fatal)
+  try {
+    await initSubmodules(worktreePath, stderr);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    stderr?.(`submodule init failed: ${msg}`);
+  }
+
   // Orchestration: include files + setup script (both non-fatal)
   const log = stdout;
   try {
@@ -358,6 +366,34 @@ export async function ensureClaudeMdInWorktree(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[worktree] Failed to copy CLAUDE.md: ${msg}`);
+  }
+}
+
+/**
+ * Initialize and update git submodules in a worktree.
+ *
+ * Git worktrees don't automatically init submodules — the directories
+ * exist but are empty. We run `git submodule update --init --recursive`
+ * to populate them. This is skipped if no .gitmodules file exists.
+ */
+async function initSubmodules(
+  worktreePath: string,
+  stderr?: (data: string) => void,
+): Promise<void> {
+  if (!existsSync(join(worktreePath, '.gitmodules'))) {
+    return;
+  }
+
+  console.log(`[worktree] Initializing submodules in ${worktreePath}`);
+  try {
+    await execFileAsync(
+      'git',
+      ['-C', worktreePath, 'submodule', 'update', '--init', '--recursive'],
+      { env: withGitEnv(), timeout: 120_000 }
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    stderr?.(`[worktree] Submodule init failed: ${msg}`);
   }
 }
 
