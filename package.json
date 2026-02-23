@@ -1,5 +1,5 @@
 {
-  "name": "@astro/agent",
+  "name": "@astroanywhere/agent",
   "version": "0.1.0",
   "description": "Astro Agent Runner CLI - Lightweight agent runner for local, remote, and HPC environments",
   "type": "module",

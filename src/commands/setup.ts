@@ -278,10 +278,10 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
   console.log();
   console.log(chalk.bold('Next steps:'));
   console.log('  1. Start the agent runner:');
-  console.log(chalk.cyan('     npx @astro/agent start'));
+  console.log(chalk.cyan('     npx @astroanywhere/agent start'));
   console.log();
   console.log('  2. Or run in the foreground for testing:');
-  console.log(chalk.cyan('     npx @astro/agent start --foreground'));
+  console.log(chalk.cyan('     npx @astroanywhere/agent start --foreground'));
   console.log();
 
   if (mcpConfigured) {
@@ -667,7 +667,7 @@ async function configureMcpForClaudeCode(): Promise<boolean> {
 
     spinner.succeed('Claude Code MCP integration configured');
     console.log(chalk.dim(`  Config: ${configPath}`));
-    console.log(chalk.dim('  Server: astro (npx @astro/agent mcp)'));
+    console.log(chalk.dim('  Server: astro (npx @astroanywhere/agent mcp)'));
     console.log();
 
     return true;

@@ -7,10 +7,10 @@
  * Connects to the Astro relay server to receive and execute tasks.
  *
  * Usage:
- *   npx @astro/agent setup     - Initial setup and configuration
- *   npx @astro/agent start     - Start the agent runner
- *   npx @astro/agent stop      - Stop running agent
- *   npx @astro/agent status    - Show current status
+ *   npx @astroanywhere/agent setup     - Initial setup and configuration
+ *   npx @astroanywhere/agent start     - Start the agent runner
+ *   npx @astroanywhere/agent stop      - Stop running agent
+ *   npx @astroanywhere/agent status    - Show current status
  */
 
 import { Command } from 'commander';

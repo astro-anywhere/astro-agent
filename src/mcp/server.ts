@@ -178,7 +178,7 @@ export function getClaudeCodeMcpConfig(options: { execPath?: string } = {}): {
 } {
   // Default to using npx to run the CLI
   const command = options.execPath ?? 'npx';
-  const args = options.execPath ? ['mcp'] : ['@astro/agent', 'mcp'];
+  const args = options.execPath ? ['mcp'] : ['@astroanywhere/agent', 'mcp'];
 
   return {
     mcpServers: {

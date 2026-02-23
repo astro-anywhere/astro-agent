@@ -3,8 +3,8 @@
   <strong>Connect your machines. Let AI do the work.</strong>
   <br />
   <br />
-  <a href="https://www.npmjs.com/package/@astro/agent"><img src="https://img.shields.io/npm/v/@astro/agent?style=flat-square&color=0a0a1a&labelColor=0a0a1a&logo=npm&logoColor=white" alt="npm version"></a>
-  <a href="https://www.npmjs.com/package/@astro/agent"><img src="https://img.shields.io/npm/dm/@astro/agent?style=flat-square&color=0a0a1a&labelColor=0a0a1a&logo=npm&logoColor=white" alt="npm downloads"></a>
+  <a href="https://www.npmjs.com/package/@astroanywhere/agent"><img src="https://img.shields.io/npm/v/@astroanywhere/agent?style=flat-square&color=0a0a1a&labelColor=0a0a1a&logo=npm&logoColor=white" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@astroanywhere/agent"><img src="https://img.shields.io/npm/dm/@astroanywhere/agent?style=flat-square&color=0a0a1a&labelColor=0a0a1a&logo=npm&logoColor=white" alt="npm downloads"></a>
   <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D18-0a0a1a?style=flat-square&labelColor=0a0a1a&logo=node.js&logoColor=white" alt="node version"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-BSL--1.1-0a0a1a?style=flat-square&labelColor=0a0a1a" alt="license"></a>
   <br />
@@ -35,7 +35,7 @@ Create an account at [astroanywhere.com](https://astroanywhere.com) &mdash; you'
 ## Install
 
 ```bash
-npx @astro/agent launch
+npx @astroanywhere/agent launch
 ```
 
 One command. It detects your AI providers, finds your SSH hosts, authenticates you, sets up everything, and starts listening for tasks.
@@ -45,7 +45,7 @@ No global install. `npx` fetches the latest version.
 ## What Happens
 
 ```
-$ npx @astro/agent launch
+$ npx @astroanywhere/agent launch
 
   Detecting providers... claude-sdk, claude-code
   Discovering SSH hosts... found 3: lab-gpu, hpc-login, aws-dev
@@ -99,26 +99,26 @@ Your API keys stay on your machine. Astro never sees them.
 
 ```bash
 # First time — set up everything and start
-npx @astro/agent launch
+npx @astroanywhere/agent launch
 
 # Local only, skip SSH host discovery
-npx @astro/agent launch --no-ssh-config
+npx @astroanywhere/agent launch --no-ssh-config
 
 # Start (already set up)
-npx @astro/agent start -f
+npx @astroanywhere/agent start -f
 
 # Stop
-npx @astro/agent stop
+npx @astroanywhere/agent stop
 
 # Check what's running
-npx @astro/agent status
+npx @astroanywhere/agent status
 
 # Set up Claude authentication
-npx @astro/agent auth
+npx @astroanywhere/agent auth
 
 # View or change settings
-npx @astro/agent config --show
-npx @astro/agent config --set maxTasks=8
+npx @astroanywhere/agent config --show
+npx @astroanywhere/agent config --set maxTasks=8
 ```
 
 ## Remote Machines
@@ -128,7 +128,7 @@ npx @astro/agent config --set maxTasks=8
 To set up a single remote machine manually, SSH in and run:
 
 ```bash
-npx @astro/agent launch --no-ssh-config
+npx @astroanywhere/agent launch --no-ssh-config
 ```
 
 Astro picks the best available machine for each task based on load and capabilities.
@@ -148,7 +148,7 @@ Auto-detected. No configuration needed if any of these are installed:
 Use the agent runner as an MCP server inside Claude Code:
 
 ```bash
-npx @astro/agent mcp
+npx @astroanywhere/agent mcp
 ```
 
 This gives Claude Code access to Astro tools &mdash; attach to tasks, send updates, check status.

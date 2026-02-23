@@ -111,7 +111,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       withSshConfig: true,
     });
     if (!config.isSetupComplete()) {
-      console.log(chalk.red('Setup failed. Run manually: npx @astro/agent setup'));
+      console.log(chalk.red('Setup failed. Run manually: npx @astroanywhere/agent setup'));
       process.exit(1);
     }
   }
@@ -158,10 +158,10 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     console.log(chalk.dim(`  Runner ID: ${runnerId}`));
     console.log();
     console.log('To view logs:');
-    console.log(chalk.cyan('  npx @astro/agent logs'));
+    console.log(chalk.cyan('  npx @astroanywhere/agent logs'));
     console.log();
     console.log('To stop:');
-    console.log(chalk.cyan('  npx @astro/agent stop'));
+    console.log(chalk.cyan('  npx @astroanywhere/agent stop'));
 
     return;
   }
