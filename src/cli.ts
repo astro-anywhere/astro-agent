@@ -330,6 +330,7 @@ program
   .option('--allow-non-git', 'Allow execution in non-git directories without prompting')
   .option('--sandbox', 'Always use sandbox mode')
   .option('--max-sandbox-size <mb>', 'Maximum sandbox size in MB (default: 100)', parseInt)
+  .option('--with-ssh-config', 'Discover and configure remote hosts from SSH config')
   .action(async (options) => {
     try {
       const { config } = await import('./lib/config.js');
@@ -340,6 +341,7 @@ program
           relay: options.relay,
           hostname: options.hostname,
           skipAuth: options.skipAuth,
+          withSshConfig: options.withSshConfig,
         });
       }
 
