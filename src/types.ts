@@ -192,6 +192,8 @@ export type WSMessageType =
   | 'resource_update'
   | 'file_list_response'
   | 'slash_commands_response'
+  | 'repo_detect_response'
+  | 'git_init_response'
   // Server -> Client
   | 'registered'
   | 'heartbeat_ack'
@@ -205,6 +207,8 @@ export type WSMessageType =
   | 'repo_setup_request'
   | 'repo_setup_response'
   | 'slash_commands_request'
+  | 'repo_detect_request'
+  | 'git_init_request'
   | 'error';
 
 export interface WSMessage {
@@ -508,6 +512,53 @@ export interface SlashCommandsResponseMessage extends WSMessage {
   payload: {
     correlationId: string;
     commands: Array<{ name: string; description: string }>;
+  };
+}
+
+export interface RepoDetectRequestMessage extends WSMessage {
+  type: 'repo_detect_request';
+  payload: {
+    correlationId: string;
+    path: string;
+  };
+}
+
+export interface RepoDetectResponseMessage extends WSMessage {
+  type: 'repo_detect_response';
+  payload: {
+    correlationId: string;
+    exists: boolean;
+    isGit: boolean;
+    remoteUrl?: string;
+    remoteType: 'github' | 'gitlab' | 'bitbucket' | 'generic' | 'none';
+    baseBranch?: string;
+    suggestedDeliveryMode: 'pr' | 'push' | 'branch' | 'direct';
+    dirSizeMB?: number | null;
+    error?: string;
+  };
+}
+
+export interface GitInitRequestMessage extends WSMessage {
+  type: 'git_init_request';
+  payload: {
+    correlationId: string;
+    workingDirectory: string;
+    projectId: string;
+    projectName: string;
+    projectDescription?: string;
+  };
+}
+
+export interface GitInitResponseMessage extends WSMessage {
+  type: 'git_init_response';
+  payload: {
+    correlationId: string;
+    success: boolean;
+    workingDirectory?: string;
+    fileTree?: string[];
+    source?: Record<string, unknown>;
+    deliveryMode?: string;
+    error?: string;
   };
 }
 

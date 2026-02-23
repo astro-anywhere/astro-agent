@@ -35,6 +35,10 @@ import type {
   RepoSetupResponseMessage,
   SlashCommandsRequestMessage,
   SlashCommandsResponseMessage,
+  RepoDetectRequestMessage,
+  RepoDetectResponseMessage,
+  GitInitRequestMessage,
+  GitInitResponseMessage,
   ProviderInfo,
   ExecutionStrategyInfo,
   RunnerConfig,
@@ -71,6 +75,8 @@ export interface WebSocketClientOptions {
   onFileList?: (path: string, correlationId: string) => void;
   onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
   onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
+  onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
+  onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
   version?: string;
   wsToken?: string;
 }
@@ -87,6 +93,8 @@ type IncomingMessage =
   | FileListRequestMessage
   | RepoSetupRequestMessage
   | SlashCommandsRequestMessage
+  | RepoDetectRequestMessage
+  | GitInitRequestMessage
   | ErrorMessage;
 
 export class WebSocketClient {
@@ -115,6 +123,8 @@ export class WebSocketClient {
   private onFileList?: (path: string, correlationId: string) => void;
   private onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
   private onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
+  private onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
+  private onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
 
   constructor(options: WebSocketClientOptions) {
     this.runnerId = options.runnerId;
@@ -132,6 +142,8 @@ export class WebSocketClient {
     this.onFileList = options.onFileList;
     this.onRepoSetup = options.onRepoSetup;
     this.onSlashCommands = options.onSlashCommands;
+    this.onRepoDetect = options.onRepoDetect;
+    this.onGitInit = options.onGitInit;
   }
 
   /**
@@ -639,6 +651,28 @@ export class WebSocketClient {
         return;
       }
 
+      // Handle repo_detect.request (dot notation from relay)
+      if (raw.type === 'repo_detect.request') {
+        const detectMsg: RepoDetectRequestMessage = {
+          type: 'repo_detect_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: raw.payload as RepoDetectRequestMessage['payload'],
+        };
+        this.handleRepoDetectRequest(detectMsg);
+        return;
+      }
+
+      // Handle git_init.request (dot notation from relay)
+      if (raw.type === 'git_init.request') {
+        const gitInitMsg: GitInitRequestMessage = {
+          type: 'git_init_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: raw.payload as GitInitRequestMessage['payload'],
+        };
+        this.handleGitInitRequest(gitInitMsg);
+        return;
+      }
+
       const message = raw as unknown as IncomingMessage;
       this.routeMessage(message);
     } catch (error) {
@@ -680,6 +714,12 @@ export class WebSocketClient {
         break;
       case 'slash_commands_request':
         this.handleSlashCommandsRequest(message as SlashCommandsRequestMessage);
+        break;
+      case 'repo_detect_request':
+        this.handleRepoDetectRequest(message as RepoDetectRequestMessage);
+        break;
+      case 'git_init_request':
+        this.handleGitInitRequest(message as GitInitRequestMessage);
         break;
       case 'error':
         this.handleError(message);
@@ -803,6 +843,44 @@ export class WebSocketClient {
   ): void {
     const msg: RepoSetupResponseMessage = {
       type: 'repo_setup_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, ...result },
+    };
+    this.send(msg);
+  }
+
+  private handleRepoDetectRequest(message: RepoDetectRequestMessage): void {
+    this.onRepoDetect?.(message.payload);
+  }
+
+  /**
+   * Send repo detect response
+   */
+  sendRepoDetectResponse(
+    correlationId: string,
+    result: Omit<RepoDetectResponseMessage['payload'], 'correlationId'>,
+  ): void {
+    const msg: RepoDetectResponseMessage = {
+      type: 'repo_detect_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, ...result },
+    };
+    this.send(msg);
+  }
+
+  private handleGitInitRequest(message: GitInitRequestMessage): void {
+    this.onGitInit?.(message.payload);
+  }
+
+  /**
+   * Send git init response
+   */
+  sendGitInitResponse(
+    correlationId: string,
+    result: Omit<GitInitResponseMessage['payload'], 'correlationId'>,
+  ): void {
+    const msg: GitInitResponseMessage = {
+      type: 'git_init_response',
       timestamp: new Date().toISOString(),
       payload: { correlationId, ...result },
     };

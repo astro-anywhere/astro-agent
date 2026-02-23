@@ -5,7 +5,7 @@
 import chalk from 'chalk';
 import ora from 'ora';
 import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, existsSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -16,7 +16,7 @@ import { WebSocketClient } from '../lib/websocket-client.js';
 import { TaskExecutor } from '../lib/task-executor.js';
 import { localRepoSetup } from '../lib/repo-utils.js';
 import { executionStrategyRegistry } from '../execution/index.js';
-import type { RunnerEvent, Task, RepoSetupRequestMessage } from '../types.js';
+import type { RunnerEvent, Task, RepoSetupRequestMessage, RepoDetectRequestMessage, GitInitRequestMessage } from '../types.js';
 
 interface StartOptions {
   foreground?: boolean;
@@ -343,6 +343,191 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     } catch (error) {
       log('error', `Repo setup failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
       wsClient.sendRepoSetupResponse(correlationId, {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  wsClient['onRepoDetect'] = (payload: RepoDetectRequestMessage['payload']) => {
+    const { correlationId, path: dirPath } = payload;
+    log('info', `Repo detect request: path=${dirPath}`, logLevel);
+    try {
+      if (!existsSync(dirPath)) {
+        wsClient.sendRepoDetectResponse(correlationId, {
+          exists: false,
+          isGit: false,
+          remoteType: 'none',
+          suggestedDeliveryMode: 'branch',
+        });
+        return;
+      }
+
+      // Check if it's a git repo
+      let isGit = false;
+      try {
+        execFileSync('git', ['-C', dirPath, 'rev-parse', '--is-inside-work-tree'], {
+          encoding: 'utf-8',
+          timeout: 5_000,
+          stdio: 'pipe',
+        });
+        isGit = true;
+      } catch {
+        // Not a git repo
+      }
+
+      if (!isGit) {
+        // Compute directory size for non-git directories
+        let dirSizeMB: number | null = null;
+        try {
+          const duOutput = execFileSync('du', ['-sk', dirPath], {
+            encoding: 'utf-8',
+            timeout: 10_000,
+            stdio: 'pipe',
+          });
+          const kb = parseInt(duOutput.trim().split(/\s+/)[0], 10);
+          if (!isNaN(kb)) {
+            dirSizeMB = Math.round((kb / 1024) * 100) / 100;
+          }
+        } catch {
+          // Non-fatal
+        }
+
+        wsClient.sendRepoDetectResponse(correlationId, {
+          exists: true,
+          isGit: false,
+          remoteType: 'none',
+          suggestedDeliveryMode: 'direct',
+          dirSizeMB,
+        });
+        return;
+      }
+
+      // Get remote URL
+      let remoteUrl: string | undefined;
+      try {
+        const url = execFileSync('git', ['-C', dirPath, 'remote', 'get-url', 'origin'], {
+          encoding: 'utf-8',
+          timeout: 5_000,
+          stdio: 'pipe',
+        }).trim();
+        if (url) remoteUrl = url;
+      } catch {
+        // No remote
+      }
+
+      // Get default branch
+      let baseBranch = 'main';
+      try {
+        const branch = execFileSync('git', ['-C', dirPath, 'symbolic-ref', '--short', 'HEAD'], {
+          encoding: 'utf-8',
+          timeout: 5_000,
+          stdio: 'pipe',
+        }).trim();
+        if (branch) baseBranch = branch;
+      } catch {
+        // Default to 'main'
+      }
+
+      // Detect remote type
+      const detectRemoteType = (url: string | undefined): 'github' | 'gitlab' | 'bitbucket' | 'generic' | 'none' => {
+        if (!url) return 'none';
+        const lower = url.toLowerCase();
+        if (lower.includes('github.com')) return 'github';
+        if (lower.includes('gitlab.com') || lower.includes('gitlab.')) return 'gitlab';
+        if (lower.includes('bitbucket.org') || lower.includes('bitbucket.')) return 'bitbucket';
+        if (lower.startsWith('git@') || lower.startsWith('http') || lower.startsWith('ssh://')) return 'generic';
+        return 'none';
+      };
+
+      const remoteType = detectRemoteType(remoteUrl);
+      let suggestedDeliveryMode: 'pr' | 'push' | 'branch' | 'direct' = 'branch';
+      switch (remoteType) {
+        case 'github':
+        case 'gitlab':
+        case 'bitbucket':
+          suggestedDeliveryMode = 'pr';
+          break;
+        case 'generic':
+          suggestedDeliveryMode = 'push';
+          break;
+        case 'none':
+        default:
+          suggestedDeliveryMode = 'branch';
+          break;
+      }
+
+      wsClient.sendRepoDetectResponse(correlationId, {
+        exists: true,
+        isGit: true,
+        remoteUrl,
+        remoteType,
+        baseBranch,
+        suggestedDeliveryMode,
+      });
+      log('info', `Repo detect result: isGit=true remote=${remoteType} branch=${baseBranch}`, logLevel);
+    } catch (error) {
+      log('error', `Repo detect failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+      wsClient.sendRepoDetectResponse(correlationId, {
+        exists: false,
+        isGit: false,
+        remoteType: 'none',
+        suggestedDeliveryMode: 'branch',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  wsClient['onGitInit'] = (payload: GitInitRequestMessage['payload']) => {
+    const { correlationId, workingDirectory, projectName } = payload;
+    log('info', `Git init request: dir=${workingDirectory}`, logLevel);
+    try {
+      // Initialize git, create .gitignore, initial commit
+      execFileSync('git', ['init'], { cwd: workingDirectory, stdio: 'pipe', timeout: 10_000 });
+      execFileSync('git', ['config', 'user.name', 'Astro Agent'], { cwd: workingDirectory, stdio: 'pipe', timeout: 5_000 });
+      execFileSync('git', ['config', 'user.email', 'agent@astro.local'], { cwd: workingDirectory, stdio: 'pipe', timeout: 5_000 });
+
+      // Generate basic .gitignore if missing
+      const gitignorePath = join(workingDirectory, '.gitignore');
+      if (!existsSync(gitignorePath)) {
+        writeFileSync(gitignorePath, 'node_modules/\n.env\n.DS_Store\n*.log\n');
+      }
+
+      // Initial commit
+      try {
+        execFileSync('git', ['add', '-A'], { cwd: workingDirectory, stdio: 'pipe', timeout: 10_000 });
+        execFileSync('git', ['commit', '-m', `Initial commit for ${projectName}`, '--allow-empty'], {
+          cwd: workingDirectory,
+          stdio: 'pipe',
+          timeout: 10_000,
+        });
+      } catch {
+        // Non-fatal: might be empty directory
+      }
+
+      // Get file tree after init
+      let fileTree: string[] = [];
+      try {
+        const output = execFileSync('git', ['ls-files'], {
+          cwd: workingDirectory,
+          encoding: 'utf-8',
+          timeout: 10_000,
+          maxBuffer: 5 * 1024 * 1024,
+        });
+        fileTree = output.trim().split('\n').filter(Boolean);
+      } catch {
+        // Non-fatal
+      }
+
+      wsClient.sendGitInitResponse(correlationId, {
+        success: true,
+        workingDirectory,
+        fileTree,
+      });
+      log('info', `Git init result: success=true files=${fileTree.length}`, logLevel);
+    } catch (error) {
+      log('error', `Git init failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+      wsClient.sendGitInitResponse(correlationId, {
         success: false,
         error: error instanceof Error ? error.message : String(error),
       });
