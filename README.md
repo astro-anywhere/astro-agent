@@ -35,7 +35,7 @@ Create an account at [astroanywhere.com](https://astroanywhere.com) &mdash; you'
 ## Install
 
 ```bash
-npx @astroanywhere/agent launch
+npx @astroanywhere/agent@latest launch
 ```
 
 One command. It detects your AI providers, finds your SSH hosts, authenticates you, sets up everything, and starts listening for tasks.
@@ -45,7 +45,7 @@ No global install. `npx` fetches the latest version.
 ## What Happens
 
 ```
-$ npx @astroanywhere/agent launch
+$ npx @astroanywhere/agent@latest launch
 
   Detecting providers... claude-sdk, claude-code
   Discovering SSH hosts... found 3: lab-gpu, hpc-login, aws-dev
@@ -99,26 +99,26 @@ Your API keys stay on your machine. Astro never sees them.
 
 ```bash
 # First time — set up everything and start
-npx @astroanywhere/agent launch
+npx @astroanywhere/agent@latest launch
 
 # Local only, skip SSH host discovery
-npx @astroanywhere/agent launch --no-ssh-config
+npx @astroanywhere/agent@latest launch --no-ssh-config
 
 # Start (already set up)
-npx @astroanywhere/agent start -f
+npx @astroanywhere/agent@latest start -f
 
 # Stop
-npx @astroanywhere/agent stop
+npx @astroanywhere/agent@latest stop
 
 # Check what's running
-npx @astroanywhere/agent status
+npx @astroanywhere/agent@latest status
 
 # Set up Claude authentication
-npx @astroanywhere/agent auth
+npx @astroanywhere/agent@latest auth
 
 # View or change settings
-npx @astroanywhere/agent config --show
-npx @astroanywhere/agent config --set maxTasks=8
+npx @astroanywhere/agent@latest config --show
+npx @astroanywhere/agent@latest config --set maxTasks=8
 ```
 
 ## Remote Machines
@@ -128,7 +128,7 @@ npx @astroanywhere/agent config --set maxTasks=8
 To set up a single remote machine manually, SSH in and run:
 
 ```bash
-npx @astroanywhere/agent launch --no-ssh-config
+npx @astroanywhere/agent@latest launch --no-ssh-config
 ```
 
 Astro picks the best available machine for each task based on load and capabilities.
@@ -148,7 +148,7 @@ Auto-detected. No configuration needed if any of these are installed:
 Use the agent runner as an MCP server inside Claude Code:
 
 ```bash
-npx @astroanywhere/agent mcp
+npx @astroanywhere/agent@latest mcp
 ```
 
 This gives Claude Code access to Astro tools &mdash; attach to tasks, send updates, check status.
