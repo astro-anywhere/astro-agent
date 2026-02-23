@@ -315,6 +315,50 @@ program
     console.log(formatDiscoveredHosts(hosts));
   });
 
+// Launch command (setup + start in one step)
+program
+  .command('launch')
+  .description('Setup (if needed) and start the agent runner in one step')
+  .option('--api <url>', 'API server URL')
+  .option('--relay <url>', 'Override relay server URL')
+  .option('--hostname <hostname>', 'Machine hostname')
+  .option('--skip-auth', 'Skip device authentication')
+  .option('--max-tasks <number>', 'Maximum concurrent tasks', parseInt)
+  .option('--log-level <level>', 'Log level: debug, info, warn, error')
+  .option('--force-setup', 'Force re-run setup even if already configured')
+  .option('--preserve-worktrees', 'Preserve worktrees after task completion')
+  .option('--allow-non-git', 'Allow execution in non-git directories without prompting')
+  .option('--sandbox', 'Always use sandbox mode')
+  .option('--max-sandbox-size <mb>', 'Maximum sandbox size in MB (default: 100)', parseInt)
+  .action(async (options) => {
+    try {
+      const { config } = await import('./lib/config.js');
+
+      if (options.forceSetup || !config.isSetupComplete()) {
+        await setupCommand({
+          api: options.api,
+          relay: options.relay,
+          hostname: options.hostname,
+          skipAuth: options.skipAuth,
+        });
+      }
+
+      await startCommand({
+        foreground: true,
+        relay: options.relay,
+        maxTasks: options.maxTasks,
+        logLevel: options.logLevel,
+        preserveWorktrees: options.preserveWorktrees,
+        allowNonGit: options.allowNonGit,
+        useSandbox: options.sandbox,
+        maxSandboxSize: options.maxSandboxSize ? options.maxSandboxSize * 1024 * 1024 : undefined,
+      });
+    } catch (error) {
+      console.error('Launch failed:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
 // MCP command (start MCP server for Claude Code integration)
 program
   .command('mcp')

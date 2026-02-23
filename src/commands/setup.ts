@@ -32,6 +32,10 @@ interface SetupOptions {
 export async function setupCommand(options: SetupOptions = {}): Promise<void> {
   console.log(chalk.bold('\n🚀 Astro Agent Runner Setup\n'));
 
+  // Reset config to defaults so setup always starts fresh
+  config.reset();
+  console.log(chalk.dim('Configuration reset to defaults.'));
+
   // Step 0: Initialize hardware-based machine ID
   console.log(chalk.dim('Generating stable machine identifier...'));
   const hwId = await config.initializeMachineId();

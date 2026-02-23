@@ -8,8 +8,8 @@ import type { StoredConfig, ProviderType } from '../types.js';
 import { getHardwareId } from './hardware-id.js';
 
 // Production defaults (Fly.io backend)
-const DEFAULT_API_URL = 'https://astro-backend-deploy.fly.dev';
-const DEFAULT_RELAY_URL = 'wss://astro-backend-deploy.fly.dev:3002';
+const DEFAULT_API_URL = 'https://api.astroanywhere.com';
+const DEFAULT_RELAY_URL = 'wss://relay.astroanywhere.com:3002';
 
 /**
  * Derive API and relay URLs from environment variables.
