@@ -188,31 +188,10 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
         stream.stderr(text);
       });
 
-      proc.on('error', (error) => {
-        console.error(`[claude-code] Process error:`, error);
-        signal.removeEventListener('abort', abortHandler);
-        reject(error);
-      });
-
-      proc.on('close', (code) => {
-        // Flush remaining buffer
-        if (lineBuf.trim()) {
-          this.handleStreamLine(lineBuf, stream);
-        }
-        console.log(`[claude-code] Process exited with code ${code}, stdout=${stdout.length} chars, stderr=${stderr.length} chars`);
-        signal.removeEventListener('abort', abortHandler);
-
-        resolve({
-          exitCode: code ?? 1,
-          output: stdout,
-          error: stderr || undefined,
-          artifacts: artifacts.length > 0 ? artifacts : undefined,
-        });
-      });
-
-      // Set up timeout if specified
+      // Set up timeout if specified (declared before close handler so it can be cleared)
+      let taskTimeoutHandle: NodeJS.Timeout | undefined;
       if (task.timeout) {
-        setTimeout(() => {
+        taskTimeoutHandle = setTimeout(() => {
           if (!proc.killed) {
             proc.kill('SIGTERM');
             setTimeout(() => {
@@ -223,6 +202,30 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           }
         }, task.timeout);
       }
+
+      proc.on('error', (error) => {
+        console.error(`[claude-code] Process error:`, error);
+        signal.removeEventListener('abort', abortHandler);
+        if (taskTimeoutHandle) clearTimeout(taskTimeoutHandle);
+        reject(error);
+      });
+
+      proc.on('close', (code) => {
+        // Flush remaining buffer
+        if (lineBuf.trim()) {
+          this.handleStreamLine(lineBuf, stream);
+        }
+        console.log(`[claude-code] Process exited with code ${code}, stdout=${stdout.length} chars, stderr=${stderr.length} chars`);
+        signal.removeEventListener('abort', abortHandler);
+        if (taskTimeoutHandle) clearTimeout(taskTimeoutHandle);
+
+        resolve({
+          exitCode: code ?? 1,
+          output: stdout,
+          error: stderr || undefined,
+          artifacts: artifacts.length > 0 ? artifacts : undefined,
+        });
+      });
     });
   }
 

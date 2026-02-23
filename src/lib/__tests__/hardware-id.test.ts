@@ -34,6 +34,7 @@ let mockExecFileImpl: (...args: unknown[]) => Promise<{ stdout: string; stderr: 
 let mockUsername = 'testuser'
 let mockUserInfoThrows = false
 let mockNetworkInterfaces: Record<string, Array<{ address: string; mac: string; internal: boolean; family: string; netmask: string; cidr: string }>> = {}
+let mockReadFileImpl: (path: string, encoding?: string) => Promise<string>
 
 // Mock node:util so that promisify(execFileCb) returns our controllable mock
 vi.mock('node:util', () => ({
@@ -41,6 +42,11 @@ vi.mock('node:util', () => ({
     // Return a function that delegates to the mutable mockExecFileImpl
     return (...args: unknown[]) => mockExecFileImpl(...args)
   },
+}))
+
+// Mock node:fs/promises so that readFile (used on Linux for sysfs UUID) is controllable
+vi.mock('node:fs/promises', () => ({
+  readFile: (path: string, encoding?: string) => mockReadFileImpl(path, encoding),
 }))
 
 // Mock node:os
@@ -59,6 +65,7 @@ describe('Hardware ID', () => {
     vi.resetModules()
     // Reset mock state to safe defaults
     mockExecFileImpl = () => Promise.reject(new Error('command not found'))
+    mockReadFileImpl = () => Promise.reject(new Error('file not found'))
     mockUsername = 'testuser'
     mockUserInfoThrows = false
     mockNetworkInterfaces = {}
@@ -71,6 +78,7 @@ describe('Hardware ID', () => {
   describe('getHardwareId', () => {
     it('should return an ID in UUID format when hardware UUID is available', async () => {
       const fakeUuid = 'FAKE-UUID-1234-5678-ABCDEF012345'
+      // macOS path: system_profiler via execFile
       mockExecFileImpl = () =>
         Promise.resolve({
           stdout: JSON.stringify({
@@ -78,6 +86,13 @@ describe('Hardware ID', () => {
           }),
           stderr: '',
         })
+      // Linux path: sysfs readFile
+      mockReadFileImpl = (path: string) => {
+        if (path === '/sys/class/dmi/id/product_uuid') {
+          return Promise.resolve(fakeUuid + '\n')
+        }
+        return Promise.reject(new Error('file not found'))
+      }
       mockUsername = 'testuser'
 
       const { getHardwareId } = await import('../hardware-id.js')
@@ -156,6 +171,12 @@ describe('Hardware ID', () => {
           }),
           stderr: '',
         })
+      mockReadFileImpl = (path: string) => {
+        if (path === '/sys/class/dmi/id/product_uuid') {
+          return Promise.resolve(fakeUuid + '\n')
+        }
+        return Promise.reject(new Error('file not found'))
+      }
       mockUsername = 'deterministic-user'
 
       const { getHardwareId } = await import('../hardware-id.js')
@@ -176,6 +197,12 @@ describe('Hardware ID', () => {
           }),
           stderr: '',
         })
+      mockReadFileImpl = (path: string) => {
+        if (path === '/sys/class/dmi/id/product_uuid') {
+          return Promise.resolve(fakeUuid + '\n')
+        }
+        return Promise.reject(new Error('file not found'))
+      }
 
       // Get ID for alice
       mockUsername = 'alice'
@@ -213,6 +240,12 @@ describe('Hardware ID', () => {
           }),
           stderr: '',
         })
+      mockReadFileImpl = (path: string) => {
+        if (path === '/sys/class/dmi/id/product_uuid') {
+          return Promise.resolve(fakeUuid + '\n')
+        }
+        return Promise.reject(new Error('file not found'))
+      }
       mockUserInfoThrows = true
 
       const originalUser = process.env.USER

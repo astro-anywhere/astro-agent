@@ -320,8 +320,11 @@ async function ensureGitignoreEntry(gitRoot: string, pattern: string): Promise<v
       const lines = content.split('\n').map((l) => l.trim());
       if (lines.includes(pattern)) return;
       // Append with a preceding newline if the file doesn't end with one
+      // Only add comment header if not already present in the file
       const prefix = content.endsWith('\n') ? '' : '\n';
-      await appendFile(gitignorePath, `${prefix}\n# Astro agent directory\n${pattern}\n`);
+      const hasComment = lines.includes('# Astro agent directory');
+      const entry = hasComment ? `${prefix}${pattern}\n` : `${prefix}\n# Astro agent directory\n${pattern}\n`;
+      await appendFile(gitignorePath, entry);
     } else {
       await appendFile(gitignorePath, `# Astro agent directory\n${pattern}\n`);
     }

@@ -379,13 +379,23 @@ export class TaskExecutor {
       { id: 'cancel', label: 'Cancel task', description: 'Do not execute this task' },
     ];
 
-    // Create promise that will be resolved when decision arrives
+    // Create promise that will be resolved when decision arrives, with a 5-minute timeout
+    const SAFETY_DECISION_TIMEOUT_MS = 5 * 60 * 1000;
     const decisionPromise = new Promise<'proceed' | 'init-git' | 'sandbox' | 'cancel'>((resolve) => {
       this.pendingSafetyChecks.set(task.id, {
         task,
         safetyResult: safetyCheck,
         resolveDecision: resolve,
       });
+
+      // Auto-cancel if no decision within timeout
+      setTimeout(() => {
+        if (this.pendingSafetyChecks.has(task.id)) {
+          console.warn(`[executor] Safety decision for task ${task.id} timed out after ${SAFETY_DECISION_TIMEOUT_MS / 1000}s, auto-cancelling`);
+          this.pendingSafetyChecks.delete(task.id);
+          resolve('cancel');
+        }
+      }, SAFETY_DECISION_TIMEOUT_MS).unref();
     });
 
     // Send prompt
@@ -708,8 +718,15 @@ export class TaskExecutor {
         await prepared.cleanup({ keepBranch: false });
       }
 
-      // Cleanup sandbox if used
+      // Sandbox: copy back results then cleanup
       if (sandbox) {
+        try {
+          console.log(`[executor] Task ${task.id}: copying back sandbox results`);
+          await sandbox.copyBack();
+        } catch (copyBackErr) {
+          const msg = copyBackErr instanceof Error ? copyBackErr.message : String(copyBackErr);
+          console.error(`[executor] Task ${task.id}: sandbox copyBack failed: ${msg}`);
+        }
         console.log(`[executor] Task ${task.id}: cleaning up sandbox`);
         await sandbox.cleanup();
       }
@@ -822,8 +839,8 @@ export class TaskExecutor {
     while (this.runningTasks.size < this.maxConcurrentTasks && this.taskQueue.length > 0) {
       const task = this.taskQueue.shift();
       if (task) {
-        this.executeTask(task).catch(() => {
-          // Error already handled in executeTask
+        this.executeTask(task).catch((err) => {
+          console.error(`[executor] Queued task ${task.id} failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`);
         });
       }
     }

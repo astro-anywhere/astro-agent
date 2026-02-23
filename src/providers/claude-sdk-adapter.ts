@@ -387,9 +387,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       process.env.CLAUDE_CONFIG_DIR = join(homedir(), '.claude');
     }
 
-    // Enable SDK debug logging to diagnose MCP connection issues
-    process.env.DEBUG_SDK = '1';
-    process.env.CLAUDE_CODE_DEBUG_LOGS_DIR = join(homedir(), '.astro', 'logs', 'sdk-debug');
+    // Enable SDK debug logging only when explicitly requested
+    if (process.env.ASTRO_LOG_LEVEL === 'debug') {
+      process.env.DEBUG_SDK = '1';
+      process.env.CLAUDE_CODE_DEBUG_LOGS_DIR = join(homedir(), '.astro', 'logs', 'sdk-debug');
+    }
 
     // NOTE: We intentionally do NOT call process.chdir() here.
     // process.cwd() is global state shared across concurrent tasks, so calling
@@ -523,9 +525,6 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     // Load MCP servers from config if available
     const agentConfig = config.getConfig();
-    console.log(`[claude-sdk] Agent config loaded:`, JSON.stringify(agentConfig, null, 2));
-    console.log(`[claude-sdk] mcpServers present:`, !!agentConfig.mcpServers);
-    console.log(`[claude-sdk] mcpServers keys:`, agentConfig.mcpServers ? Object.keys(agentConfig.mcpServers) : 'N/A');
     if (agentConfig.mcpServers && Object.keys(agentConfig.mcpServers).length > 0) {
       console.log(`[claude-sdk] Loading ${Object.keys(agentConfig.mcpServers).length} MCP server(s): ${Object.keys(agentConfig.mcpServers).join(', ')}`);
 
@@ -547,7 +546,6 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       // Allow all MCP tools from configured servers
       const allowedTools = Object.keys(mcpServers).map(name => `mcp__${name}__*`);
       (options as Record<string, unknown>).allowedTools = allowedTools;
-      console.log(`[claude-sdk] Allowed MCP tools:`, allowedTools);
     }
 
     // Build the prompt: use messages array if provided (chat tasks), otherwise flat string

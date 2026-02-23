@@ -4,7 +4,7 @@
  * Runs commands inside Docker containers via `docker run`.
  */
 
-import { spawn, exec, type ChildProcess } from 'node:child_process';
+import { spawn, execFile as execFileCb, type ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import type {
   ExecutionStrategy,
@@ -15,7 +15,15 @@ import type {
   ExecutionJobStatus,
 } from './types.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFileCb);
+
+/** Validate that a job ID is safe for use as a Docker container name */
+function validateDockerName(jobId: string): string {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(jobId)) {
+    throw new Error(`Invalid job ID for Docker container name: ${jobId}`);
+  }
+  return jobId;
+}
 
 const DEFAULT_IMAGE = 'node:22-slim';
 
@@ -37,7 +45,7 @@ export class DockerStrategy implements ExecutionStrategy {
 
   async detect(): Promise<ExecutionStrategyDetection> {
     try {
-      const { stdout } = await execAsync("docker info --format '{{.ServerVersion}}'", {
+      const { stdout } = await execFileAsync('docker', ['info', '--format', '{{.ServerVersion}}'], {
         timeout: 10000,
       });
       const version = stdout.trim();
@@ -48,8 +56,8 @@ export class DockerStrategy implements ExecutionStrategy {
       // Get additional metadata
       let osArch: string | undefined;
       try {
-        const { stdout: infoOut } = await execAsync(
-          "docker info --format '{{.OSType}}/{{.Architecture}}'",
+        const { stdout: infoOut } = await execFileAsync(
+          'docker', ['info', '--format', '{{.OSType}}/{{.Architecture}}'],
           { timeout: 5000 },
         );
         osArch = infoOut.trim();
@@ -97,7 +105,7 @@ export class DockerStrategy implements ExecutionStrategy {
     const args: string[] = ['run', '--rm'];
 
     // Container name for tracking
-    const containerName = `astro-${spec.jobId}`;
+    const containerName = `astro-${validateDockerName(spec.jobId)}`;
     args.push('--name', containerName);
 
     // Volume mount: map cwd into container
@@ -163,7 +171,7 @@ export class DockerStrategy implements ExecutionStrategy {
       const onAbort = () => {
         if (!settled) {
           // Stop the container gracefully
-          execAsync(`docker stop ${containerName}`, { timeout: 15000 }).catch(() => {
+          execFileAsync('docker', ['stop', containerName], { timeout: 15000 }).catch(() => {
             // Container might already be stopped
           });
           finish({ status: 'cancelled', output: stdout, error: stderr, externalJobId: containerName });
@@ -176,7 +184,7 @@ export class DockerStrategy implements ExecutionStrategy {
       if (spec.timeout && spec.timeout > 0) {
         timeoutHandle = setTimeout(() => {
           if (!settled) {
-            execAsync(`docker stop ${containerName}`, { timeout: 15000 }).catch(() => {});
+            execFileAsync('docker', ['stop', containerName], { timeout: 15000 }).catch(() => {});
             finish({ status: 'timeout', output: stdout, error: stderr, externalJobId: containerName });
           }
         }, spec.timeout);
@@ -224,12 +232,12 @@ export class DockerStrategy implements ExecutionStrategy {
     const containerName = this.containers.get(jobId);
     if (containerName) {
       try {
-        await execAsync(`docker stop ${containerName}`, { timeout: 15000 });
+        await execFileAsync('docker', ['stop', containerName], { timeout: 15000 });
       } catch {
         // Container might already be stopped
       }
       try {
-        await execAsync(`docker rm -f ${containerName}`, { timeout: 10000 });
+        await execFileAsync('docker', ['rm', '-f', containerName], { timeout: 10000 });
       } catch {
         // Ignore
       }
@@ -248,8 +256,8 @@ export class DockerStrategy implements ExecutionStrategy {
     if (!containerName) return null;
 
     try {
-      const { stdout } = await execAsync(
-        `docker inspect --format '{{.State.Status}}' ${containerName}`,
+      const { stdout } = await execFileAsync(
+        'docker', ['inspect', '--format', '{{.State.Status}}', containerName],
         { timeout: 5000 },
       );
       const state = stdout.trim();

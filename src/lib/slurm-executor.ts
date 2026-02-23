@@ -4,14 +4,14 @@
  * Handles Slurm job submission and monitoring.
  */
 
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { SlurmInfo, SlurmJobStatus, SlurmJobConfig } from '../types.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /** SLURM job IDs are numeric (optionally with array syntax like 12345_1). Validates and returns. */
 function sanitizedSlurmJobId(id: string): string {
@@ -134,7 +134,7 @@ export class SlurmExecutor {
 
     // Cancel Slurm job
     try {
-      await execAsync(`scancel ${sanitizedSlurmJobId(tracker.slurmJobId)}`, { timeout: 10000 });
+      await execFileAsync('scancel', [sanitizedSlurmJobId(tracker.slurmJobId)], { timeout: 10000 });
     } catch {
       // Failed to cancel — job may have already finished
     }
@@ -228,10 +228,10 @@ export class SlurmExecutor {
       lines.push('');
     }
 
-    // Environment variables
+    // Environment variables (shell-escaped with single quotes)
     lines.push('# Environment');
-    lines.push(`export ASTRO_TASK_ID="${task.taskId}"`);
-    lines.push(`export ASTRO_PROJECT_ID="${task.projectId}"`);
+    lines.push(`export ASTRO_TASK_ID='${shellEscape(task.taskId)}'`);
+    lines.push(`export ASTRO_PROJECT_ID='${shellEscape(task.projectId)}'`);
     lines.push('');
 
     // Extract and add commands from task description
@@ -297,7 +297,7 @@ export class SlurmExecutor {
    */
   private async submitJob(scriptPath: string): Promise<{ success: boolean; jobId?: string; error?: string }> {
     try {
-      const { stdout, stderr } = await execAsync(`sbatch ${scriptPath}`, { timeout: 30000 });
+      const { stdout, stderr } = await execFileAsync('sbatch', [scriptPath], { timeout: 30000 });
 
       const jobIdMatch = stdout.match(/Submitted batch job (\d+)/);
       if (jobIdMatch) {
@@ -419,8 +419,8 @@ export class SlurmExecutor {
     const safeJobId = sanitizedSlurmJobId(jobId);
     // Try squeue first (for running jobs)
     try {
-      const { stdout } = await execAsync(
-        `squeue -j ${safeJobId} -h -o "%T|%r|%N|%e" 2>/dev/null`,
+      const { stdout } = await execFileAsync(
+        'squeue', ['-j', safeJobId, '-h', '-o', '%T|%r|%N|%e'],
         { timeout: 10000 }
       );
       const trimmed = stdout.trim();
@@ -439,8 +439,8 @@ export class SlurmExecutor {
 
     // Try sacct (for completed jobs)
     try {
-      const { stdout } = await execAsync(
-        `sacct -j ${safeJobId} --parsable2 --noheader -o State,ExitCode,NodeList 2>/dev/null`,
+      const { stdout } = await execFileAsync(
+        'sacct', ['-j', safeJobId, '--parsable2', '--noheader', '-o', 'State,ExitCode,NodeList'],
         { timeout: 10000 }
       );
       const lines = stdout.trim().split('\n');
@@ -474,4 +474,9 @@ export class SlurmExecutor {
       .replace(/_+/g, '_')
       .substring(0, 40);
   }
+}
+
+/** Shell-escape a string by replacing single quotes with '\'' */
+function shellEscape(value: string): string {
+  return value.replace(/'/g, "'\\''");
 }

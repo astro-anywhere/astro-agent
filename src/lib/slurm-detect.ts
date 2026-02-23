@@ -4,11 +4,11 @@
  * Detects Slurm installation and gathers cluster information.
  */
 
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { SlurmInfo, SlurmPartitionDetail } from '../types.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /**
  * Detect Slurm and gather cluster information
@@ -23,7 +23,7 @@ export async function detectSlurm(): Promise<SlurmInfo> {
 
   // Check if sinfo is available
   try {
-    await execAsync('which sinfo', { timeout: 5000 });
+    await execFileAsync('which', ['sinfo'], { timeout: 5000 });
     info.available = true;
   } catch {
     return info;
@@ -31,7 +31,7 @@ export async function detectSlurm(): Promise<SlurmInfo> {
 
   // Get Slurm version
   try {
-    const { stdout } = await execAsync('sinfo --version', { timeout: 5000 });
+    const { stdout } = await execFileAsync('sinfo', ['--version'], { timeout: 5000 });
     const match = stdout.match(/slurm\s+(\d+\.\d+\.\d+)/);
     if (match) {
       info.version = match[1];
@@ -42,7 +42,8 @@ export async function detectSlurm(): Promise<SlurmInfo> {
 
   // Get cluster name
   try {
-    const { stdout } = await execAsync('scontrol show config 2>/dev/null | grep ClusterName', { timeout: 10000 });
+    const { stdout: rawConfig } = await execFileAsync('scontrol', ['show', 'config'], { timeout: 10000 });
+    const stdout = rawConfig.split('\n').filter(l => l.includes('ClusterName')).join('\n');
     const match = stdout.match(/ClusterName\s*=\s*(\S+)/);
     if (match) {
       info.clusterName = match[1];
@@ -53,7 +54,7 @@ export async function detectSlurm(): Promise<SlurmInfo> {
 
   // Get partitions
   try {
-    const { stdout } = await execAsync('sinfo -h -o "%P"', { timeout: 10000 });
+    const { stdout } = await execFileAsync('sinfo', ['-h', '-o', '%P'], { timeout: 10000 });
     info.partitions = stdout
       .split('\n')
       .map((line) => line.trim())
@@ -73,9 +74,9 @@ export async function detectSlurm(): Promise<SlurmInfo> {
   // Get user accounts
   try {
     const username = process.env.USER || process.env.LOGNAME;
-    if (username) {
-      const { stdout } = await execAsync(
-        `sacctmgr -p show assoc user=${username} format=Account --noheader 2>/dev/null`,
+    if (username && /^[a-zA-Z0-9._-]+$/.test(username)) {
+      const { stdout } = await execFileAsync(
+        'sacctmgr', ['-p', 'show', 'assoc', `user=${username}`, 'format=Account', '--noheader'],
         { timeout: 10000 }
       );
       info.accounts = [
@@ -94,9 +95,9 @@ export async function detectSlurm(): Promise<SlurmInfo> {
   // Get QOS levels
   try {
     const username = process.env.USER || process.env.LOGNAME;
-    if (username) {
-      const { stdout } = await execAsync(
-        `sacctmgr -p show assoc user=${username} format=QOS --noheader 2>/dev/null`,
+    if (username && /^[a-zA-Z0-9._-]+$/.test(username)) {
+      const { stdout } = await execFileAsync(
+        'sacctmgr', ['-p', 'show', 'assoc', `user=${username}`, 'format=QOS', '--noheader'],
         { timeout: 10000 }
       );
       const qosSet = new Set<string>();
@@ -122,7 +123,7 @@ export async function detectSlurm(): Promise<SlurmInfo> {
  */
 export async function getPartitionInfo(): Promise<SlurmPartitionDetail[]> {
   try {
-    const { stdout } = await execAsync('sinfo -h -o "%P|%a|%l|%D|%T|%f"', { timeout: 10000 });
+    const { stdout } = await execFileAsync('sinfo', ['-h', '-o', '%P|%a|%l|%D|%T|%f'], { timeout: 10000 });
 
     const partitionMap = new Map<string, SlurmPartitionDetail>();
 

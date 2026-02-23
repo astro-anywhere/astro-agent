@@ -6,13 +6,14 @@
  * existing WebSocket relay protocol.
  */
 
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, stat } from 'node:fs/promises';
+import { open, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import type { WebSocketClient } from './websocket-client.js';
 import type { TaskResult } from '../types.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 /** SLURM job IDs are numeric (optionally with array syntax like 12345_1). Validates and returns. */
 function sanitizedSlurmJobId(id: string): string {
@@ -109,6 +110,10 @@ export class SlurmJobMonitor {
   start(): void {
     if (this.pollInterval) return;
     console.log(`[slurm-monitor] Starting poll loop (${this.pollIntervalMs}ms)`);
+    // Immediate first poll so we don't wait a full interval before checking
+    this.pollAll().catch((err) => {
+      console.error('[slurm-monitor] Poll error:', err);
+    });
     this.pollInterval = setInterval(() => {
       this.pollAll().catch((err) => {
         console.error('[slurm-monitor] Poll error:', err);
@@ -151,8 +156,9 @@ export class SlurmJobMonitor {
     let elapsed: string | undefined;
 
     try {
-      const { stdout } = await execAsync(
-        `sacct -j ${sanitizedSlurmJobId(slurmJobId)} --format=State,ExitCode,Elapsed -n -P`,
+      const { stdout } = await execFileAsync(
+        'sacct',
+        ['-j', sanitizedSlurmJobId(slurmJobId), '--format=State,ExitCode,Elapsed', '-n', '-P'],
         { timeout: 10_000 },
       );
 
@@ -225,18 +231,25 @@ export class SlurmJobMonitor {
       const fileStat = await stat(job.outputPath);
       if (fileStat.size <= job.lastOutputOffset) return;
 
-      // Read new content
-      const content = await readFile(job.outputPath, 'utf-8');
-      const newContent = content.slice(job.lastOutputOffset);
-      job.lastOutputOffset = content.length;
+      // Read only the new bytes to avoid byte/character offset mismatch
+      const bytesToRead = fileStat.size - job.lastOutputOffset;
+      const fd = await open(job.outputPath, 'r');
+      try {
+        const buffer = Buffer.alloc(bytesToRead);
+        await fd.read(buffer, 0, bytesToRead, job.lastOutputOffset);
+        job.lastOutputOffset = fileStat.size;
+        const newContent = buffer.toString('utf-8');
 
-      if (newContent.length > 0) {
-        this.wsClient.sendTaskOutput(
-          job.executionId,
-          'stdout',
-          newContent,
-          job.stdoutSequence++,
-        );
+        if (newContent.length > 0) {
+          this.wsClient.sendTaskOutput(
+            job.executionId,
+            'stdout',
+            newContent,
+            job.stdoutSequence++,
+          );
+        }
+      } finally {
+        await fd.close();
       }
     } catch {
       // File not yet created or not accessible

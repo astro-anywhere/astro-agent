@@ -59,10 +59,10 @@ function createTestGitRepo(): { repoDir: string; bareDir: string } {
   tmpDirs.push(repoDir, bareDir);
 
   // Create bare remote
-  execFileSync('git', ['init', '--bare'], { cwd: bareDir });
+  execFileSync('git', ['init', '--bare', '--initial-branch=main'], { cwd: bareDir });
 
   // Create local repo
-  execFileSync('git', ['init'], { cwd: repoDir });
+  execFileSync('git', ['init', '--initial-branch=main'], { cwd: repoDir });
   execFileSync('git', ['config', 'user.email', 'test@test.com'], {
     cwd: repoDir,
   });

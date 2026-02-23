@@ -124,17 +124,29 @@ export async function packAndInstall(
     `${pathExport} && astro-agent setup --non-interactive --skip-auth --api ${apiUrl} --relay ${relayUrl}`,
   );
 
-  // 6. Push tokens
+  // 6. Push tokens via stdin to avoid exposing them in ps output
   log(`Configuring tokens on ${host.name}...`);
-  const setCommands = [
-    `astro-agent config --set apiUrl=${apiUrl}`,
-    `astro-agent config --set relayUrl=${relayUrl}`,
-    `astro-agent config --set accessToken=${accessToken}`,
-    `astro-agent config --set refreshToken=${refreshToken}`,
-    `astro-agent config --set wsToken=${wsToken}`,
-    `astro-agent config --set machineId=${machineId}`,
-  ];
-  await sshExec(host, `${pathExport} && ${setCommands.join(' && ')}`);
+  const configJson = JSON.stringify({
+    apiUrl,
+    relayUrl,
+    accessToken,
+    refreshToken,
+    wsToken,
+    machineId,
+  });
+  // Pipe config as JSON via stdin to avoid shell argument exposure on shared machines
+  const configCmd = `${pathExport} && cat > /tmp/.astro-config-$$.json && ` +
+    `astro-agent config --import /tmp/.astro-config-$$.json && ` +
+    `rm -f /tmp/.astro-config-$$.json`;
+  const sshArgs = buildSshArgs(host, configCmd);
+  const { execFile: execFileCbInner } = await import('node:child_process');
+  const child = execFileCbInner('ssh', sshArgs);
+  child.stdin?.write(configJson);
+  child.stdin?.end();
+  await new Promise<void>((resolve, reject) => {
+    child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`ssh config push exited with code ${code}`)));
+    child.on('error', reject);
+  });
 
   // Clean up remote tarball
   await sshExec(host, 'rm -f ~/astro-agent.tgz').catch(() => {});

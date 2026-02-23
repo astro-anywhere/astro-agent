@@ -5,7 +5,7 @@
 import chalk from 'chalk';
 import ora from 'ora';
 import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, existsSync, writeFileSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -145,6 +145,14 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
 
     child.unref();
 
+    // Write PID file for stop command
+    const pidDir = join(homedir(), '.astro');
+    mkdirSync(pidDir, { recursive: true });
+    const pidFile = join(pidDir, 'agent-runner.pid');
+    if (child.pid) {
+      writeFileSync(pidFile, String(child.pid));
+    }
+
     console.log(chalk.green('✓ Agent runner started in background'));
     console.log(chalk.dim(`  PID: ${child.pid}`));
     console.log(chalk.dim(`  Runner ID: ${runnerId}`));
@@ -230,6 +238,10 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
   // Create WebSocket client
   const connectSpinner = ora('Connecting to relay server...').start();
 
+  // Create task executor first (needed for callback closures)
+  // wsClient will be assigned after construction
+  let taskExecutor: TaskExecutor;
+
   const wsClient = new WebSocketClient({
     runnerId,
     machineId,
@@ -243,10 +255,279 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       logLevel,
     },
     onEvent: (event) => handleEvent(event, logLevel),
+    onTaskDispatch: (task: Task) => {
+      taskExecutor.submitTask(task).catch((error) => {
+        log('error', `Failed to submit task ${task.id}: ${error.message}`, logLevel);
+      });
+    },
+    onTaskCancel: (taskId: string) => {
+      taskExecutor.cancelTask(taskId);
+    },
+    onTaskSafetyDecision: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => {
+      log('info', `Safety decision for task ${taskId}: ${decision}`, logLevel);
+      taskExecutor.handleSafetyDecision(taskId, decision).catch((error) => {
+        log('error', `Failed to handle safety decision for task ${taskId}: ${error.message}`, logLevel);
+      });
+    },
+    onTaskSteer: (taskId: string, message: string, action?: string, interrupt?: boolean) => {
+      log('info', `Received steer for task ${taskId}: "${message.slice(0, 100)}"${action ? ` (action: ${action})` : ''}${interrupt ? ' (interrupt)' : ''}`, logLevel);
+      taskExecutor.steerTask(taskId, message, interrupt ?? false).then((result) => {
+        wsClient.sendSteerAck(taskId, result.accepted, result.reason, interrupt);
+        log('info', `Steer ack for task ${taskId}: accepted=${result.accepted}${result.reason ? ` reason=${result.reason}` : ''}${interrupt ? ' (interrupt)' : ''}`, logLevel);
+      }).catch((err) => {
+        log('error', `Steer failed for task ${taskId}: ${err instanceof Error ? err.message : String(err)}`, logLevel);
+        wsClient.sendSteerAck(taskId, false, 'Internal error');
+      });
+    },
+    onFileList: (path: string, correlationId: string) => {
+      log('debug', `File list request for path: ${path || '(cwd)'}`, logLevel);
+      try {
+        const cwd = path || process.cwd();
+        if (!existsSync(cwd)) {
+          log('debug', `Directory does not exist: ${cwd}`, logLevel);
+          wsClient.sendFileListResponse(correlationId, []);
+          return;
+        }
+        // Check if directory is a git repo before trying git ls-files
+        try {
+          execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
+            cwd,
+            encoding: 'utf-8',
+            timeout: 5000,
+            stdio: 'pipe',
+          });
+        } catch {
+          log('debug', `Not a git repo, returning empty file list: ${cwd}`, logLevel);
+          wsClient.sendFileListResponse(correlationId, []);
+          return;
+        }
+        const output = execFileSync('git', ['ls-files'], {
+          cwd,
+          encoding: 'utf-8',
+          timeout: 5000,
+          maxBuffer: 1024 * 1024,
+        });
+        const files = output.trim().split('\n').filter(Boolean);
+        wsClient.sendFileListResponse(correlationId, files);
+        log('debug', `Sent ${files.length} files for path: ${cwd}`, logLevel);
+      } catch (error) {
+        log('warn', `Failed to list files in ${path}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendFileListResponse(correlationId, []);
+      }
+    },
+    onSlashCommands: (correlationId: string, workingDirectory?: string) => {
+      log('debug', `Slash commands request for dir: ${workingDirectory || '(global)'}`, logLevel);
+      try {
+        const commands = scanSlashCommands(workingDirectory);
+        wsClient.sendSlashCommandsResponse(correlationId, commands);
+        log('debug', `Sent ${commands.length} slash commands`, logLevel);
+      } catch (error) {
+        log('warn', `Failed to scan slash commands: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendSlashCommandsResponse(correlationId, []);
+      }
+    },
+    onRepoSetup: (payload: RepoSetupRequestMessage['payload']) => {
+      const { correlationId, projectId, workingDirectory, repository } = payload;
+      log('info', `Repo setup request: dir=${workingDirectory || '(none)'} repo=${repository || '(none)'}`, logLevel);
+      try {
+        const result = localRepoSetup({ workingDirectory, repository, projectId });
+        wsClient.sendRepoSetupResponse(correlationId, result);
+        log('info', `Repo setup result: success=${result.success} files=${result.fileTree?.length ?? 0}`, logLevel);
+      } catch (error) {
+        log('error', `Repo setup failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendRepoSetupResponse(correlationId, {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    onRepoDetect: (payload: RepoDetectRequestMessage['payload']) => {
+      const { correlationId, path: dirPath } = payload;
+      log('info', `Repo detect request: path=${dirPath}`, logLevel);
+      try {
+        if (!existsSync(dirPath)) {
+          wsClient.sendRepoDetectResponse(correlationId, {
+            exists: false,
+            isGit: false,
+            remoteType: 'none',
+            suggestedDeliveryMode: 'branch',
+          });
+          return;
+        }
+
+        // Check if it's a git repo
+        let isGit = false;
+        try {
+          execFileSync('git', ['-C', dirPath, 'rev-parse', '--is-inside-work-tree'], {
+            encoding: 'utf-8',
+            timeout: 5_000,
+            stdio: 'pipe',
+          });
+          isGit = true;
+        } catch {
+          // Not a git repo
+        }
+
+        if (!isGit) {
+          // Compute directory size for non-git directories
+          let dirSizeMB: number | null = null;
+          try {
+            const duOutput = execFileSync('du', ['-sk', dirPath], {
+              encoding: 'utf-8',
+              timeout: 10_000,
+              stdio: 'pipe',
+            });
+            const kb = parseInt(duOutput.trim().split(/\s+/)[0], 10);
+            if (!isNaN(kb)) {
+              dirSizeMB = Math.round((kb / 1024) * 100) / 100;
+            }
+          } catch {
+            // Non-fatal
+          }
+
+          wsClient.sendRepoDetectResponse(correlationId, {
+            exists: true,
+            isGit: false,
+            remoteType: 'none',
+            suggestedDeliveryMode: 'direct',
+            dirSizeMB,
+          });
+          return;
+        }
+
+        // Get remote URL
+        let remoteUrl: string | undefined;
+        try {
+          const url = execFileSync('git', ['-C', dirPath, 'remote', 'get-url', 'origin'], {
+            encoding: 'utf-8',
+            timeout: 5_000,
+            stdio: 'pipe',
+          }).trim();
+          if (url) remoteUrl = url;
+        } catch {
+          // No remote
+        }
+
+        // Get default branch
+        let baseBranch = 'main';
+        try {
+          const branch = execFileSync('git', ['-C', dirPath, 'symbolic-ref', '--short', 'HEAD'], {
+            encoding: 'utf-8',
+            timeout: 5_000,
+            stdio: 'pipe',
+          }).trim();
+          if (branch) baseBranch = branch;
+        } catch {
+          // Default to 'main'
+        }
+
+        // Detect remote type
+        const detectRemoteType = (url: string | undefined): 'github' | 'gitlab' | 'bitbucket' | 'generic' | 'none' => {
+          if (!url) return 'none';
+          const lower = url.toLowerCase();
+          if (lower.includes('github.com')) return 'github';
+          if (lower.includes('gitlab.com') || lower.includes('gitlab.')) return 'gitlab';
+          if (lower.includes('bitbucket.org') || lower.includes('bitbucket.')) return 'bitbucket';
+          if (lower.startsWith('git@') || lower.startsWith('http') || lower.startsWith('ssh://')) return 'generic';
+          return 'none';
+        };
+
+        const remoteType = detectRemoteType(remoteUrl);
+        let suggestedDeliveryMode: 'pr' | 'push' | 'branch' | 'direct' = 'branch';
+        switch (remoteType) {
+          case 'github':
+          case 'gitlab':
+          case 'bitbucket':
+            suggestedDeliveryMode = 'pr';
+            break;
+          case 'generic':
+            suggestedDeliveryMode = 'push';
+            break;
+          case 'none':
+          default:
+            suggestedDeliveryMode = 'branch';
+            break;
+        }
+
+        wsClient.sendRepoDetectResponse(correlationId, {
+          exists: true,
+          isGit: true,
+          remoteUrl,
+          remoteType,
+          baseBranch,
+          suggestedDeliveryMode,
+        });
+        log('info', `Repo detect result: isGit=true remote=${remoteType} branch=${baseBranch}`, logLevel);
+      } catch (error) {
+        log('error', `Repo detect failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendRepoDetectResponse(correlationId, {
+          exists: false,
+          isGit: false,
+          remoteType: 'none',
+          suggestedDeliveryMode: 'branch',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    onGitInit: (payload: GitInitRequestMessage['payload']) => {
+      const { correlationId, workingDirectory, projectName } = payload;
+      log('info', `Git init request: dir=${workingDirectory}`, logLevel);
+      try {
+        // Initialize git, create .gitignore, initial commit
+        execFileSync('git', ['init'], { cwd: workingDirectory, stdio: 'pipe', timeout: 10_000 });
+        execFileSync('git', ['config', 'user.name', 'Astro Agent'], { cwd: workingDirectory, stdio: 'pipe', timeout: 5_000 });
+        execFileSync('git', ['config', 'user.email', 'agent@astro.local'], { cwd: workingDirectory, stdio: 'pipe', timeout: 5_000 });
+
+        // Generate basic .gitignore if missing
+        const gitignorePath = join(workingDirectory, '.gitignore');
+        if (!existsSync(gitignorePath)) {
+          writeFileSync(gitignorePath, 'node_modules/\n.env\n.DS_Store\n*.log\n');
+        }
+
+        // Initial commit
+        try {
+          execFileSync('git', ['add', '-A'], { cwd: workingDirectory, stdio: 'pipe', timeout: 10_000 });
+          execFileSync('git', ['commit', '-m', `Initial commit for ${projectName}`, '--allow-empty'], {
+            cwd: workingDirectory,
+            stdio: 'pipe',
+            timeout: 10_000,
+          });
+        } catch {
+          // Non-fatal: might be empty directory
+        }
+
+        // Get file tree after init
+        let fileTree: string[] = [];
+        try {
+          const output = execFileSync('git', ['ls-files'], {
+            cwd: workingDirectory,
+            encoding: 'utf-8',
+            timeout: 10_000,
+            maxBuffer: 5 * 1024 * 1024,
+          });
+          fileTree = output.trim().split('\n').filter(Boolean);
+        } catch {
+          // Non-fatal
+        }
+
+        wsClient.sendGitInitResponse(correlationId, {
+          success: true,
+          workingDirectory,
+          fileTree,
+        });
+        log('info', `Git init result: success=true files=${fileTree.length}`, logLevel);
+      } catch (error) {
+        log('error', `Git init failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendGitInitResponse(correlationId, {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
   });
 
   // Create task executor
-  const taskExecutor = new TaskExecutor({
+  taskExecutor = new TaskExecutor({
     wsClient,
     maxConcurrentTasks: maxTasks,
     preserveWorktrees: options.preserveWorktrees,
@@ -254,285 +535,6 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     useSandbox: options.useSandbox,
     maxSandboxSize: options.maxSandboxSize,
   });
-
-  // Set up task handlers
-  wsClient['onTaskDispatch'] = (task: Task) => {
-    taskExecutor.submitTask(task).catch((error) => {
-      log('error', `Failed to submit task ${task.id}: ${error.message}`, logLevel);
-    });
-  };
-
-  wsClient['onTaskCancel'] = (taskId: string) => {
-    taskExecutor.cancelTask(taskId);
-  };
-
-  wsClient['onTaskSafetyDecision'] = (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => {
-    log('info', `Safety decision for task ${taskId}: ${decision}`, logLevel);
-    taskExecutor.handleSafetyDecision(taskId, decision).catch((error) => {
-      log('error', `Failed to handle safety decision for task ${taskId}: ${error.message}`, logLevel);
-    });
-  };
-
-  wsClient['onTaskSteer'] = (taskId: string, message: string, action?: string, interrupt?: boolean) => {
-    log('info', `Received steer for task ${taskId}: "${message.slice(0, 100)}"${action ? ` (action: ${action})` : ''}${interrupt ? ' (interrupt)' : ''}`, logLevel);
-    taskExecutor.steerTask(taskId, message, interrupt ?? false).then((result) => {
-      wsClient.sendSteerAck(taskId, result.accepted, result.reason, interrupt);
-      log('info', `Steer ack for task ${taskId}: accepted=${result.accepted}${result.reason ? ` reason=${result.reason}` : ''}${interrupt ? ' (interrupt)' : ''}`, logLevel);
-    }).catch((err) => {
-      log('error', `Steer failed for task ${taskId}: ${err instanceof Error ? err.message : String(err)}`, logLevel);
-      wsClient.sendSteerAck(taskId, false, 'Internal error');
-    });
-  };
-
-  wsClient['onFileList'] = (path: string, correlationId: string) => {
-    log('debug', `File list request for path: ${path || '(cwd)'}`, logLevel);
-    try {
-      const cwd = path || process.cwd();
-      if (!existsSync(cwd)) {
-        log('debug', `Directory does not exist: ${cwd}`, logLevel);
-        wsClient.sendFileListResponse(correlationId, []);
-        return;
-      }
-      // Check if directory is a git repo before trying git ls-files
-      try {
-        execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
-          cwd,
-          encoding: 'utf-8',
-          timeout: 5000,
-          stdio: 'pipe',
-        });
-      } catch {
-        log('debug', `Not a git repo, returning empty file list: ${cwd}`, logLevel);
-        wsClient.sendFileListResponse(correlationId, []);
-        return;
-      }
-      const output = execFileSync('git', ['ls-files'], {
-        cwd,
-        encoding: 'utf-8',
-        timeout: 5000,
-        maxBuffer: 1024 * 1024,
-      });
-      const files = output.trim().split('\n').filter(Boolean);
-      wsClient.sendFileListResponse(correlationId, files);
-      log('debug', `Sent ${files.length} files for path: ${cwd}`, logLevel);
-    } catch (error) {
-      log('warn', `Failed to list files in ${path}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
-      wsClient.sendFileListResponse(correlationId, []);
-    }
-  };
-
-  wsClient['onSlashCommands'] = (correlationId: string, workingDirectory?: string) => {
-    log('debug', `Slash commands request for dir: ${workingDirectory || '(global)'}`, logLevel);
-    try {
-      const commands = scanSlashCommands(workingDirectory);
-      wsClient.sendSlashCommandsResponse(correlationId, commands);
-      log('debug', `Sent ${commands.length} slash commands`, logLevel);
-    } catch (error) {
-      log('warn', `Failed to scan slash commands: ${error instanceof Error ? error.message : String(error)}`, logLevel);
-      wsClient.sendSlashCommandsResponse(correlationId, []);
-    }
-  };
-
-  wsClient['onRepoSetup'] = (payload: RepoSetupRequestMessage['payload']) => {
-    const { correlationId, projectId, workingDirectory, repository } = payload;
-    log('info', `Repo setup request: dir=${workingDirectory || '(none)'} repo=${repository || '(none)'}`, logLevel);
-    try {
-      const result = localRepoSetup({ workingDirectory, repository, projectId });
-      wsClient.sendRepoSetupResponse(correlationId, result);
-      log('info', `Repo setup result: success=${result.success} files=${result.fileTree?.length ?? 0}`, logLevel);
-    } catch (error) {
-      log('error', `Repo setup failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
-      wsClient.sendRepoSetupResponse(correlationId, {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
-
-  wsClient['onRepoDetect'] = (payload: RepoDetectRequestMessage['payload']) => {
-    const { correlationId, path: dirPath } = payload;
-    log('info', `Repo detect request: path=${dirPath}`, logLevel);
-    try {
-      if (!existsSync(dirPath)) {
-        wsClient.sendRepoDetectResponse(correlationId, {
-          exists: false,
-          isGit: false,
-          remoteType: 'none',
-          suggestedDeliveryMode: 'branch',
-        });
-        return;
-      }
-
-      // Check if it's a git repo
-      let isGit = false;
-      try {
-        execFileSync('git', ['-C', dirPath, 'rev-parse', '--is-inside-work-tree'], {
-          encoding: 'utf-8',
-          timeout: 5_000,
-          stdio: 'pipe',
-        });
-        isGit = true;
-      } catch {
-        // Not a git repo
-      }
-
-      if (!isGit) {
-        // Compute directory size for non-git directories
-        let dirSizeMB: number | null = null;
-        try {
-          const duOutput = execFileSync('du', ['-sk', dirPath], {
-            encoding: 'utf-8',
-            timeout: 10_000,
-            stdio: 'pipe',
-          });
-          const kb = parseInt(duOutput.trim().split(/\s+/)[0], 10);
-          if (!isNaN(kb)) {
-            dirSizeMB = Math.round((kb / 1024) * 100) / 100;
-          }
-        } catch {
-          // Non-fatal
-        }
-
-        wsClient.sendRepoDetectResponse(correlationId, {
-          exists: true,
-          isGit: false,
-          remoteType: 'none',
-          suggestedDeliveryMode: 'direct',
-          dirSizeMB,
-        });
-        return;
-      }
-
-      // Get remote URL
-      let remoteUrl: string | undefined;
-      try {
-        const url = execFileSync('git', ['-C', dirPath, 'remote', 'get-url', 'origin'], {
-          encoding: 'utf-8',
-          timeout: 5_000,
-          stdio: 'pipe',
-        }).trim();
-        if (url) remoteUrl = url;
-      } catch {
-        // No remote
-      }
-
-      // Get default branch
-      let baseBranch = 'main';
-      try {
-        const branch = execFileSync('git', ['-C', dirPath, 'symbolic-ref', '--short', 'HEAD'], {
-          encoding: 'utf-8',
-          timeout: 5_000,
-          stdio: 'pipe',
-        }).trim();
-        if (branch) baseBranch = branch;
-      } catch {
-        // Default to 'main'
-      }
-
-      // Detect remote type
-      const detectRemoteType = (url: string | undefined): 'github' | 'gitlab' | 'bitbucket' | 'generic' | 'none' => {
-        if (!url) return 'none';
-        const lower = url.toLowerCase();
-        if (lower.includes('github.com')) return 'github';
-        if (lower.includes('gitlab.com') || lower.includes('gitlab.')) return 'gitlab';
-        if (lower.includes('bitbucket.org') || lower.includes('bitbucket.')) return 'bitbucket';
-        if (lower.startsWith('git@') || lower.startsWith('http') || lower.startsWith('ssh://')) return 'generic';
-        return 'none';
-      };
-
-      const remoteType = detectRemoteType(remoteUrl);
-      let suggestedDeliveryMode: 'pr' | 'push' | 'branch' | 'direct' = 'branch';
-      switch (remoteType) {
-        case 'github':
-        case 'gitlab':
-        case 'bitbucket':
-          suggestedDeliveryMode = 'pr';
-          break;
-        case 'generic':
-          suggestedDeliveryMode = 'push';
-          break;
-        case 'none':
-        default:
-          suggestedDeliveryMode = 'branch';
-          break;
-      }
-
-      wsClient.sendRepoDetectResponse(correlationId, {
-        exists: true,
-        isGit: true,
-        remoteUrl,
-        remoteType,
-        baseBranch,
-        suggestedDeliveryMode,
-      });
-      log('info', `Repo detect result: isGit=true remote=${remoteType} branch=${baseBranch}`, logLevel);
-    } catch (error) {
-      log('error', `Repo detect failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
-      wsClient.sendRepoDetectResponse(correlationId, {
-        exists: false,
-        isGit: false,
-        remoteType: 'none',
-        suggestedDeliveryMode: 'branch',
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
-
-  wsClient['onGitInit'] = (payload: GitInitRequestMessage['payload']) => {
-    const { correlationId, workingDirectory, projectName } = payload;
-    log('info', `Git init request: dir=${workingDirectory}`, logLevel);
-    try {
-      // Initialize git, create .gitignore, initial commit
-      execFileSync('git', ['init'], { cwd: workingDirectory, stdio: 'pipe', timeout: 10_000 });
-      execFileSync('git', ['config', 'user.name', 'Astro Agent'], { cwd: workingDirectory, stdio: 'pipe', timeout: 5_000 });
-      execFileSync('git', ['config', 'user.email', 'agent@astro.local'], { cwd: workingDirectory, stdio: 'pipe', timeout: 5_000 });
-
-      // Generate basic .gitignore if missing
-      const gitignorePath = join(workingDirectory, '.gitignore');
-      if (!existsSync(gitignorePath)) {
-        writeFileSync(gitignorePath, 'node_modules/\n.env\n.DS_Store\n*.log\n');
-      }
-
-      // Initial commit
-      try {
-        execFileSync('git', ['add', '-A'], { cwd: workingDirectory, stdio: 'pipe', timeout: 10_000 });
-        execFileSync('git', ['commit', '-m', `Initial commit for ${projectName}`, '--allow-empty'], {
-          cwd: workingDirectory,
-          stdio: 'pipe',
-          timeout: 10_000,
-        });
-      } catch {
-        // Non-fatal: might be empty directory
-      }
-
-      // Get file tree after init
-      let fileTree: string[] = [];
-      try {
-        const output = execFileSync('git', ['ls-files'], {
-          cwd: workingDirectory,
-          encoding: 'utf-8',
-          timeout: 10_000,
-          maxBuffer: 5 * 1024 * 1024,
-        });
-        fileTree = output.trim().split('\n').filter(Boolean);
-      } catch {
-        // Non-fatal
-      }
-
-      wsClient.sendGitInitResponse(correlationId, {
-        success: true,
-        workingDirectory,
-        fileTree,
-      });
-      log('info', `Git init result: success=true files=${fileTree.length}`, logLevel);
-    } catch (error) {
-      log('error', `Git init failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
-      wsClient.sendGitInitResponse(correlationId, {
-        success: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  };
 
   // Handle graceful shutdown
   let isShuttingDown = false;
@@ -564,6 +566,10 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
 
       // Disconnect WebSocket
       wsClient.disconnect();
+
+      // Remove PID file
+      const pidFile = join(homedir(), '.astro', 'agent-runner.pid');
+      try { unlinkSync(pidFile); } catch { /* ignore */ }
     } catch {
       // Ignore errors during shutdown
     }

@@ -247,6 +247,8 @@ export async function pushAndCreatePR(
     taskDescription?: string;
     /** If true, push the branch but skip PR creation */
     skipPR?: boolean;
+    /** If true, auto-commit uncommitted changes before pushing (default: true) */
+    autoCommit?: boolean;
   },
 ): Promise<PRResult> {
   const result: PRResult = { branchName: options.branchName };
@@ -267,8 +269,10 @@ export async function pushAndCreatePR(
   // Get default branch
   const baseBranch = await getDefaultBranch(gitRoot);
 
-  // Auto-commit any uncommitted changes the agent left behind
-  await autoCommitChanges(worktreePath, options.taskTitle);
+  // Auto-commit any uncommitted changes the agent left behind (opt-in, default true)
+  if (options.autoCommit !== false) {
+    await autoCommitChanges(worktreePath, options.taskTitle);
+  }
 
   // Check if there are commits to push
   const hasCommits = await hasBranchCommits(worktreePath, baseBranch);
