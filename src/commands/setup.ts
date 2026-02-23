@@ -259,14 +259,28 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
     'Auth:    ',
     config.getAccessToken() ? chalk.green('authenticated') : chalk.yellow('not configured'),
   );
-  console.log(
-    'Claude:  ',
-    config.getClaudeOauthToken()
-      ? chalk.green('OAuth token configured')
-      : process.env.ANTHROPIC_API_KEY
-        ? chalk.green('API key (env)')
-        : chalk.yellow('not configured — run `claude setup-token` or set ANTHROPIC_API_KEY'),
-  );
+  // Detect Claude auth: stored token > env var > CLI session
+  let claudeAuthStatus: string;
+  if (config.getClaudeOauthToken()) {
+    claudeAuthStatus = chalk.green('OAuth token configured');
+  } else if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
+    claudeAuthStatus = chalk.green('env variable configured');
+  } else {
+    // Check if claude CLI is available (will use its session automatically)
+    let hasCli = false;
+    try {
+      const { stdout } = await execFile(
+        process.platform === 'win32' ? 'where' : 'which',
+        ['claude'],
+        { timeout: 3000 },
+      );
+      if (stdout.trim()) hasCli = true;
+    } catch { /* not installed */ }
+    claudeAuthStatus = hasCli
+      ? chalk.green('CLI session (auto-detected)')
+      : chalk.yellow('not configured — run `claude login` or set ANTHROPIC_API_KEY');
+  }
+  console.log('Claude:  ', claudeAuthStatus);
   console.log(
     'Providers:',
     providerTypes.length > 0 ? chalk.cyan(providerTypes.join(', ')) : chalk.yellow('none'),

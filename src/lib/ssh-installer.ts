@@ -106,7 +106,7 @@ export async function packAndInstall(
   // 3. Install to user-local prefix to avoid EACCES on system dirs
   log(`Installing on ${host.name}...`);
   const npmPrefix = '~/.local';
-  await sshExec(host, `mkdir -p ${npmPrefix} && npm install -g --prefix ${npmPrefix} ~/astro-agent.tgz`);
+  await sshExec(host, `mkdir -p ${npmPrefix} && npm install -g --force --prefix ${npmPrefix} ~/astro-agent.tgz`);
 
   // 4. Ensure ~/.local/bin is on PATH for this session and future logins
   const binDir = `${npmPrefix}/bin`;

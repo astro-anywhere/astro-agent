@@ -76,6 +76,7 @@ interface ConfigSchema {
   logLevel: 'debug' | 'info' | 'warn' | 'error';
   lastConnected?: string;
   setupCompleted: boolean;
+  selectedRemoteHosts?: string[];
   mcpServers?: Record<string, {
     command: string;
     args: string[];
@@ -404,6 +405,20 @@ class ConfigManager {
    */
   setAutoStart(autoStart: boolean): void {
     this.conf.set('autoStart', autoStart);
+  }
+
+  /**
+   * Get selected remote hosts (SSH host names chosen during setup)
+   */
+  getSelectedRemoteHosts(): string[] {
+    return this.conf.get('selectedRemoteHosts') ?? [];
+  }
+
+  /**
+   * Set selected remote hosts
+   */
+  setSelectedRemoteHosts(hosts: string[]): void {
+    this.conf.set('selectedRemoteHosts', hosts);
   }
 
   /**

@@ -272,7 +272,26 @@ program
     console.log(`  Providers:    ${currentConfig.providers.length > 0 ? currentConfig.providers.join(', ') : '(none)'}`);
     console.log(`  Access token: ${currentConfig.accessToken ? 'configured' : 'not configured'}`);
     console.log(`  WS token:     ${currentConfig.wsToken ? 'configured' : 'not configured'}`);
-    console.log(`  Claude auth:  ${config.getClaudeOauthToken() ? 'OAuth token configured' : process.env.ANTHROPIC_API_KEY ? 'API key (env)' : 'not configured'}`);
+    // Detect Claude auth status
+    const { execFile: execFileCbCli } = await import('node:child_process');
+    const { promisify: promisifyCli } = await import('node:util');
+    const execFileCli = promisifyCli(execFileCbCli);
+    let claudeStatus = 'not configured';
+    if (config.getClaudeOauthToken()) {
+      claudeStatus = 'OAuth token configured';
+    } else if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
+      claudeStatus = 'env variable configured';
+    } else {
+      try {
+        const { stdout } = await execFileCli(
+          process.platform === 'win32' ? 'where' : 'which',
+          ['claude'],
+          { timeout: 3000 },
+        );
+        if (stdout.trim()) claudeStatus = 'CLI session (auto-detected)';
+      } catch { /* not installed */ }
+    }
+    console.log(`  Claude auth:  ${claudeStatus}`);
     console.log(`\n  Config file: ${config.getConfigPath()}`);
     console.log();
   });
