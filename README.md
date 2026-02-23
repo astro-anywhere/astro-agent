@@ -1,11 +1,5 @@
+<h1 align="center">Astro Agent Runner</h1>
 <p align="center">
-  <br />
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://astroanywhere.com/landing/banner-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="https://astroanywhere.com/landing/banner-light.svg">
-    <img alt="Astro Agent Runner" src="https://astroanywhere.com/landing/banner-dark.svg" width="480">
-  </picture>
-  <br />
   <strong>Connect your machines. Let AI do the work.</strong>
   <br />
   <br />
