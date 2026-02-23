@@ -4,7 +4,7 @@
 
 import Conf from 'conf';
 import { randomUUID } from 'node:crypto';
-import type { StoredConfig, ProviderType } from '../types.js';
+import type { StoredConfig, ProviderType, DiscoveredHost } from '../types.js';
 import { getHardwareId } from './hardware-id.js';
 
 // Production defaults (Fly.io backend)
@@ -81,6 +81,7 @@ interface ConfigSchema {
     args: string[];
     env?: Record<string, string>;
   }>;
+  remoteHosts?: DiscoveredHost[];
 }
 
 class ConfigManager {
@@ -438,6 +439,20 @@ class ConfigManager {
    */
   completeSetup(): void {
     this.conf.set('setupCompleted', true);
+  }
+
+  /**
+   * Get stored remote hosts (from SSH discovery + install)
+   */
+  getRemoteHosts(): DiscoveredHost[] {
+    return this.conf.get('remoteHosts') ?? [];
+  }
+
+  /**
+   * Set stored remote hosts
+   */
+  setRemoteHosts(hosts: DiscoveredHost[]): void {
+    this.conf.set('remoteHosts', hosts);
   }
 
   /**

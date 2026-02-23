@@ -18,7 +18,7 @@ import type { ProviderType, DiscoveredHost } from '../types.js';
 
 const execFile = promisify(execFileCb);
 
-interface SetupOptions {
+export interface SetupOptions {
   api?: string;
   relay?: string;
   hostname?: string;
@@ -27,9 +27,14 @@ interface SetupOptions {
   withSshConfig?: boolean;
   autoStart?: boolean;
   installMcp?: boolean;
+  returnInstalledHosts?: boolean;
 }
 
-export async function setupCommand(options: SetupOptions = {}): Promise<void> {
+export interface SetupResult {
+  installedHosts?: DiscoveredHost[];
+}
+
+export async function setupCommand(options: SetupOptions = {}): Promise<SetupResult> {
   console.log(chalk.bold('\n🚀 Astro Agent Runner Setup\n'));
 
   // Reset config to defaults so setup always starts fresh
@@ -211,7 +216,11 @@ export async function setupCommand(options: SetupOptions = {}): Promise<void> {
     ]);
 
     if (selectedHosts.length > 0) {
-      await installOnRemoteHosts(selectedHosts, discoveredHosts, apiUrl, relayUrl);
+      const installed = await installOnRemoteHosts(selectedHosts, discoveredHosts, apiUrl, relayUrl);
+      // Save installed hosts to config for --launch-all reuse
+      if (installed.length > 0) {
+        config.setRemoteHosts(installed);
+      }
     }
   }
 
@@ -282,6 +291,10 @@ export async function setupCommand(options: SetupOptions = {}): Promise<void> {
     console.log(chalk.cyan('     astro_detach()           # Detach from task'));
     console.log();
   }
+
+  // Return installed hosts for --launch-all
+  const storedHosts = config.getRemoteHosts();
+  return { installedHosts: storedHosts.length > 0 ? storedHosts : discoveredHosts };
 }
 
 // ============================================================================
@@ -531,7 +544,8 @@ async function installOnRemoteHosts(
   discoveredHosts: DiscoveredHost[],
   apiUrl: string,
   relayUrl: string,
-): Promise<void> {
+): Promise<DiscoveredHost[]> {
+  const installedHosts: DiscoveredHost[] = [];
   console.log();
   const localIP = detectLocalIP();
   // Build URLs that remote hosts can reach
@@ -598,6 +612,7 @@ async function installOnRemoteHosts(
         },
       );
       spinner.succeed(`${hostName}: Installed and configured (${regResponse.machineId})`);
+      installedHosts.push(host);
     } catch (err) {
       spinner.fail(`${hostName}: Installation failed`);
       console.error(chalk.red(`  ${err instanceof Error ? err.message : String(err)}`));
@@ -607,6 +622,7 @@ async function installOnRemoteHosts(
     }
   }
   console.log();
+  return installedHosts;
 }
 
 // ============================================================================

@@ -146,7 +146,7 @@ export async function packAndInstall(
 // SSH / SCP helpers
 // ============================================================================
 
-function buildSshArgs(host: DiscoveredHost, command: string): string[] {
+export function buildSshArgs(host: DiscoveredHost, command: string): string[] {
   const args: string[] = [];
 
   if (host.port && host.port !== 22) {
@@ -189,10 +189,105 @@ function buildScpArgs(host: DiscoveredHost, localPath: string, remotePath: strin
   return args;
 }
 
-async function sshExec(
+export async function sshExec(
   host: DiscoveredHost,
   command: string,
 ): Promise<{ stdout: string; stderr: string }> {
   const args = buildSshArgs(host, command);
   return execFile('ssh', args, { timeout: 60_000 });
+}
+
+// ============================================================================
+// Remote agent start
+// ============================================================================
+
+export interface StartRemoteOptions {
+  maxTasks?: number;
+  logLevel?: string;
+  preserveWorktrees?: boolean;
+}
+
+export interface RemoteStartResult {
+  host: DiscoveredHost;
+  success: boolean;
+  message: string;
+  alreadyRunning?: boolean;
+}
+
+/**
+ * Start agent runners on remote hosts.
+ *
+ * For each host:
+ *   1. Check if an agent is already running (pgrep)
+ *   2. Start via nohup + disown
+ *   3. Verify after 2s with pgrep
+ *
+ * One failure does not block others.
+ */
+export async function startRemoteAgents(
+  hosts: DiscoveredHost[],
+  options: StartRemoteOptions = {},
+  onProgress?: (host: string, msg: string) => void,
+): Promise<RemoteStartResult[]> {
+  const results: RemoteStartResult[] = [];
+  const log = (host: string, msg: string) => onProgress?.(host, msg);
+
+  for (const host of hosts) {
+    log(host.name, 'Checking for running agent...');
+
+    // 1. Check if already running
+    try {
+      const { stdout } = await sshExec(host, 'pgrep -f "astro-agent start"');
+      if (stdout.trim()) {
+        log(host.name, 'Agent already running');
+        results.push({ host, success: true, message: 'Already running', alreadyRunning: true });
+        continue;
+      }
+    } catch {
+      // pgrep returns exit code 1 when no match — that's fine
+    }
+
+    // 2. Build start command with forwarded options
+    const binDir = '~/.local/bin';
+    const pathExport = `export PATH="${binDir}:$PATH"`;
+    const flags: string[] = ['--foreground'];
+    if (options.maxTasks) flags.push(`--max-tasks ${options.maxTasks}`);
+    if (options.logLevel) flags.push(`--log-level ${options.logLevel}`);
+    if (options.preserveWorktrees) flags.push('--preserve-worktrees');
+    const startCmd = `astro-agent start ${flags.join(' ')}`;
+
+    log(host.name, 'Starting agent...');
+    try {
+      await sshExec(
+        host,
+        `${pathExport} && mkdir -p ~/.astro/logs && nohup ${startCmd} > ~/.astro/logs/agent-runner.log 2>&1 & disown`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      results.push({ host, success: false, message: `Failed to start: ${msg}` });
+      continue;
+    }
+
+    // 3. Verify after 2s
+    await new Promise((r) => setTimeout(r, 2000));
+    try {
+      const { stdout } = await sshExec(host, 'pgrep -f "astro-agent start"');
+      if (stdout.trim()) {
+        log(host.name, 'Agent started successfully');
+        results.push({ host, success: true, message: 'Started' });
+      } else {
+        // Fallback: check log tail
+        try {
+          const { stdout: logTail } = await sshExec(host, 'tail -5 ~/.astro/logs/agent-runner.log 2>/dev/null');
+          results.push({ host, success: false, message: `Process not found after start. Log tail:\n${logTail}` });
+        } catch {
+          results.push({ host, success: false, message: 'Process not found after start (no logs available)' });
+        }
+      }
+    } catch {
+      results.push({ host, success: false, message: 'Could not verify agent start (pgrep failed)' });
+    }
+  }
+
+  return results;
 }

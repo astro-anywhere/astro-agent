@@ -330,21 +330,71 @@ program
   .option('--allow-non-git', 'Allow execution in non-git directories without prompting')
   .option('--sandbox', 'Always use sandbox mode')
   .option('--max-sandbox-size <mb>', 'Maximum sandbox size in MB (default: 100)', parseInt)
-  .option('--with-ssh-config', 'Discover and configure remote hosts from SSH config')
+  .option('--no-ssh-config', 'Skip SSH host discovery (enabled by default)')
+  .option('--no-launch-all', 'Skip starting agents on remote hosts (enabled by default)')
   .action(async (options) => {
     try {
       const { config } = await import('./lib/config.js');
+      const chalk = (await import('chalk')).default;
+
+      // SSH config discovery and launch-all are ON by default; --no-ssh-config / --no-launch-all disable them
+      const withSshConfig = options.sshConfig !== false;
+      const launchAll = options.launchAll !== false && withSshConfig;
+
+      let remoteHosts: import('./types.js').DiscoveredHost[] = [];
 
       if (options.forceSetup || !config.isSetupComplete()) {
-        await setupCommand({
+        const result = await setupCommand({
           api: options.api,
           relay: options.relay,
           hostname: options.hostname,
           skipAuth: options.skipAuth,
-          withSshConfig: options.withSshConfig,
+          withSshConfig,
+          returnInstalledHosts: launchAll,
         });
+        if (launchAll && result.installedHosts) {
+          remoteHosts = result.installedHosts;
+        }
+      } else if (launchAll) {
+        // Setup already complete — read stored remote hosts
+        remoteHosts = config.getRemoteHosts();
+        if (remoteHosts.length === 0) {
+          console.log(chalk.yellow('\nNo remote hosts configured. Run with --force-setup to discover SSH hosts.\n'));
+        }
       }
 
+      // Start remote agents before starting local
+      if (launchAll && remoteHosts.length > 0) {
+        const { startRemoteAgents } = await import('./lib/ssh-installer.js');
+
+        console.log(chalk.bold(`\nStarting agents on ${remoteHosts.length} remote host(s)...\n`));
+
+        const results = await startRemoteAgents(
+          remoteHosts,
+          {
+            maxTasks: options.maxTasks,
+            logLevel: options.logLevel,
+            preserveWorktrees: options.preserveWorktrees,
+          },
+          (host, msg) => console.log(chalk.dim(`  [${host}] ${msg}`)),
+        );
+
+        // Report results
+        for (const r of results) {
+          if (r.success) {
+            const tag = r.alreadyRunning ? 'already running' : 'started';
+            console.log(chalk.green(`  ✓ ${r.host.name}: ${tag}`));
+          } else {
+            console.log(chalk.red(`  ✗ ${r.host.name}: ${r.message}`));
+          }
+        }
+
+        const ok = results.filter((r) => r.success).length;
+        const fail = results.filter((r) => !r.success).length;
+        console.log(chalk.dim(`\n  Remote agents: ${ok} running, ${fail} failed\n`));
+      }
+
+      // Start local agent
       await startCommand({
         foreground: true,
         relay: options.relay,
