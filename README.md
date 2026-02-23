@@ -25,8 +25,8 @@ $ npx @astro/agent launch
     https://astroanywhere.com/device?code=ABCD-1234
 
   Waiting for approval...
-  ✓ Authenticated as alex@example.com
-  ✓ Machine "alex-mbp" registered
+  ✓ Authenticated as you@example.com
+  ✓ Machine "my_laptop" registered
 
   Installing on remote hosts...
   ✓ lab-gpu: installed and started
