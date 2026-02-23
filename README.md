@@ -6,7 +6,7 @@
   <a href="https://www.npmjs.com/package/@astro/agent"><img src="https://img.shields.io/npm/v/@astro/agent?style=flat-square&color=0a0a1a&labelColor=0a0a1a&logo=npm&logoColor=white" alt="npm version"></a>
   <a href="https://www.npmjs.com/package/@astro/agent"><img src="https://img.shields.io/npm/dm/@astro/agent?style=flat-square&color=0a0a1a&labelColor=0a0a1a&logo=npm&logoColor=white" alt="npm downloads"></a>
   <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D18-0a0a1a?style=flat-square&labelColor=0a0a1a&logo=node.js&logoColor=white" alt="node version"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/npm/l/@astro/agent?style=flat-square&color=0a0a1a&labelColor=0a0a1a" alt="license"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-BSL--1.1-0a0a1a?style=flat-square&labelColor=0a0a1a" alt="license"></a>
   <br />
   <br />
   <a href="https://astroanywhere.com/landing/">Website</a>
