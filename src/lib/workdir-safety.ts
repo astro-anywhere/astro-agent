@@ -1,0 +1,293 @@
+/**
+ * Working directory safety checks for agent runner.
+ *
+ * Prevents data loss by:
+ * - Detecting git repos vs non-git directories
+ * - Blocking parallel execution in non-git directories
+ * - Warning about uncommitted changes
+ * - Providing sandbox mode for risky operations
+ */
+
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { stat, cp, rm, readdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
+
+const execFileAsync = promisify(execFile);
+
+export enum WorkdirSafetyTier {
+  SAFE = 'safe',           // Git repo with clean state
+  GUARDED = 'guarded',     // Git repo with uncommitted changes (warn)
+  RISKY = 'risky',         // Non-git directory (warn + require confirmation)
+  UNSAFE = 'unsafe',       // Non-git + parallel execution (block)
+}
+
+export interface SafetyCheckResult {
+  tier: WorkdirSafetyTier;
+  warning?: string;
+  blockReason?: string;
+  isGitRepo: boolean;
+  hasUncommittedChanges: boolean;
+  parallelTaskCount: number;
+}
+
+export interface SandboxOptions {
+  workdir: string;
+  taskId: string;
+  maxSize?: number; // Max size in bytes (default 100MB)
+}
+
+export interface SandboxSetup {
+  sandboxPath: string;
+  originalPath: string;
+  cleanup: () => Promise<void>;
+  copyBack: () => Promise<void>;
+}
+
+const DEFAULT_MAX_SANDBOX_SIZE = 100 * 1024 * 1024; // 100MB
+
+/**
+ * Check if a directory is a git repository
+ */
+export async function isGitRepo(workdir: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: workdir,
+      timeout: 5_000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if a git repository has uncommitted changes
+ */
+export async function hasUncommittedChanges(workdir: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('git', ['status', '--porcelain'], {
+      cwd: workdir,
+      timeout: 5_000,
+    });
+    return stdout.trim().length > 0;
+  } catch {
+    return false; // If git command fails, assume no changes
+  }
+}
+
+/**
+ * Check if git is installed on the system
+ */
+export async function isGitAvailable(): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['--version'], { timeout: 5_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get the size of a directory in bytes
+ */
+export async function getDirectorySize(dirPath: string): Promise<number> {
+  let totalSize = 0;
+
+  async function traverse(currentPath: string): Promise<void> {
+    const entries = await readdir(currentPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = join(currentPath, entry.name);
+
+      if (entry.isDirectory()) {
+        // Skip common large directories and hidden folders
+        if (entry.name === 'node_modules' ||
+            entry.name === '.git' ||
+            entry.name === 'venv' ||
+            entry.name === '__pycache__' ||
+            entry.name === 'build' ||
+            entry.name === 'dist' ||
+            entry.name === '.next') {
+          continue;
+        }
+        await traverse(fullPath);
+      } else if (entry.isFile()) {
+        const stats = await stat(fullPath);
+        totalSize += stats.size;
+      }
+    }
+  }
+
+  await traverse(dirPath);
+  return totalSize;
+}
+
+/**
+ * Check working directory safety for task execution
+ */
+export async function checkWorkdirSafety(
+  workdir: string,
+  activeTasksInDir: number,
+  gitAvailable: boolean,
+): Promise<SafetyCheckResult> {
+  const isGit = gitAvailable && await isGitRepo(workdir);
+  const hasUncommitted = isGit && await hasUncommittedChanges(workdir);
+
+  // UNSAFE: Non-git directory with parallel execution
+  if (!isGit && activeTasksInDir > 0) {
+    return {
+      tier: WorkdirSafetyTier.UNSAFE,
+      blockReason: [
+        '🛑 PARALLEL EXECUTION BLOCKED',
+        '',
+        'Multiple agents cannot run in the same non-git directory.',
+        'This would cause file conflicts and potential data loss.',
+        '',
+        `Active tasks in this directory: ${activeTasksInDir}`,
+        '',
+        'Solutions:',
+        '  1. Wait for other tasks to complete',
+        '  2. Initialize git in this directory',
+        '  3. Use a different working directory',
+        '  4. Enable --sandbox-mode to execute in isolation',
+      ].join('\n'),
+      isGitRepo: false,
+      hasUncommittedChanges: false,
+      parallelTaskCount: activeTasksInDir,
+    };
+  }
+
+  // RISKY: Non-git directory (warn but allow with confirmation)
+  if (!isGit) {
+    return {
+      tier: WorkdirSafetyTier.RISKY,
+      warning: [
+        '⚠️  NO GIT REPOSITORY DETECTED',
+        '',
+        'AI agents may modify or delete files without version control.',
+        'You will NOT be able to revert changes if something goes wrong.',
+        '',
+        'Recommendations:',
+        '  1. Initialize git: cd ' + workdir + ' && git init',
+        '  2. Use --sandbox-mode to work on a copy',
+        '  3. Ensure you have backups of important files',
+        '',
+        '⚠️  Continue at your own risk.',
+      ].join('\n'),
+      isGitRepo: false,
+      hasUncommittedChanges: false,
+      parallelTaskCount: activeTasksInDir,
+    };
+  }
+
+  // GUARDED: Git repo with uncommitted changes
+  if (hasUncommitted) {
+    return {
+      tier: WorkdirSafetyTier.GUARDED,
+      warning: [
+        '⚠️  UNCOMMITTED CHANGES DETECTED',
+        '',
+        'The working directory has uncommitted changes.',
+        'The agent may modify, stage, or commit these changes.',
+        '',
+        'Recommendation: Commit or stash changes before proceeding.',
+      ].join('\n'),
+      isGitRepo: true,
+      hasUncommittedChanges: true,
+      parallelTaskCount: activeTasksInDir,
+    };
+  }
+
+  // SAFE: Git repo with clean state
+  return {
+    tier: WorkdirSafetyTier.SAFE,
+    isGitRepo: true,
+    hasUncommittedChanges: false,
+    parallelTaskCount: activeTasksInDir,
+  };
+}
+
+/**
+ * Create a sandbox copy of the working directory for isolated execution
+ */
+export async function createSandbox(options: SandboxOptions): Promise<SandboxSetup> {
+  const { workdir, taskId, maxSize = DEFAULT_MAX_SANDBOX_SIZE } = options;
+
+  // Check directory size
+  const dirSize = await getDirectorySize(workdir);
+  if (dirSize > maxSize) {
+    const sizeMB = (dirSize / 1024 / 1024).toFixed(1);
+    const maxMB = (maxSize / 1024 / 1024).toFixed(1);
+    throw new Error(
+      `Directory size (${sizeMB}MB) exceeds sandbox limit (${maxMB}MB). ` +
+      `Use --max-sandbox-size to increase or exclude large directories.`
+    );
+  }
+
+  const sandboxRoot = join(homedir(), '.astro', 'sandbox');
+  const sandboxPath = join(sandboxRoot, taskId);
+
+  // Remove existing sandbox if present
+  await rm(sandboxPath, { recursive: true, force: true });
+
+  // Copy directory to sandbox
+  await cp(workdir, sandboxPath, {
+    recursive: true,
+    filter: (src) => {
+      const name = src.split('/').pop() || '';
+      // Skip large/unnecessary directories
+      return !(
+        name === 'node_modules' ||
+        name === '.git' ||
+        name === 'venv' ||
+        name === '__pycache__' ||
+        name === 'build' ||
+        name === 'dist' ||
+        name === '.next' ||
+        name === '.venv'
+      );
+    },
+  });
+
+  return {
+    sandboxPath,
+    originalPath: workdir,
+    cleanup: async () => {
+      await rm(sandboxPath, { recursive: true, force: true });
+    },
+    copyBack: async () => {
+      // WARNING: Copy modified files back to original location
+      // This operation can overwrite existing work. Consider requiring explicit approval.
+      // Skip .git directory to avoid corrupting git state
+      console.warn('[sandbox] Copying back from sandbox to original directory. This may overwrite files.');
+
+      // Verify sandbox still exists before copying
+      try {
+        await stat(sandboxPath);
+      } catch {
+        throw new Error(`Sandbox path no longer exists: ${sandboxPath}`);
+      }
+
+      await cp(sandboxPath, workdir, {
+        recursive: true,
+        force: true,
+        filter: (src) => {
+          const name = src.split('/').pop() || '';
+          return name !== '.git';
+        },
+      });
+    },
+  };
+}
+
+/**
+ * Format directory size for human reading
+ */
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)}GB`;
+}

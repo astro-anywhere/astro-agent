@@ -1,0 +1,900 @@
+/**
+ * WebSocket client with automatic reconnection and heartbeat
+ */
+
+import WebSocket from 'ws';
+import jwt from 'jsonwebtoken';
+import type {
+  WSMessage,
+  RegisterMessage,
+  HeartbeatMessage,
+  TaskStatusMessage,
+  TaskOutputMessage,
+  TaskResultMessage,
+  TaskToolTraceMessage,
+  TaskTextMessage,
+  TaskToolUseMessage,
+  TaskToolResultWSMessage,
+  TaskFileChangeMessage,
+  TaskSessionInitMessage,
+  TaskSteerAckWSMessage,
+  TaskSteerIncomingMessage,
+  TaskApprovalRequestMessage,
+  TaskApprovalResponseMessage,
+  TaskSafetyDecisionMessage,
+  ResourceUpdateMessage,
+  RegisteredMessage,
+  HeartbeatAckMessage,
+  TaskDispatchMessage,
+  TaskCancelMessage,
+  ConfigUpdateMessage,
+  ErrorMessage,
+  FileListRequestMessage,
+  FileListResponseMessage,
+  RepoSetupRequestMessage,
+  RepoSetupResponseMessage,
+  SlashCommandsRequestMessage,
+  SlashCommandsResponseMessage,
+  ProviderInfo,
+  ExecutionStrategyInfo,
+  RunnerConfig,
+  RunnerEvent,
+  RunnerEventHandler,
+  TaskResult,
+  Task,
+} from '../types.js';
+import { getMachineResources } from './resources.js';
+import { config as configManager } from './config.js';
+
+const DEFAULT_CONFIG: RunnerConfig = {
+  relayUrl: 'wss://relay.astro.dev',
+  maxConcurrentTasks: 4,
+  heartbeatInterval: 30000, // 30 seconds
+  reconnectMaxRetries: -1, // Infinite retries
+  reconnectBaseDelay: 1000, // 1 second
+  reconnectMaxDelay: 60000, // 1 minute
+  taskTimeout: 3600000, // 1 hour
+  logLevel: 'info',
+};
+
+export interface WebSocketClientOptions {
+  runnerId: string;
+  machineId: string;
+  providers: ProviderInfo[];
+  executionStrategies?: ExecutionStrategyInfo[];
+  config?: Partial<RunnerConfig>;
+  onEvent?: RunnerEventHandler;
+  onTaskDispatch?: (task: Task) => void;
+  onTaskCancel?: (taskId: string) => void;
+  onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean) => void;
+  onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
+  onFileList?: (path: string, correlationId: string) => void;
+  onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
+  onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
+  version?: string;
+  wsToken?: string;
+}
+
+type IncomingMessage =
+  | RegisteredMessage
+  | HeartbeatAckMessage
+  | TaskDispatchMessage
+  | TaskCancelMessage
+  | TaskSteerIncomingMessage
+  | TaskApprovalResponseMessage
+  | TaskSafetyDecisionMessage
+  | ConfigUpdateMessage
+  | FileListRequestMessage
+  | RepoSetupRequestMessage
+  | SlashCommandsRequestMessage
+  | ErrorMessage;
+
+export class WebSocketClient {
+  private ws: WebSocket | null = null;
+  private config: RunnerConfig;
+  private runnerId: string;
+  private machineId: string;
+  private providers: ProviderInfo[];
+  private executionStrategies?: ExecutionStrategyInfo[];
+  private version: string;
+  private wsToken?: string;
+
+  private reconnectAttempts = 0;
+  private reconnectTimeout: NodeJS.Timeout | null = null;
+  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private isConnecting = false;
+  private shouldReconnect = true;
+  private activeTasks: Set<string> = new Set();
+  private pendingApprovals: Map<string, { resolve: (result: { answered: boolean; answer?: string; message?: string }) => void; reject: (error: Error) => void }> = new Map();
+
+  private onEvent?: RunnerEventHandler;
+  private onTaskDispatch?: (task: Task) => void;
+  private onTaskCancel?: (taskId: string) => void;
+  private onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean) => void;
+  private onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
+  private onFileList?: (path: string, correlationId: string) => void;
+  private onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
+  private onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
+
+  constructor(options: WebSocketClientOptions) {
+    this.runnerId = options.runnerId;
+    this.machineId = options.machineId;
+    this.providers = options.providers;
+    this.executionStrategies = options.executionStrategies;
+    this.version = options.version ?? '0.1.0';
+    this.wsToken = options.wsToken;
+    this.config = { ...DEFAULT_CONFIG, ...options.config };
+    this.onEvent = options.onEvent;
+    this.onTaskDispatch = options.onTaskDispatch;
+    this.onTaskCancel = options.onTaskCancel;
+    this.onTaskSteer = options.onTaskSteer;
+    this.onTaskSafetyDecision = options.onTaskSafetyDecision;
+    this.onFileList = options.onFileList;
+    this.onRepoSetup = options.onRepoSetup;
+    this.onSlashCommands = options.onSlashCommands;
+  }
+
+  /**
+   * Check if access token is expired or expiring soon
+   */
+  private isTokenExpiring(token: string, bufferSeconds: number = 5 * 60): boolean {
+    try {
+      const decoded = jwt.decode(token) as { exp?: number };
+      if (!decoded || !decoded.exp) {
+        return true; // Assume expired if we can't decode
+      }
+
+      const now = Math.floor(Date.now() / 1000);
+      return decoded.exp < now + bufferSeconds;
+    } catch {
+      return true; // Assume expired on error
+    }
+  }
+
+  /**
+   * Refresh the access token and WebSocket token using the refresh token
+   */
+  private async refreshAccessToken(): Promise<string> {
+    const refreshToken = configManager.getRefreshToken();
+    if (!refreshToken) {
+      throw new Error('No refresh token available. Please run setup again to re-authenticate.');
+    }
+
+    const apiUrl = configManager.getApiUrl();
+    const response = await fetch(`${apiUrl}/api/device/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        refreshToken,
+        grantType: 'refresh_token',
+      }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
+      throw new Error(`Token refresh failed: ${error.error || response.statusText}`);
+    }
+
+    const data = await response.json() as { accessToken: string; refreshToken?: string; wsToken?: string };
+
+    // Update stored tokens
+    configManager.setAccessToken(data.accessToken);
+    if (data.refreshToken) {
+      configManager.setRefreshToken(data.refreshToken);
+    }
+    if (data.wsToken) {
+      configManager.setWsToken(data.wsToken);
+    }
+
+    // Return wsToken for WebSocket connections (signed with RELAY_JWT_SECRET)
+    // Falls back to accessToken if server didn't return a wsToken
+    return data.wsToken || data.accessToken;
+  }
+
+  /**
+   * Ensure we have a valid WebSocket token before connecting.
+   * Returns null in dev mode when no token is configured (allows unauthenticated connections).
+   */
+  private async ensureValidToken(): Promise<string | null> {
+    let token = this.wsToken || configManager.getWsToken();
+
+    // In dev mode (non-wss relay), skip auth entirely
+    if (this.config.relayUrl.startsWith('ws://')) {
+      if (!token) {
+        return null;
+      }
+      // Even with a stale token, dev mode doesn't need auth
+      if (this.isTokenExpiring(token)) {
+        return null;
+      }
+    }
+
+    if (!token) {
+      throw new Error('No access token configured. Please run setup to authenticate.');
+    }
+
+    // Check if token is expired or expiring soon
+    if (this.isTokenExpiring(token)) {
+      console.log('[ws-client] Access token expired or expiring soon, refreshing...');
+      try {
+        token = await this.refreshAccessToken();
+        this.wsToken = token; // Update instance token
+        console.log('[ws-client] ✅ Access token refreshed successfully');
+      } catch (error) {
+        console.error('[ws-client] ❌ Failed to refresh token:', error instanceof Error ? error.message : String(error));
+        throw new Error(`Authentication failed: ${error instanceof Error ? error.message : 'Token refresh failed'}. Please run setup again.`);
+      }
+    }
+
+    return token;
+  }
+
+  /**
+   * Connect to the relay server
+   */
+  async connect(): Promise<void> {
+    if (this.isConnecting || this.ws?.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    this.isConnecting = true;
+    this.shouldReconnect = true;
+
+    // Ensure we have a valid token before connecting (null = dev mode, no auth)
+    let token: string | null;
+    try {
+      token = await this.ensureValidToken();
+    } catch (error) {
+      this.isConnecting = false;
+      throw error;
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        const headers: Record<string, string> = {
+          'X-Runner-Id': this.runnerId,
+          'X-Machine-Id': this.machineId,
+        };
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
+        this.ws = new WebSocket(this.config.relayUrl, { headers });
+
+        this.ws.on('open', async () => {
+          this.isConnecting = false;
+          this.reconnectAttempts = 0;
+          await this.handleOpen();
+          resolve();
+        });
+
+        this.ws.on('message', (data) => {
+          this.handleMessage(data);
+        });
+
+        const thisSocket = this.ws;
+        this.ws.on('close', (code, reason) => {
+          // Only handle close if this is still the active socket.
+          // When the server closes a stale connection after re-registration,
+          // the old socket's close handler fires — ignore it to prevent a reconnect loop.
+          if (this.ws !== thisSocket) {
+            return;
+          }
+          this.handleClose(code, reason.toString());
+        });
+
+        this.ws.on('error', (error) => {
+          this.isConnecting = false;
+          if (this.reconnectAttempts === 0) {
+            reject(error);
+          }
+          this.emitEvent({ type: 'error', error: error as Error });
+        });
+
+        this.ws.on('pong', () => {
+          // Server responded to ping, connection is alive
+        });
+      } catch (error) {
+        this.isConnecting = false;
+        reject(error);
+      }
+    });
+  }
+
+  /**
+   * Disconnect from the relay server
+   */
+  disconnect(): void {
+    this.shouldReconnect = false;
+    this.cleanup();
+
+    if (this.ws) {
+      this.ws.close(1000, 'Client disconnect');
+      this.ws = null;
+    }
+  }
+
+  /**
+   * Send a task status update
+   */
+  sendTaskStatus(
+    taskId: string,
+    status: TaskStatusMessage['payload']['status'],
+    progress?: number,
+    message?: string
+  ): void {
+    const msg: TaskStatusMessage = {
+      type: 'task_status',
+      timestamp: new Date().toISOString(),
+      payload: { taskId, status, progress, message },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Send task output (stdout/stderr)
+   */
+  sendTaskOutput(taskId: string, stream: 'stdout' | 'stderr', data: string, sequence: number): void {
+    const msg: TaskOutputMessage = {
+      type: 'task_output',
+      timestamp: new Date().toISOString(),
+      payload: { taskId, stream, data, sequence },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Send task result
+   */
+  sendTaskResult(result: TaskResult): void {
+    const msg: TaskResultMessage = {
+      type: 'task_result',
+      timestamp: new Date().toISOString(),
+      payload: result,
+    };
+    this.send(msg);
+
+    // Remove from active tasks
+    this.activeTasks.delete(result.taskId);
+  }
+
+  /**
+   * Send tool trace
+   */
+  sendToolTrace(taskId: string, toolName: string, toolInput?: unknown, toolResult?: unknown, success?: boolean): void {
+    const msg: TaskToolTraceMessage = {
+      type: 'task_tool_trace',
+      timestamp: new Date().toISOString(),
+      payload: { taskId, toolName, toolInput, toolResult, success },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Send structured text (bypasses stdout throttle on relay)
+   */
+  sendTaskText(taskId: string, text: string, sequence: number): void {
+    const msg: TaskTextMessage = {
+      type: 'task_text',
+      timestamp: new Date().toISOString(),
+      payload: { taskId, text, sequence },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Send structured tool use event
+   */
+  sendTaskToolUse(taskId: string, toolName: string, toolInput: unknown): void {
+    const msg: TaskToolUseMessage = {
+      type: 'task_tool_use',
+      timestamp: new Date().toISOString(),
+      payload: { taskId, toolName, toolInput },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Send structured tool result event
+   */
+  sendTaskToolResult(taskId: string, toolName: string, result: unknown, success: boolean): void {
+    const msg: TaskToolResultWSMessage = {
+      type: 'task_tool_result',
+      timestamp: new Date().toISOString(),
+      payload: { taskId, toolName, result, success },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Send structured file change event
+   */
+  sendTaskFileChange(taskId: string, path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number, diff?: string): void {
+    const msg: TaskFileChangeMessage = {
+      type: 'task_file_change',
+      timestamp: new Date().toISOString(),
+      payload: { taskId, path, action, linesAdded, linesRemoved, diff },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Send structured session init event
+   */
+  sendTaskSessionInit(taskId: string, sessionId: string, model?: string): void {
+    const msg: TaskSessionInitMessage = {
+      type: 'task_session_init',
+      timestamp: new Date().toISOString(),
+      payload: { taskId, sessionId, model },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Send steer acknowledgment
+   */
+  sendSteerAck(taskId: string, accepted: boolean, message?: string, interrupted?: boolean): void {
+    const msg: TaskSteerAckWSMessage = {
+      type: 'task_steer_ack',
+      timestamp: new Date().toISOString(),
+      payload: { taskId, accepted, message },
+    };
+    if (interrupted) {
+      (msg.payload as Record<string, unknown>).interrupted = true;
+    }
+    this.send(msg);
+  }
+
+  /**
+   * Send approval request and wait for response (following Cyrus pattern)
+   * Returns a promise that resolves when the user responds or rejects on timeout
+   */
+  sendApprovalRequest(taskId: string, question: string, options: string[]): Promise<{ answered: boolean; answer?: string; message?: string }> {
+    const requestId = `${taskId}-${Date.now()}`;
+
+    return new Promise((resolve, reject) => {
+      // Store the promise handlers
+      this.pendingApprovals.set(requestId, { resolve, reject });
+
+      // Send the approval request message
+      const msg: TaskApprovalRequestMessage = {
+        type: 'task_approval_request',
+        timestamp: new Date().toISOString(),
+        payload: { taskId, requestId, question, options },
+      };
+      this.send(msg);
+
+      console.log(`[ws-client] Sent approval request ${requestId} for task ${taskId}`);
+
+      // Set timeout (60 seconds for user to respond)
+      setTimeout(() => {
+        const pending = this.pendingApprovals.get(requestId);
+        if (pending) {
+          this.pendingApprovals.delete(requestId);
+          pending.resolve({ answered: false, message: 'Approval request timed out (60s)' });
+        }
+      }, 60000);
+    });
+  }
+
+  /**
+   * Send safety prompt to user
+   */
+  sendSafetyPrompt(
+    taskId: string,
+    safetyTier: 'safe' | 'guarded' | 'risky' | 'unsafe',
+    warning: string | undefined,
+    options: Array<{ id: string; label: string; description?: string }>,
+  ): void {
+    const msg = {
+      type: 'task_safety_prompt' as const,
+      timestamp: new Date().toISOString(),
+      payload: {
+        taskId,
+        safetyTier,
+        warning,
+        blockReason: undefined,
+        options,
+      },
+    };
+    this.send(msg);
+    console.log(`[ws-client] Sent safety prompt for task ${taskId} (tier: ${safetyTier})`);
+  }
+
+  /**
+   * Send resource update
+   */
+  async sendResourceUpdate(): Promise<void> {
+    const resources = await getMachineResources();
+    const msg: ResourceUpdateMessage = {
+      type: 'resource_update',
+      timestamp: new Date().toISOString(),
+      payload: { runnerId: this.runnerId, resources },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Check if connected
+   */
+  isConnected(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Get current configuration
+   */
+  getConfig(): RunnerConfig {
+    return { ...this.config };
+  }
+
+  /**
+   * Get active task count
+   */
+  getActiveTaskCount(): number {
+    return this.activeTasks.size;
+  }
+
+  /**
+   * Add task to active set
+   */
+  addActiveTask(taskId: string): void {
+    this.activeTasks.add(taskId);
+  }
+
+  /**
+   * Remove task from active set
+   */
+  removeActiveTask(taskId: string): void {
+    this.activeTasks.delete(taskId);
+  }
+
+  // ============================================================================
+  // Private Methods
+  // ============================================================================
+
+  private async handleOpen(): Promise<void> {
+    // Send registration message
+    const resources = await getMachineResources();
+    // Allow config to override the display name (e.g., SSH alias like "nebius-2")
+    const machineName = configManager.getMachineName();
+    const registerMsg: RegisterMessage = {
+      type: 'register',
+      timestamp: new Date().toISOString(),
+      payload: {
+        runnerId: this.runnerId,
+        machineId: this.machineId,
+        ...(machineName ? { name: machineName } : {}),
+        providers: this.providers,
+        executionStrategies: this.executionStrategies,
+        resources,
+        version: this.version,
+      },
+    };
+    this.send(registerMsg);
+
+    // Start heartbeat
+    this.startHeartbeat();
+
+    this.emitEvent({ type: 'connected' });
+  }
+
+  private handleMessage(data: WebSocket.RawData): void {
+    try {
+      const raw = JSON.parse(data.toString()) as { type: string; [key: string]: unknown };
+
+      // Handle task.steer (dot notation from relay) by normalizing to task_steer
+      if (raw.type === 'task.steer') {
+        // Relay sends: { type: 'task.steer', taskId, message, action, interrupt }
+        // Normalize to agent-runner format: { type: 'task_steer', payload: { taskId, message, action, interrupt } }
+        const steerMsg: TaskSteerIncomingMessage = {
+          type: 'task_steer',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: {
+            taskId: raw.taskId as string,
+            message: raw.message as string,
+            action: raw.action as string | undefined,
+            interrupt: raw.interrupt as boolean | undefined,
+          },
+        };
+        this.handleTaskSteer(steerMsg);
+        return;
+      }
+
+      // Handle file_list.request (dot notation from relay)
+      if (raw.type === 'file_list.request') {
+        const fileListMsg: FileListRequestMessage = {
+          type: 'file_list_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: {
+            path: raw.path as string,
+            correlationId: raw.correlationId as string,
+          },
+        };
+        this.handleFileListRequest(fileListMsg);
+        return;
+      }
+
+      // Handle slash_commands.request (dot notation from relay)
+      if (raw.type === 'slash_commands.request') {
+        const slashMsg: SlashCommandsRequestMessage = {
+          type: 'slash_commands_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: {
+            correlationId: raw.correlationId as string,
+            workingDirectory: raw.workingDirectory as string | undefined,
+          },
+        };
+        this.handleSlashCommandsRequest(slashMsg);
+        return;
+      }
+
+      // Handle repo_setup.request (dot notation from relay)
+      if (raw.type === 'repo_setup.request') {
+        const repoMsg: RepoSetupRequestMessage = {
+          type: 'repo_setup_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: raw.payload as RepoSetupRequestMessage['payload'],
+        };
+        this.handleRepoSetupRequest(repoMsg);
+        return;
+      }
+
+      const message = raw as unknown as IncomingMessage;
+      this.routeMessage(message);
+    } catch (error) {
+      this.emitEvent({ type: 'error', error: error as Error });
+    }
+  }
+
+  private routeMessage(message: IncomingMessage): void {
+    switch (message.type) {
+      case 'registered':
+        this.handleRegistered(message);
+        break;
+      case 'heartbeat_ack':
+        // Heartbeat acknowledged, nothing to do
+        break;
+      case 'task_dispatch':
+        this.handleTaskDispatch(message);
+        break;
+      case 'task_cancel':
+        this.handleTaskCancel(message);
+        break;
+      case 'task_steer':
+        this.handleTaskSteer(message as unknown as TaskSteerIncomingMessage);
+        break;
+      case 'task_approval_response':
+        this.handleApprovalResponse(message as TaskApprovalResponseMessage);
+        break;
+      case 'task_safety_decision':
+        this.handleSafetyDecision(message as unknown as { type: 'task_safety_decision'; timestamp: string; payload: { taskId: string; decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel' } });
+        break;
+      case 'config_update':
+        this.handleConfigUpdate(message);
+        break;
+      case 'file_list_request':
+        this.handleFileListRequest(message as FileListRequestMessage);
+        break;
+      case 'repo_setup_request':
+        this.handleRepoSetupRequest(message as RepoSetupRequestMessage);
+        break;
+      case 'slash_commands_request':
+        this.handleSlashCommandsRequest(message as SlashCommandsRequestMessage);
+        break;
+      case 'error':
+        this.handleError(message);
+        break;
+    }
+  }
+
+  private handleRegistered(message: RegisteredMessage): void {
+    // Apply server-provided configuration
+    if (message.payload.config) {
+      this.config = { ...this.config, ...message.payload.config };
+    }
+  }
+
+  private handleTaskDispatch(message: TaskDispatchMessage): void {
+    const task = message.payload;
+
+    // Check if we can accept more tasks
+    if (this.activeTasks.size >= this.config.maxConcurrentTasks) {
+      this.sendTaskStatus(task.id, 'queued', 0, 'Waiting for available slot');
+      return;
+    }
+
+    this.activeTasks.add(task.id);
+    this.emitEvent({ type: 'task_received', task });
+    this.onTaskDispatch?.(task);
+  }
+
+  private handleTaskCancel(message: TaskCancelMessage): void {
+    const { taskId } = message.payload;
+    this.activeTasks.delete(taskId);
+    this.emitEvent({ type: 'task_cancelled', taskId });
+    this.onTaskCancel?.(taskId);
+  }
+
+  private handleTaskSteer(message: TaskSteerIncomingMessage): void {
+    const { taskId, message: steerMessage, action, interrupt } = message.payload;
+    this.onTaskSteer?.(taskId, steerMessage, action, interrupt);
+  }
+
+  private handleSafetyDecision(message: { type: 'task_safety_decision'; timestamp: string; payload: { taskId: string; decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel' } }): void {
+    const { taskId, decision } = message.payload;
+    console.log(`[ws-client] Received safety decision for ${taskId}: ${decision}`);
+    this.onTaskSafetyDecision?.(taskId, decision);
+  }
+
+  private handleApprovalResponse(message: TaskApprovalResponseMessage): void {
+    const { requestId, answered, answer, message: responseMessage } = message.payload;
+    const pending = this.pendingApprovals.get(requestId);
+
+    if (pending) {
+      console.log(`[ws-client] Received approval response for ${requestId}: answered=${answered}, answer=${answer}`);
+      this.pendingApprovals.delete(requestId);
+      pending.resolve({ answered, answer, message: responseMessage });
+    } else {
+      console.warn(`[ws-client] Received approval response for unknown request ${requestId}`);
+    }
+  }
+
+  private handleConfigUpdate(message: ConfigUpdateMessage): void {
+    this.config = { ...this.config, ...message.payload };
+
+    // Restart heartbeat with new interval if changed
+    if (message.payload.heartbeatInterval) {
+      this.stopHeartbeat();
+      this.startHeartbeat();
+    }
+  }
+
+  private handleError(message: ErrorMessage): void {
+    const code = message.payload?.code ?? 'UNKNOWN';
+    const msg = message.payload?.message ?? 'Unknown error';
+    const error = new Error(`${code}: ${msg}`);
+    this.emitEvent({ type: 'error', error });
+  }
+
+  private handleFileListRequest(message: FileListRequestMessage): void {
+    const { path, correlationId } = message.payload;
+    this.onFileList?.(path, correlationId);
+  }
+
+  /**
+   * Send file list response
+   */
+  sendFileListResponse(correlationId: string, files: string[]): void {
+    const msg: FileListResponseMessage = {
+      type: 'file_list_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, files },
+    };
+    this.send(msg);
+  }
+
+  private handleRepoSetupRequest(message: RepoSetupRequestMessage): void {
+    this.onRepoSetup?.(message.payload);
+  }
+
+  private handleSlashCommandsRequest(message: SlashCommandsRequestMessage): void {
+    const { correlationId, workingDirectory } = message.payload;
+    this.onSlashCommands?.(correlationId, workingDirectory);
+  }
+
+  /**
+   * Send slash commands response
+   */
+  sendSlashCommandsResponse(correlationId: string, commands: Array<{ name: string; description: string }>): void {
+    const msg: SlashCommandsResponseMessage = {
+      type: 'slash_commands_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, commands },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Send repo setup response
+   */
+  sendRepoSetupResponse(
+    correlationId: string,
+    result: Omit<RepoSetupResponseMessage['payload'], 'correlationId'>,
+  ): void {
+    const msg: RepoSetupResponseMessage = {
+      type: 'repo_setup_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, ...result },
+    };
+    this.send(msg);
+  }
+
+  private handleClose(code: number, reason: string): void {
+    this.cleanup();
+    this.emitEvent({ type: 'disconnected', reason: `${code}: ${reason}` });
+
+    // Custom close code 4001 means this connection was replaced by another
+    // process with the same machineId — do not reconnect.
+    if (code === 4001) {
+      console.error('[ws-client] Connection replaced by another process with the same machineId. Not reconnecting.');
+      this.shouldReconnect = false;
+      return;
+    }
+
+    if (this.shouldReconnect) {
+      this.scheduleReconnect();
+    }
+  }
+
+  private send(message: WSMessage): void {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
+    }
+  }
+
+  private startHeartbeat(): void {
+    this.heartbeatInterval = setInterval(async () => {
+      if (this.ws?.readyState === WebSocket.OPEN) {
+        // Send application-level heartbeat
+        const resources = await getMachineResources();
+        const heartbeat: HeartbeatMessage = {
+          type: 'heartbeat',
+          timestamp: new Date().toISOString(),
+          payload: {
+            runnerId: this.runnerId,
+            activeTasks: Array.from(this.activeTasks),
+            resources,
+          },
+        };
+        this.send(heartbeat);
+
+        // Also send WebSocket ping for connection health
+        this.ws.ping();
+      }
+    }, this.config.heartbeatInterval);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+  }
+
+  private scheduleReconnect(): void {
+    const maxRetries = this.config.reconnectMaxRetries;
+    if (maxRetries >= 0 && this.reconnectAttempts >= maxRetries) {
+      return;
+    }
+
+    this.reconnectAttempts++;
+
+    // Exponential backoff with jitter
+    const delay = Math.min(
+      this.config.reconnectBaseDelay * Math.pow(2, this.reconnectAttempts - 1) +
+        Math.random() * 1000,
+      this.config.reconnectMaxDelay
+    );
+
+    this.emitEvent({ type: 'reconnecting', attempt: this.reconnectAttempts });
+
+    this.reconnectTimeout = setTimeout(() => {
+      this.connect().catch(() => {
+        // Error already handled in connect()
+      });
+    }, delay);
+  }
+
+  private cleanup(): void {
+    this.stopHeartbeat();
+
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
+  }
+
+  private emitEvent(event: RunnerEvent): void {
+    this.onEvent?.(event);
+  }
+}
