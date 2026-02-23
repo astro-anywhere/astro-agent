@@ -1,12 +1,42 @@
-# Astro Agent Runner
+<p align="center">
+  <br />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://astroanywhere.com/landing/banner-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://astroanywhere.com/landing/banner-light.svg">
+    <img alt="Astro Agent Runner" src="https://astroanywhere.com/landing/banner-dark.svg" width="480">
+  </picture>
+  <br />
+  <strong>Connect your machines. Let AI do the work.</strong>
+  <br />
+  <br />
+  <a href="https://www.npmjs.com/package/@astro/agent"><img src="https://img.shields.io/npm/v/@astro/agent?style=flat-square&color=0a0a1a&labelColor=0a0a1a&logo=npm&logoColor=white" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@astro/agent"><img src="https://img.shields.io/npm/dm/@astro/agent?style=flat-square&color=0a0a1a&labelColor=0a0a1a&logo=npm&logoColor=white" alt="npm downloads"></a>
+  <a href="https://nodejs.org"><img src="https://img.shields.io/badge/node-%3E%3D18-0a0a1a?style=flat-square&labelColor=0a0a1a&logo=node.js&logoColor=white" alt="node version"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/npm/l/@astro/agent?style=flat-square&color=0a0a1a&labelColor=0a0a1a" alt="license"></a>
+  <br />
+  <br />
+  <a href="https://astroanywhere.com/landing/">Website</a>
+  &nbsp;&middot;&nbsp;
+  <a href="https://astroanywhere.com">Dashboard</a>
+  &nbsp;&middot;&nbsp;
+  <a href="#install">Get Started</a>
+  <br />
+  <br />
+</p>
 
-> Connect your machines to [Astro](https://astroanywhere.com) and let AI execute your tasks.
+---
+
+## What is Astro?
+
+[**Astro**](https://astroanywhere.com/landing/) is mission control for the AI age. It turns ambitious goals into dependency graphs, dispatches tasks across your machines in parallel, and surfaces the decisions that need you.
+
+You plan in the browser. Your machines do the work. The **Agent Runner** is the piece that runs on your machines — it receives tasks, executes AI agents (Claude, Codex), and streams results back.
+
+> **Self-hosting** is on the roadmap. Currently Astro runs as a hosted service at [astroanywhere.com](https://astroanywhere.com).
 
 ## Prerequisites
 
-Register an account at [astroanywhere.com](https://astroanywhere.com) before getting started.
-
-> **Self-hosting:** Astro currently runs as a hosted service at astroanywhere.com. Local/self-hosted deployment is on the roadmap.
+Create an account at [astroanywhere.com](https://astroanywhere.com) &mdash; you'll need it to authenticate your machines.
 
 ## Install
 
@@ -16,7 +46,7 @@ npx @astro/agent launch
 
 One command. It detects your AI providers, finds your SSH hosts, authenticates you, sets up everything, and starts listening for tasks.
 
-No global install needed. `npx` fetches the latest version.
+No global install. `npx` fetches the latest version.
 
 ## What Happens
 
@@ -45,19 +75,18 @@ $ npx @astro/agent launch
   Ready. Listening for tasks...
 ```
 
-After this, your laptop and all your remote machines show up in Astro's **Environments** page. Dispatch tasks to any of them from the UI.
+Your laptop and all remote hosts appear in Astro's **Environments** page. Dispatch tasks to any of them.
 
-## What You Can Do on Astro Anywhere
+## What You Get with Astro Anywhere
 
-Once your machines are connected, [astroanywhere.com](https://astroanywhere.com) gives you:
-
-- **Plan** — Describe a goal, Astro breaks it into a dependency graph of tasks
-- **Execute** — Dispatch tasks to any registered machine (laptop, server, HPC cluster)
-- **Monitor** — Watch agent output stream in real time, see tool calls and file changes
-- **Decide** — Approve, reject, or redirect when agents need human judgment
-- **Branch per task** — Every task runs on its own git branch, PRs created automatically
-- **Multi-machine** — Tasks route to the best available machine by load and capability
-- **MCP tools** — Agents can query plans, create sub-tasks, and ask you questions mid-execution
+| | Feature | |
+|---|---|---|
+| **Plan** | Describe a goal &rarr; Astro breaks it into a dependency graph | Graph, List, Timeline views |
+| **Execute** | Dispatch to any machine &mdash; laptop, server, HPC | Parallel, isolated branches |
+| **Monitor** | Real-time agent output, tool calls, file changes | Live streaming |
+| **Decide** | Approve, reject, or redirect from any device | No terminal needed |
+| **Ship** | PRs created automatically per task | Branch-per-task isolation |
+| **Scale** | Multi-machine routing by load & capability | SSH config auto-discovery |
 
 ## What the Agent Runner Does
 
@@ -68,7 +97,7 @@ When you execute a task in Astro, it lands on one of your machines. The agent ru
 - Streams progress back to the Astro UI in real time
 - Commits changes, pushes the branch, and opens a PR
 
-Multiple tasks run in parallel — each on its own branch, no conflicts.
+Multiple tasks run in parallel &mdash; each on its own branch, no conflicts.
 
 Your API keys stay on your machine. Astro never sees them.
 
@@ -100,7 +129,7 @@ npx @astro/agent config --set maxTasks=8
 
 ## Remote Machines
 
-`launch` reads your `~/.ssh/config`, discovers hosts, installs the agent runner over SSH, and starts them — all from your laptop.
+`launch` reads your `~/.ssh/config`, discovers hosts, installs the agent runner over SSH, and starts them &mdash; all from your laptop.
 
 To set up a single remote machine manually, SSH in and run:
 
@@ -115,7 +144,7 @@ Astro picks the best available machine for each task based on load and capabilit
 Auto-detected. No configuration needed if any of these are installed:
 
 | Provider | How to Enable |
-|----------|---------------|
+|---|---|
 | **Claude SDK** | Run `astro-agent auth` or set `ANTHROPIC_API_KEY` |
 | **Claude Code** | Install [Claude Code](https://claude.ai/code) |
 | **Codex** | Install Codex CLI |
@@ -128,22 +157,28 @@ Use the agent runner as an MCP server inside Claude Code:
 npx @astro/agent mcp
 ```
 
-This gives Claude Code access to Astro tools — attach to tasks, send updates, check status.
+This gives Claude Code access to Astro tools &mdash; attach to tasks, send updates, check status.
 
 ## Configuration
 
 Stored at `~/.config/astro-agent/config.json`. Most users never need to touch this.
 
 | Setting | Default | Description |
-|---------|---------|-------------|
-| `maxTasks` | 4 | Max concurrent tasks |
+|---|---|---|
+| `maxTasks` | `4` | Max concurrent tasks |
 | `logLevel` | `info` | Logging verbosity |
-| `autoStart` | false | Start on login |
+| `autoStart` | `false` | Start on login |
 
 ## Environment Variables
 
 | Variable | Description |
-|----------|-------------|
+|---|---|
 | `ANTHROPIC_API_KEY` | Claude API key (alternative to OAuth) |
 | `ASTRO_MACHINE_NAME` | Custom machine name |
 | `ASTRO_LOG_LEVEL` | Override log level |
+
+---
+
+<p align="center">
+  <a href="https://astroanywhere.com/landing/">astroanywhere.com</a>
+</p>
