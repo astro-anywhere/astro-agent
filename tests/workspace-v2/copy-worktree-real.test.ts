@@ -21,7 +21,7 @@ import {
   createCopyWorktree,
   createReferenceWorktree,
   generateFileMap,
-} from '../src/lib/copy-worktree.js';
+} from '../../src/lib/copy-worktree.js';
 
 // ---------------------------------------------------------------------------
 // Helpers

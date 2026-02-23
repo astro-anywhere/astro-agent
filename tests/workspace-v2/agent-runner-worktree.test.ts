@@ -38,7 +38,7 @@ vi.mock('../src/lib/worktree-setup.js', () => ({
 import {
   createWorktree,
   removeLingeringWorktrees,
-} from '../src/lib/worktree.js';
+} from '../../src/lib/worktree.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
