@@ -6,6 +6,8 @@
 
 Register an account at [astroanywhere.com](https://astroanywhere.com) before getting started.
 
+> **Self-hosting:** Astro currently runs as a hosted service at astroanywhere.com. Local/self-hosted deployment is on the roadmap.
+
 ## Install
 
 ```bash
@@ -45,7 +47,19 @@ $ npx @astro/agent launch
 
 After this, your laptop and all your remote machines show up in Astro's **Environments** page. Dispatch tasks to any of them from the UI.
 
-## What It Does
+## What You Can Do on Astro Anywhere
+
+Once your machines are connected, [astroanywhere.com](https://astroanywhere.com) gives you:
+
+- **Plan** — Describe a goal, Astro breaks it into a dependency graph of tasks
+- **Execute** — Dispatch tasks to any registered machine (laptop, server, HPC cluster)
+- **Monitor** — Watch agent output stream in real time, see tool calls and file changes
+- **Decide** — Approve, reject, or redirect when agents need human judgment
+- **Branch per task** — Every task runs on its own git branch, PRs created automatically
+- **Multi-machine** — Tasks route to the best available machine by load and capability
+- **MCP tools** — Agents can query plans, create sub-tasks, and ask you questions mid-execution
+
+## What the Agent Runner Does
 
 When you execute a task in Astro, it lands on one of your machines. The agent runner:
 
