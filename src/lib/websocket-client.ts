@@ -183,8 +183,8 @@ export class WebSocketClient {
     });
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({ error: 'Unknown error' })) as { error?: string };
-      throw new Error(`Token refresh failed: ${error.error || response.statusText}`);
+      const error = await response.json().catch(() => ({ error: `HTTP ${response.status} ${response.statusText}` })) as { error?: string };
+      throw new Error(`Token refresh failed (${response.status}): ${error.error || response.statusText}`);
     }
 
     const data = await response.json() as { accessToken: string; refreshToken?: string; wsToken?: string };
@@ -958,7 +958,11 @@ export class WebSocketClient {
 
     this.reconnectTimeout = setTimeout(() => {
       this.connect().catch(() => {
-        // Error already handled in connect()
+        // connect() failed before opening a WebSocket (e.g. token refresh error).
+        // No 'close' event will fire, so we must schedule the next retry ourselves.
+        if (this.shouldReconnect) {
+          this.scheduleReconnect();
+        }
       });
     }, delay);
   }
