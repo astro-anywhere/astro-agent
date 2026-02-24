@@ -88,16 +88,23 @@ export async function createWorktree(
     // Non-fatal: proceed with potentially stale refs
   }
 
-  // Detect the default branch to use as start point
-  const defaultBranch = await getDefaultBranch(gitRoot);
+  // Use baseBranch from config (set during repo setup), fall back to auto-detection
+  const defaultBranch = await readBaseBranch(gitRoot, agentDirName) ?? await getDefaultBranch(gitRoot);
 
   // Create worktree from origin/<defaultBranch> — NOT from HEAD.
   // Using HEAD is dangerous because it could be on a stale task branch
   // (from a previous execution that fell back to the repo directly),
   // which would cause cross-task commit contamination.
+  //
+  // If origin/<branch> doesn't exist (purely local repo, no remote),
+  // fall back to the local branch ref.
+  const remoteRef = `origin/${defaultBranch}`;
+  const hasRemoteRef = await refExists(gitRoot, remoteRef);
+  const startPoint = hasRemoteRef ? remoteRef : defaultBranch;
+
   await execFileAsync(
     'git',
-    ['-C', gitRoot, 'worktree', 'add', '-b', branchName, worktreePath, `origin/${defaultBranch}`],
+    ['-C', gitRoot, 'worktree', 'add', '-b', branchName, worktreePath, startPoint],
     { env: withGitEnv(), timeout: 30_000 }
   );
 
@@ -259,6 +266,25 @@ async function getDefaultBranch(gitRoot: string): Promise<string> {
   }
 
   return 'main';
+}
+
+/**
+ * Read the base branch from the agent directory config.
+ * This is set during repo setup (e.g., 'main', 'develop', 'release').
+ * Returns null if config doesn't exist or baseBranch is not set.
+ */
+async function readBaseBranch(gitRoot: string, agentDirName: string): Promise<string | null> {
+  try {
+    const configPath = join(gitRoot, agentDirName, 'config.json');
+    const content = await readFile(configPath, 'utf-8');
+    const config = JSON.parse(content);
+    if (config.baseBranch && typeof config.baseBranch === 'string') {
+      return config.baseBranch;
+    }
+  } catch {
+    // Config doesn't exist or is invalid
+  }
+  return null;
 }
 
 /**
@@ -474,6 +500,18 @@ async function pruneWorktrees(gitRoot: string): Promise<void> {
     });
   } catch {
     // Ignore prune errors
+  }
+}
+
+async function refExists(gitRoot: string, ref: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['-C', gitRoot, 'rev-parse', '--verify', ref], {
+      env: withGitEnv(),
+      timeout: 5_000,
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
 
