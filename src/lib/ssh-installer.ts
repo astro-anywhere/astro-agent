@@ -249,23 +249,10 @@ export async function startRemoteAgents(
   const log = (host: string, msg: string) => onProgress?.(host, msg);
 
   for (const host of hosts) {
-    log(host.name, 'Checking for running agent...');
-
-    // 1. Check if already running (pgrep with ps aux fallback) and stop stale process
-    try {
-      const { stdout } = await sshExec(
-        host,
-        'pgrep -f "astro-agent start" 2>/dev/null || ps aux 2>/dev/null | grep "astro-agent start" | grep -v grep',
-      );
-      if (stdout.trim()) {
-        log(host.name, 'Stopping existing agent...');
-        await sshExec(host, 'pkill -f "astro-agent start" 2>/dev/null || true').catch(() => {});
-        // Wait for process to exit
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    } catch {
-      // pgrep returns exit code 1 when no match — that's fine
-    }
+    // 1. Always kill existing agent so we start fresh with latest binary/config.
+    log(host.name, 'Stopping existing agent (if any)...');
+    await sshExec(host, 'pkill -f "astro-agent start" 2>/dev/null || true').catch(() => {});
+    await new Promise((r) => setTimeout(r, 1000));
 
     // 2. Build start command with forwarded options
     // Use full path to avoid PATH resolution issues across different shells (zsh, bash)
@@ -282,32 +269,35 @@ export async function startRemoteAgents(
         host,
         `export PATH="$HOME/.local/bin:$PATH" && mkdir -p $HOME/.astro/logs && nohup ${startCmd} > $HOME/.astro/logs/agent-runner.log 2>&1 & disown`,
       );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      results.push({ host, success: false, message: `Failed to start: ${msg}` });
-      continue;
+    } catch {
+      // nohup + & disown may cause SSH to exit with non-zero even when the
+      // remote process started successfully. We verify via pgrep below.
     }
 
-    // 3. Verify after 2s — use ps aux fallback if pgrep is unavailable
+    // 3. Verify after 2s — use [a]stro-agent bracket trick to prevent grep self-match
+    log(host.name, 'Verifying process started...');
     await new Promise((r) => setTimeout(r, 2000));
     try {
       const { stdout } = await sshExec(
         host,
-        'pgrep -f "astro-agent start" 2>/dev/null || ps aux 2>/dev/null | grep "astro-agent start" | grep -v grep',
+        'pgrep -f "[a]stro-agent start" 2>/dev/null || ps aux | grep "[a]stro-agent start"',
       );
       if (stdout.trim()) {
         log(host.name, 'Agent started successfully');
         results.push({ host, success: true, message: 'Started' });
       } else {
-        // Fallback: check log tail
+        // Fallback: check log tail for error details
         try {
           const { stdout: logTail } = await sshExec(host, 'tail -5 $HOME/.astro/logs/agent-runner.log 2>/dev/null');
+          log(host.name, `Process not found. Log tail: ${logTail.trim()}`);
           results.push({ host, success: false, message: `Process not found after start. Log tail:\n${logTail}` });
         } catch {
+          log(host.name, 'Process not found (no logs available)');
           results.push({ host, success: false, message: 'Process not found after start (no logs available)' });
         }
       }
     } catch {
+      log(host.name, 'Could not verify (pgrep failed)');
       results.push({ host, success: false, message: 'Could not verify agent start (pgrep failed)' });
     }
   }

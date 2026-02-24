@@ -428,14 +428,13 @@ program
             logLevel: options.logLevel,
             preserveWorktrees: options.preserveWorktrees,
           },
-          options.verbose ? (host, msg) => console.log(chalk.dim(`  [${host}] ${msg}`)) : () => {},
+          (host, msg) => console.log(chalk.dim(`  [${host}] ${msg}`)),
         );
 
         // Report results
         for (const r of results) {
           if (r.success) {
-            const tag = r.alreadyRunning ? 'already running' : 'started';
-            console.log(chalk.green(`  ✓ ${r.host.name}: ${tag}`));
+            console.log(chalk.green(`  ✓ ${r.host.name}: started`));
           } else {
             console.log(chalk.red(`  ✗ ${r.host.name}: ${r.message}`));
           }
