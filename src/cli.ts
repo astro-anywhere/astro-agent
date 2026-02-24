@@ -20,6 +20,7 @@ import {
   statusCommand,
   stopCommand,
   mcpCommand,
+  logsCommand,
   planListCommand,
   planShowCommand,
   planGraphCommand,
@@ -42,6 +43,7 @@ program
   .option('--skip-auth', 'Skip device authentication')
   .option('--non-interactive', 'Run in non-interactive mode')
   .option('--with-ssh-config', 'Discover and configure remote hosts from SSH config')
+  .option('--force', 'Force re-setup on remote hosts that already have agent-runner running')
   .option('--auto-start', 'Enable auto-start on login')
   .option('--install-mcp', 'Install MCP integration for Claude Code')
   .option('--verbose', 'Show detailed debug output')
@@ -50,11 +52,11 @@ program
       await setupCommand({
         api: options.api,
         relay: options.relay,
-
         hostname: options.hostname,
         skipAuth: options.skipAuth,
         nonInteractive: options.nonInteractive,
         withSshConfig: options.withSshConfig,
+        force: options.force,
         autoStart: options.autoStart,
         installMcp: options.installMcp,
         verbose: options.verbose,
@@ -137,6 +139,26 @@ program
       await stopCommand();
     } catch (error) {
       console.error('Stop failed:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+// Logs command
+program
+  .command('logs')
+  .description('View agent runner logs')
+  .option('-f, --follow', 'Follow log output (like tail -f)')
+  .option('-n, --lines <number>', 'Number of lines to show (default: 50)', parseInt)
+  .option('--host <name>', 'View logs from a remote host')
+  .action(async (options) => {
+    try {
+      await logsCommand({
+        follow: options.follow,
+        lines: options.lines,
+        host: options.host,
+      });
+    } catch (error) {
+      console.error('Logs failed:', error instanceof Error ? error.message : String(error));
       process.exit(1);
     }
   });
