@@ -1,6 +1,6 @@
 {
   "name": "@astroanywhere/agent",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Astro Agent Runner CLI - Lightweight agent runner for local, remote, and HPC environments",
   "type": "module",
   "main": "dist/index.js",
