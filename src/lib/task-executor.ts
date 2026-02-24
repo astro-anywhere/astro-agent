@@ -644,8 +644,8 @@ export class TaskExecutor {
             console.log(`[executor] Task ${task.id}: push mode, pushing branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
               branchName: prepared.branchName,
-              taskTitle: task.prompt.slice(0, 100),
-              taskDescription: task.prompt.slice(0, 500),
+              taskTitle: task.title || task.prompt.slice(0, 100),
+              taskDescription: task.description || task.prompt.slice(0, 500),
               skipPR: true,
             });
             result.branchName = prResult.branchName;
@@ -660,8 +660,8 @@ export class TaskExecutor {
             console.log(`[executor] Task ${task.id}: pr mode, attempting PR creation for branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
               branchName: prepared.branchName,
-              taskTitle: task.prompt.slice(0, 100),
-              taskDescription: task.prompt.slice(0, 500),
+              taskTitle: task.title || task.prompt.slice(0, 100),
+              taskDescription: task.description || task.prompt.slice(0, 500),
             });
             result.branchName = prResult.branchName;
             if (prResult.prUrl) {

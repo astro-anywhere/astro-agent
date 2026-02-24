@@ -139,6 +139,12 @@ export interface Task {
 
   /** Per-task worktree control. When false, skip worktree and run in raw workdir. */
   useWorktree?: boolean;
+
+  /** Human-readable task title — used for PR titles instead of raw prompt */
+  title?: string;
+
+  /** Human-readable task description — used for PR body instead of raw prompt */
+  description?: string;
 }
 
 export interface TaskResult {
