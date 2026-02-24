@@ -104,16 +104,19 @@ export async function packAndInstall(
   await execFile('scp', scpArgs);
 
   // 3. Install to user-local prefix to avoid EACCES on system dirs
+  // Use $HOME instead of ~ because ~ is not expanded inside double quotes in zsh/bash
   log(`Installing on ${host.name}...`);
-  const npmPrefix = '~/.local';
-  await sshExec(host, `mkdir -p ${npmPrefix} && npm install -g --force --prefix ${npmPrefix} ~/astro-agent.tgz`);
+  const npmPrefix = '$HOME/.local';
+  await sshExec(host, `mkdir -p ${npmPrefix} && npm install -g --force --prefix ${npmPrefix} $HOME/astro-agent.tgz`);
 
-  // 4. Ensure ~/.local/bin is on PATH for this session and future logins
+  // 4. Ensure $HOME/.local/bin is on PATH for this session and future logins
   const binDir = `${npmPrefix}/bin`;
   const pathExport = `export PATH="${binDir}:$PATH"`;
+  // Use ~ in grep/echo for .bashrc since those are unquoted word-initial positions where ~ expands
+  const persistExport = 'export PATH="$HOME/.local/bin:$PATH"';
   const pathSetup = [
-    `grep -qxF '${pathExport}' ~/.bashrc 2>/dev/null || echo '${pathExport}' >> ~/.bashrc`,
-    `grep -qxF '${pathExport}' ~/.profile 2>/dev/null || echo '${pathExport}' >> ~/.profile`,
+    `grep -qxF '${persistExport}' $HOME/.bashrc 2>/dev/null || echo '${persistExport}' >> $HOME/.bashrc`,
+    `grep -qxF '${persistExport}' $HOME/.profile 2>/dev/null || echo '${persistExport}' >> $HOME/.profile`,
   ].join(' && ');
   await sshExec(host, pathSetup);
 
@@ -149,7 +152,7 @@ export async function packAndInstall(
   });
 
   // Clean up remote tarball
-  await sshExec(host, 'rm -f ~/astro-agent.tgz').catch(() => {});
+  await sshExec(host, 'rm -f $HOME/astro-agent.tgz').catch(() => {});
 
   log(`Done — ${host.name} is configured`);
 }
@@ -247,9 +250,12 @@ export async function startRemoteAgents(
   for (const host of hosts) {
     log(host.name, 'Checking for running agent...');
 
-    // 1. Check if already running
+    // 1. Check if already running (pgrep with ps aux fallback)
     try {
-      const { stdout } = await sshExec(host, 'pgrep -f "astro-agent start"');
+      const { stdout } = await sshExec(
+        host,
+        'pgrep -f "astro-agent start" 2>/dev/null || ps aux 2>/dev/null | grep "astro-agent start" | grep -v grep',
+      );
       if (stdout.trim()) {
         log(host.name, 'Agent already running');
         results.push({ host, success: true, message: 'Already running', alreadyRunning: true });
@@ -260,8 +266,7 @@ export async function startRemoteAgents(
     }
 
     // 2. Build start command with forwarded options
-    const binDir = '~/.local/bin';
-    const pathExport = `export PATH="${binDir}:$PATH"`;
+    const pathExport = 'export PATH="$HOME/.local/bin:$PATH"';
     const flags: string[] = ['--foreground'];
     if (options.maxTasks) flags.push(`--max-tasks ${options.maxTasks}`);
     if (options.logLevel) flags.push(`--log-level ${options.logLevel}`);
@@ -272,7 +277,7 @@ export async function startRemoteAgents(
     try {
       await sshExec(
         host,
-        `${pathExport} && mkdir -p ~/.astro/logs && nohup ${startCmd} > ~/.astro/logs/agent-runner.log 2>&1 & disown`,
+        `${pathExport} && mkdir -p $HOME/.astro/logs && nohup ${startCmd} > $HOME/.astro/logs/agent-runner.log 2>&1 & disown`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -280,17 +285,20 @@ export async function startRemoteAgents(
       continue;
     }
 
-    // 3. Verify after 2s
+    // 3. Verify after 2s — use ps aux fallback if pgrep is unavailable
     await new Promise((r) => setTimeout(r, 2000));
     try {
-      const { stdout } = await sshExec(host, 'pgrep -f "astro-agent start"');
+      const { stdout } = await sshExec(
+        host,
+        'pgrep -f "astro-agent start" 2>/dev/null || ps aux 2>/dev/null | grep "astro-agent start" | grep -v grep',
+      );
       if (stdout.trim()) {
         log(host.name, 'Agent started successfully');
         results.push({ host, success: true, message: 'Started' });
       } else {
         // Fallback: check log tail
         try {
-          const { stdout: logTail } = await sshExec(host, 'tail -5 ~/.astro/logs/agent-runner.log 2>/dev/null');
+          const { stdout: logTail } = await sshExec(host, 'tail -5 $HOME/.astro/logs/agent-runner.log 2>/dev/null');
           results.push({ host, success: false, message: `Process not found after start. Log tail:\n${logTail}` });
         } catch {
           results.push({ host, success: false, message: 'Process not found after start (no logs available)' });
