@@ -289,6 +289,47 @@ describe('createWorktree', () => {
     );
   });
 
+  it('should use baseBranch from .astro/config.json when available', async () => {
+    mockExecFileAsync
+      .mockResolvedValueOnce({ stdout: '/project\n' })        // getGitRoot
+      .mockResolvedValueOnce({ stdout: '' })                   // hasCommits
+      .mockResolvedValueOnce({ stdout: '' })                   // removeLingeringWorktrees: list
+      .mockResolvedValueOnce({ stdout: '' })                   // ensureBranchAvailable
+      .mockResolvedValueOnce({ stdout: '' })                   // deleteRemoteBranch
+      .mockResolvedValueOnce({ stdout: '' })                   // git fetch
+      .mockResolvedValueOnce({ stdout: '' })                   // getDefaultBranch: rev-parse --verify (validates origin/develop exists)
+      .mockResolvedValueOnce({ stdout: '' });                  // git worktree add
+
+    mockMkdir.mockResolvedValue(undefined);
+    // readFile: first call from getDefaultBranch reads baseBranch,
+    // second call from readBranchPrefix reads branchPrefix
+    mockReadFile
+      .mockResolvedValueOnce(JSON.stringify({ baseBranch: 'develop', branchPrefix: 'astro/' }))
+      .mockResolvedValueOnce(JSON.stringify({ baseBranch: 'develop', branchPrefix: 'astro/' }));
+
+    const result = await createWorktree({
+      workingDirectory: '/project',
+      taskId: 'test-task-basebranch',
+    });
+
+    expect(result).not.toBeNull();
+    // Verify worktree was created from origin/develop instead of origin/main
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      'git',
+      expect.arrayContaining([
+        'worktree', 'add', '-b', 'astro/test-task-basebranch',
+      ]),
+      expect.any(Object),
+    );
+    // The worktree add call should reference origin/develop as the start point
+    const worktreeAddCall = mockExecFileAsync.mock.calls.find(
+      (call: unknown[]) => Array.isArray(call[1]) && (call[1] as string[]).includes('worktree')
+        && (call[1] as string[]).includes('add')
+    );
+    expect(worktreeAddCall).toBeDefined();
+    expect((worktreeAddCall![1] as string[]).includes('origin/develop')).toBe(true);
+  });
+
   it('should handle gitRoot with trailing slash correctly', async () => {
     mockExecFileAsync
       .mockResolvedValueOnce({ stdout: '/project/\n' })       // getGitRoot returns trailing slash

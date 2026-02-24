@@ -37,6 +37,8 @@ import type {
   SlashCommandsResponseMessage,
   RepoDetectRequestMessage,
   RepoDetectResponseMessage,
+  BranchListRequestMessage,
+  BranchListResponseMessage,
   GitInitRequestMessage,
   GitInitResponseMessage,
   ProviderInfo,
@@ -76,6 +78,7 @@ export interface WebSocketClientOptions {
   onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
   onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
   onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
+  onBranchList?: (payload: BranchListRequestMessage['payload']) => void;
   onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
   version?: string;
   wsToken?: string;
@@ -94,6 +97,7 @@ type IncomingMessage =
   | RepoSetupRequestMessage
   | SlashCommandsRequestMessage
   | RepoDetectRequestMessage
+  | BranchListRequestMessage
   | GitInitRequestMessage
   | ErrorMessage;
 
@@ -124,6 +128,7 @@ export class WebSocketClient {
   private onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
   private onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
   private onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
+  private onBranchList?: (payload: BranchListRequestMessage['payload']) => void;
   private onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
 
   constructor(options: WebSocketClientOptions) {
@@ -143,6 +148,7 @@ export class WebSocketClient {
     this.onRepoSetup = options.onRepoSetup;
     this.onSlashCommands = options.onSlashCommands;
     this.onRepoDetect = options.onRepoDetect;
+    this.onBranchList = options.onBranchList;
     this.onGitInit = options.onGitInit;
   }
 
@@ -662,6 +668,17 @@ export class WebSocketClient {
         return;
       }
 
+      // Handle branch_list.request (dot notation from relay)
+      if (raw.type === 'branch_list.request') {
+        const branchListMsg: BranchListRequestMessage = {
+          type: 'branch_list_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: raw.payload as BranchListRequestMessage['payload'],
+        };
+        this.handleBranchListRequest(branchListMsg);
+        return;
+      }
+
       // Handle git_init.request (dot notation from relay)
       if (raw.type === 'git_init.request') {
         const gitInitMsg: GitInitRequestMessage = {
@@ -717,6 +734,9 @@ export class WebSocketClient {
         break;
       case 'repo_detect_request':
         this.handleRepoDetectRequest(message as RepoDetectRequestMessage);
+        break;
+      case 'branch_list_request':
+        this.handleBranchListRequest(message as BranchListRequestMessage);
         break;
       case 'git_init_request':
         this.handleGitInitRequest(message as GitInitRequestMessage);
@@ -862,6 +882,25 @@ export class WebSocketClient {
   ): void {
     const msg: RepoDetectResponseMessage = {
       type: 'repo_detect_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, ...result },
+    };
+    this.send(msg);
+  }
+
+  private handleBranchListRequest(message: BranchListRequestMessage): void {
+    this.onBranchList?.(message.payload);
+  }
+
+  /**
+   * Send branch list response
+   */
+  sendBranchListResponse(
+    correlationId: string,
+    result: Omit<BranchListResponseMessage['payload'], 'correlationId'>,
+  ): void {
+    const msg: BranchListResponseMessage = {
+      type: 'branch_list_response',
       timestamp: new Date().toISOString(),
       payload: { correlationId, ...result },
     };

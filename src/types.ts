@@ -193,6 +193,7 @@ export type WSMessageType =
   | 'file_list_response'
   | 'slash_commands_response'
   | 'repo_detect_response'
+  | 'branch_list_response'
   | 'git_init_response'
   // Server -> Client
   | 'registered'
@@ -208,6 +209,7 @@ export type WSMessageType =
   | 'repo_setup_response'
   | 'slash_commands_request'
   | 'repo_detect_request'
+  | 'branch_list_request'
   | 'git_init_request'
   | 'error';
 
@@ -532,8 +534,38 @@ export interface RepoDetectResponseMessage extends WSMessage {
     remoteUrl?: string;
     remoteType: 'github' | 'gitlab' | 'bitbucket' | 'generic' | 'none';
     baseBranch?: string;
+    currentBranch?: string;
+    isDirty?: boolean;
+    dirtyDetails?: {
+      staged: number;
+      unstaged: number;
+      untracked: number;
+    };
     suggestedDeliveryMode: 'pr' | 'push' | 'branch' | 'direct';
     dirSizeMB?: number | null;
+    error?: string;
+  };
+}
+
+export interface BranchListRequestMessage extends WSMessage {
+  type: 'branch_list_request';
+  payload: {
+    correlationId: string;
+    path: string;
+  };
+}
+
+export interface BranchListResponseMessage extends WSMessage {
+  type: 'branch_list_response';
+  payload: {
+    correlationId: string;
+    branches: Array<{
+      name: string;
+      isRemote: boolean;
+      isCurrent: boolean;
+      isDefault: boolean;
+    }>;
+    defaultBranch?: string;
     error?: string;
   };
 }

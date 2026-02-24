@@ -16,7 +16,7 @@ import { WebSocketClient } from '../lib/websocket-client.js';
 import { TaskExecutor } from '../lib/task-executor.js';
 import { localRepoSetup } from '../lib/repo-utils.js';
 import { executionStrategyRegistry } from '../execution/index.js';
-import type { RunnerEvent, Task, RepoSetupRequestMessage, RepoDetectRequestMessage, GitInitRequestMessage } from '../types.js';
+import type { RunnerEvent, Task, RepoSetupRequestMessage, RepoDetectRequestMessage, BranchListRequestMessage, GitInitRequestMessage } from '../types.js';
 
 interface StartOptions {
   foreground?: boolean;
@@ -413,17 +413,47 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           // No remote
         }
 
-        // Get default branch
-        let baseBranch = 'main';
+        // Get current branch
+        let currentBranch = 'main';
         try {
           const branch = execFileSync('git', ['-C', dirPath, 'symbolic-ref', '--short', 'HEAD'], {
             encoding: 'utf-8',
             timeout: 5_000,
             stdio: 'pipe',
           }).trim();
-          if (branch) baseBranch = branch;
+          if (branch) currentBranch = branch;
         } catch {
           // Default to 'main'
+        }
+        const baseBranch = currentBranch;
+
+        // Detect dirty state
+        let isDirty = false;
+        let dirtyDetails: { staged: number; unstaged: number; untracked: number } | undefined;
+        try {
+          const porcelain = execFileSync('git', ['-C', dirPath, 'status', '--porcelain'], {
+            encoding: 'utf-8',
+            timeout: 10_000,
+            stdio: 'pipe',
+          });
+          if (porcelain.trim()) {
+            isDirty = true;
+            let staged = 0, unstaged = 0, untracked = 0;
+            for (const line of porcelain.trim().split('\n')) {
+              if (!line) continue;
+              const x = line[0]; // index (staging area)
+              const y = line[1]; // worktree
+              if (x === '?' && y === '?') {
+                untracked++;
+              } else {
+                if (x && x !== ' ' && x !== '?') staged++;
+                if (y && y !== ' ' && y !== '?') unstaged++;
+              }
+            }
+            dirtyDetails = { staged, unstaged, untracked };
+          }
+        } catch {
+          // Non-fatal
         }
 
         // Detect remote type
@@ -460,9 +490,12 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           remoteUrl,
           remoteType,
           baseBranch,
+          currentBranch,
+          isDirty,
+          dirtyDetails,
           suggestedDeliveryMode,
         });
-        log('info', `Repo detect result: isGit=true remote=${remoteType} branch=${baseBranch}`, logLevel);
+        log('info', `Repo detect result: isGit=true remote=${remoteType} branch=${currentBranch} dirty=${isDirty}`, logLevel);
       } catch (error) {
         log('error', `Repo detect failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
         wsClient.sendRepoDetectResponse(correlationId, {
@@ -470,6 +503,114 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           isGit: false,
           remoteType: 'none',
           suggestedDeliveryMode: 'branch',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    onBranchList: (payload: BranchListRequestMessage['payload']) => {
+      const { correlationId, path: dirPath } = payload;
+      log('info', `Branch list request: path=${dirPath}`, logLevel);
+      try {
+        if (!existsSync(dirPath)) {
+          wsClient.sendBranchListResponse(correlationId, {
+            branches: [],
+            error: 'Directory does not exist',
+          });
+          return;
+        }
+
+        // Get current branch
+        let currentBranch = '';
+        try {
+          currentBranch = execFileSync('git', ['-C', dirPath, 'symbolic-ref', '--short', 'HEAD'], {
+            encoding: 'utf-8',
+            timeout: 5_000,
+            stdio: 'pipe',
+          }).trim();
+        } catch {
+          // Detached HEAD or not a git repo
+        }
+
+        // Get default branch (via origin/HEAD)
+        let defaultBranch = '';
+        try {
+          const ref = execFileSync('git', ['-C', dirPath, 'symbolic-ref', 'refs/remotes/origin/HEAD'], {
+            encoding: 'utf-8',
+            timeout: 5_000,
+            stdio: 'pipe',
+          }).trim();
+          const parts = ref.split('/');
+          defaultBranch = parts[parts.length - 1];
+        } catch {
+          // Try fallback: check if origin/main or origin/master exist
+          try {
+            const remoteBranches = execFileSync('git', ['-C', dirPath, 'branch', '-r', '--list', 'origin/main', 'origin/master'], {
+              encoding: 'utf-8',
+              timeout: 5_000,
+              stdio: 'pipe',
+            }).trim();
+            if (remoteBranches.includes('origin/main')) defaultBranch = 'main';
+            else if (remoteBranches.includes('origin/master')) defaultBranch = 'master';
+          } catch {
+            defaultBranch = 'main';
+          }
+        }
+
+        // Collect local branches
+        const localBranchNames = new Set<string>();
+        try {
+          const localOutput = execFileSync('git', ['-C', dirPath, 'branch', '--format=%(refname:short)'], {
+            encoding: 'utf-8',
+            timeout: 10_000,
+            stdio: 'pipe',
+          });
+          for (const line of localOutput.trim().split('\n')) {
+            const name = line.trim();
+            if (name) localBranchNames.add(name);
+          }
+        } catch {
+          // Fallback: no local branches
+        }
+
+        // Collect remote branches
+        const remoteBranchNames = new Set<string>();
+        try {
+          const remoteOutput = execFileSync('git', ['-C', dirPath, 'branch', '-r', '--format=%(refname:short)'], {
+            encoding: 'utf-8',
+            timeout: 10_000,
+            stdio: 'pipe',
+          });
+          for (const line of remoteOutput.trim().split('\n')) {
+            const name = line.trim();
+            // Skip origin/HEAD
+            if (name && !name.endsWith('/HEAD')) {
+              // Strip origin/ prefix
+              const stripped = name.replace(/^origin\//, '');
+              if (stripped) remoteBranchNames.add(stripped);
+            }
+          }
+        } catch {
+          // Fallback: no remote branches
+        }
+
+        // Merge into a combined list
+        const allNames = new Set([...localBranchNames, ...remoteBranchNames]);
+        const branches = Array.from(allNames).map((name) => ({
+          name,
+          isRemote: remoteBranchNames.has(name),
+          isCurrent: name === currentBranch,
+          isDefault: name === defaultBranch,
+        }));
+
+        wsClient.sendBranchListResponse(correlationId, {
+          branches,
+          defaultBranch: defaultBranch || undefined,
+        });
+        log('info', `Branch list result: ${branches.length} branches, default=${defaultBranch}`, logLevel);
+      } catch (error) {
+        log('error', `Branch list failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendBranchListResponse(correlationId, {
+          branches: [],
           error: error instanceof Error ? error.message : String(error),
         });
       }
