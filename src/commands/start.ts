@@ -5,7 +5,7 @@
 import chalk from 'chalk';
 import ora from 'ora';
 import { spawn, execFileSync } from 'node:child_process';
-import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -139,12 +139,19 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     if (options.logLevel) args.push('--log-level', options.logLevel);
     if (options.preserveWorktrees) args.push('--preserve-worktrees');
 
+    // Create log directory and open log file for appending
+    const logDir = join(homedir(), '.astro', 'logs');
+    mkdirSync(logDir, { recursive: true });
+    const logFile = join(logDir, 'agent-runner.log');
+    const logFd = openSync(logFile, 'a');
+
     const child = spawn(process.execPath, [scriptPath!, ...args], {
       detached: true,
-      stdio: 'ignore',
+      stdio: ['ignore', logFd, logFd],
     });
 
     child.unref();
+    closeSync(logFd);
 
     // Write PID file for stop command
     const pidDir = join(homedir(), '.astro');

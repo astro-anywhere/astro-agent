@@ -13,7 +13,7 @@ import { detectProviders, formatProvidersSummary } from '../lib/providers.js';
 import { getMachineResources, formatResourceSummary } from '../lib/resources.js';
 import { discoverRemoteHosts, formatDiscoveredHosts } from '../lib/ssh-discovery.js';
 import { requestDeviceCode, pollForToken, registerMachine, DeviceAuthApiError } from '../lib/api-client.js';
-import { detectLocalIP, checkRemoteNode, packAndInstall } from '../lib/ssh-installer.js';
+import { detectLocalIP, checkRemoteNode, checkRemoteAgentRunning, packAndInstall, sshExec } from '../lib/ssh-installer.js';
 import type { ProviderType, DiscoveredHost } from '../types.js';
 
 const execFile = promisify(execFileCb);
@@ -28,6 +28,7 @@ export interface SetupOptions {
   autoStart?: boolean;
   installMcp?: boolean;
   returnInstalledHosts?: boolean;
+  force?: boolean;
   verbose?: boolean;
 }
 
@@ -215,7 +216,7 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
     const selectedHosts = await selectHostsInteractive(discoveredHosts);
 
     if (selectedHosts.length > 0) {
-      const installed = await installOnRemoteHosts(selectedHosts, discoveredHosts, apiUrl, relayUrl, verbose);
+      const installed = await installOnRemoteHosts(selectedHosts, discoveredHosts, apiUrl, relayUrl, verbose, options.force);
       // Save installed hosts to config for --launch-all reuse
       if (installed.length > 0) {
         config.setRemoteHosts(installed);
@@ -561,6 +562,7 @@ async function installOnRemoteHosts(
   apiUrl: string,
   relayUrl: string,
   verbose = false,
+  force = false,
 ): Promise<DiscoveredHost[]> {
   const installedHosts: DiscoveredHost[] = [];
   console.log();
@@ -573,7 +575,23 @@ async function installOnRemoteHosts(
     const host = discoveredHosts.find((h) => h.name === hostName);
     if (!host) continue;
 
-    const spinner = ora(`Checking Node.js on ${hostName}...`).start();
+    const spinner = ora(`Checking ${hostName}...`).start();
+
+    // Check if agent-runner is already running on this host
+    const isRunning = await checkRemoteAgentRunning(host);
+    if (isRunning && !force) {
+      spinner.warn(
+        `${hostName}: Agent runner already running. Use setup --force to stop and re-configure.`,
+      );
+      continue;
+    }
+    if (isRunning && force) {
+      spinner.text = `${hostName}: Stopping existing agent...`;
+      await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true').catch(() => {});
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+
+    spinner.text = `Checking Node.js on ${hostName}...`;
 
     // Check remote Node.js availability
     const nodeCheck = await checkRemoteNode(host);
