@@ -210,20 +210,9 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
   // Step 8: Offer to install on remote hosts (only if SSH discovery was enabled)
   if (options.withSshConfig && discoveredHosts.length > 0 && !options.nonInteractive) {
     console.log(chalk.bold('Remote Installation\n'));
-    console.log(chalk.dim('You have SSH access to these hosts. Would you like to install'));
-    console.log(chalk.dim('the agent runner on any of them?\n'));
+    console.log(chalk.dim('  Navigate with ↑↓, press Enter to toggle, scroll down to Confirm or Skip.\n'));
 
-    const { selectedHosts } = await inquirer.prompt<{ selectedHosts: string[] }>([
-      {
-        type: 'checkbox',
-        name: 'selectedHosts',
-        message: 'Select hosts to install on:',
-        choices: discoveredHosts.map((h) => ({
-          name: `${h.name}${h.hostname !== h.name ? ` (${h.hostname})` : ''}`,
-          value: h.name,
-        })),
-      },
-    ]);
+    const selectedHosts = await selectHostsInteractive(discoveredHosts);
 
     if (selectedHosts.length > 0) {
       const installed = await installOnRemoteHosts(selectedHosts, discoveredHosts, apiUrl, relayUrl, verbose);
@@ -718,6 +707,83 @@ async function configureMcpForClaudeCode(): Promise<boolean> {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/**
+ * Interactive host selection using a list prompt with Enter-to-toggle.
+ *
+ * Shows all hosts with ◯/✓ markers. Pressing Enter on a host toggles it.
+ * "Select all" toggles all hosts. "Confirm" and "Skip" at the bottom.
+ * Cursor stays on the same position after each toggle.
+ */
+async function selectHostsInteractive(hosts: DiscoveredHost[]): Promise<string[]> {
+  const selected = new Set<string>();
+  const ACTION_SELECT_ALL = '__select_all__';
+  const ACTION_CONFIRM = '__confirm__';
+  const ACTION_SKIP = '__skip__';
+
+  let cursorIndex = 0;
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    // Build choices with current selection state
+    const choices: Array<{ name: string; value: string } | inquirer.Separator> = [];
+
+    for (const h of hosts) {
+      const marker = selected.has(h.name) ? chalk.green('✓') : chalk.dim('◯');
+      const label = h.hostname !== h.name ? `${h.name} ${chalk.dim(`(${h.hostname})`)}` : h.name;
+      const user = h.user ? chalk.dim(` [${h.user}]`) : '';
+      choices.push({ name: `${marker} ${label}${user}`, value: h.name });
+    }
+
+    choices.push(new inquirer.Separator(chalk.dim('──────────────────')));
+
+    const allSelected = hosts.every((h) => selected.has(h.name));
+    const selectAllLabel = allSelected ? 'Deselect all' : 'Select all';
+    choices.push({ name: chalk.cyan(`◉ ${selectAllLabel}`), value: ACTION_SELECT_ALL });
+
+    choices.push(new inquirer.Separator(chalk.dim('──────────────────')));
+    choices.push({ name: chalk.green(`✔ Confirm (${selected.size} selected)`), value: ACTION_CONFIRM });
+    choices.push({ name: chalk.yellow('✘ Skip'), value: ACTION_SKIP });
+
+    const { choice } = await inquirer.prompt<{ choice: string }>([
+      {
+        type: 'list',
+        name: 'choice',
+        message: `Select hosts to install on:`,
+        choices,
+        pageSize: choices.length,
+        default: cursorIndex,
+      },
+    ]);
+
+    if (choice === ACTION_CONFIRM) {
+      return Array.from(selected);
+    }
+
+    if (choice === ACTION_SKIP) {
+      return [];
+    }
+
+    if (choice === ACTION_SELECT_ALL) {
+      if (allSelected) {
+        selected.clear();
+      } else {
+        for (const h of hosts) selected.add(h.name);
+      }
+      // Keep cursor on Select all
+      cursorIndex = hosts.length + 1; // +1 for separator
+    } else {
+      // Toggle host
+      if (selected.has(choice)) {
+        selected.delete(choice);
+      } else {
+        selected.add(choice);
+      }
+      // Keep cursor on the same host
+      cursorIndex = hosts.findIndex((h) => h.name === choice);
+    }
+  }
+}
 
 function tryOpenUrl(url: string): void {
   const cmd = process.platform === 'darwin' ? 'open' : 'xdg-open';
