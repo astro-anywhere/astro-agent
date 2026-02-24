@@ -319,9 +319,9 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
     console.log();
   }
 
-  // Return installed hosts for --launch-all
+  // Return only hosts that were actually installed (not all discovered hosts)
   const storedHosts = config.getRemoteHosts();
-  return { installedHosts: storedHosts.length > 0 ? storedHosts : discoveredHosts };
+  return { installedHosts: storedHosts };
 }
 
 // ============================================================================

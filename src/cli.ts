@@ -199,12 +199,36 @@ program
   .option('--show', 'Show current configuration')
   .option('--reset', 'Reset configuration to defaults')
   .option('--set <key=value>', 'Set a configuration value')
+  .option('--import <file>', 'Import configuration from a JSON file')
   .action(async (options) => {
     const { config } = await import('./lib/config.js');
 
     if (options.reset) {
       config.reset();
       console.log('Configuration reset to defaults.');
+      return;
+    }
+
+    if (options.import) {
+      const { readFileSync } = await import('node:fs');
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(readFileSync(options.import, 'utf-8'));
+      } catch (err) {
+        console.error(`Failed to read config file: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
+      }
+      if (data.apiUrl) config.setApiUrl(data.apiUrl as string);
+      if (data.relayUrl) config.setRelayUrl(data.relayUrl as string);
+      if (data.accessToken) config.setAccessToken(data.accessToken as string);
+      if (data.refreshToken) config.setRefreshToken(data.refreshToken as string);
+      if (data.wsToken) config.setWsToken(data.wsToken as string);
+      if (data.machineId) config.setMachineId(data.machineId as string);
+      if (data.claudeOauthToken) config.setClaudeOauthToken(data.claudeOauthToken as string);
+      if (data.logLevel) config.setLogLevel(data.logLevel as 'debug' | 'info' | 'warn' | 'error');
+      if (data.autoStart !== undefined) config.setAutoStart(data.autoStart as boolean);
+      config.completeSetup();
+      console.log('Configuration imported successfully.');
       return;
     }
 
