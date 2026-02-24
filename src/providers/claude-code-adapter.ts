@@ -18,6 +18,8 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
   private lastError?: string;
   private claudePath: string | null = null;
   private lastResultMetrics?: TaskResult['metrics'];
+  /** Maps tool_use_id → tool name for correlating tool_use with tool_result */
+  private toolIdToName = new Map<string, string>();
 
   async isAvailable(): Promise<boolean> {
     const provider = await getProvider('claude-code');
@@ -49,6 +51,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       stream.status('running', 0, 'Starting Claude Code');
 
       this.lastResultMetrics = undefined;
+      this.toolIdToName.clear();
       const result = await this.runClaude(task, stream, signal);
 
       return {
@@ -252,13 +255,17 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
         case 'assistant': {
           // Assistant message with content blocks
-          const message = event.message as { content?: Array<{ type: string; text?: string; name?: string; input?: unknown }> } | undefined;
+          const message = event.message as { content?: Array<{ type: string; id?: string; text?: string; name?: string; input?: unknown }> } | undefined;
           if (message?.content) {
             for (const block of message.content) {
               if (block.type === 'text' && block.text) {
                 // Use structured text instead of raw stdout
                 stream.text(block.text + '\n');
               } else if (block.type === 'tool_use') {
+                // Record id → name mapping for correlating with tool_result
+                if (block.id && block.name) {
+                  this.toolIdToName.set(block.id, block.name);
+                }
                 // Send structured tool use for the Tools panel
                 stream.toolUse(block.name ?? 'unknown', block.input);
               }
@@ -277,8 +284,10 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
             for (const block of message.content) {
               if (block.type === 'tool_result') {
                 const resultContent = toolResultData?.stdout || block.content || '';
+                // Look up the actual tool name from the tool_use_id → name map
+                const toolName = (block.tool_use_id && this.toolIdToName.get(block.tool_use_id)) ?? 'unknown';
                 stream.toolResult(
-                  block.tool_use_id ?? 'unknown',
+                  toolName,
                   resultContent,
                   !block.is_error,
                 );
