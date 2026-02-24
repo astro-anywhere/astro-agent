@@ -5,6 +5,7 @@
  * and streaming output back over WebSocket
  */
 
+import { homedir } from 'node:os';
 import type { Task, TaskStatus, ProviderType } from '../types.js';
 import type { WebSocketClient } from './websocket-client.js';
 import { createProviderAdapter, type ProviderAdapter } from '../providers/index.js';
@@ -882,6 +883,17 @@ function resolveWorkingDirectory(value: string | undefined): string {
   const isGitUrl = value.startsWith('http://') || value.startsWith('https://') || value.startsWith('git@');
   if (isGitUrl) {
     throw new Error(`workingDirectory is still a git URL at dispatch time. Run repo setup first.`);
+  }
+
+  // Expand tilde to the user's home directory.
+  // Node.js path APIs (resolve, join, etc.) don't expand ~ — that's a shell feature.
+  // Without this, paths like "~/Documents/code" are treated as relative, causing
+  // worktree creation to produce broken paths like ".astro/worktrees/.../~/Documents/code".
+  if (value === '~') {
+    return homedir();
+  }
+  if (value.startsWith('~/')) {
+    return homedir() + value.slice(1);
   }
 
   return value;

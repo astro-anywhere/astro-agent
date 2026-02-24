@@ -1,44 +1,69 @@
 /**
- * Claude Code provider adapter
+ * OpenCode provider adapter
  *
- * Executes tasks using the Claude Code CLI (claude command)
+ * Executes tasks using the OpenCode CLI in headless/print mode.
+ *
+ * CLI invocation:
+ *   opencode run --print --output-format json "<task>"
+ *
+ * Output: JSONL streaming to stdout with event types similar to Claude Code:
+ *   system, assistant, tool_result, result
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import type { Task, TaskResult, TaskArtifact } from '../types.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
 
-export class ClaudeCodeAdapter implements ProviderAdapter {
-  readonly type = 'claude-code';
-  readonly name = 'Claude Code';
+export class OpenCodeAdapter implements ProviderAdapter {
+  readonly type = 'opencode';
+  readonly name = 'OpenCode';
 
   private activeTasks = 0;
-  private maxTasks = 1; // Claude Code runs one task at a time
+  private maxTasks = 1;
   private lastError?: string;
-  private claudePath: string | null = null;
+  private opencodePath: string | null = null;
+  private configModel: string | null = null;
   private lastResultMetrics?: TaskResult['metrics'];
   /** Maps tool_use_id → tool name for correlating tool_use with tool_result */
   private toolIdToName = new Map<string, string>();
 
   async isAvailable(): Promise<boolean> {
-    const provider = await getProvider('claude-code');
+    const provider = await getProvider('opencode');
     if (provider?.available) {
-      this.claudePath = provider.path;
+      this.opencodePath = provider.path;
+      this.configModel = this.readConfigModel();
       return true;
     }
     return false;
   }
 
+  /**
+   * Read the default model from ~/.opencode/config.json
+   */
+  private readConfigModel(): string | null {
+    try {
+      const configPath = join(homedir(), '.opencode', 'config.json');
+      if (!existsSync(configPath)) return null;
+      const content = readFileSync(configPath, 'utf-8');
+      const config = JSON.parse(content) as { model?: string };
+      return config.model ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   async execute(task: Task, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
-    if (!this.claudePath) {
+    if (!this.opencodePath) {
       const available = await this.isAvailable();
       if (!available) {
         return {
           taskId: task.id,
           status: 'failed',
-          error: 'Claude Code not available',
+          error: 'OpenCode not available',
           startedAt: new Date().toISOString(),
           completedAt: new Date().toISOString(),
         };
@@ -49,11 +74,11 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     const startedAt = new Date().toISOString();
 
     try {
-      stream.status('running', 0, 'Starting Claude Code');
+      stream.status('running', 0, 'Starting OpenCode');
 
       this.lastResultMetrics = undefined;
       this.toolIdToName.clear();
-      const result = await this.runClaude(task, stream, signal);
+      const result = await this.runOpenCode(task, stream, signal);
 
       return {
         taskId: task.id,
@@ -94,7 +119,7 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
   async getStatus(): Promise<ProviderStatus> {
     const available = await this.isAvailable();
-    const provider = await getProvider('claude-code');
+    const provider = await getProvider('opencode');
 
     return {
       available,
@@ -105,74 +130,61 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
     };
   }
 
-  private runClaude(
+  private runOpenCode(
     task: Task,
     stream: TaskOutputStream,
     signal: AbortSignal
   ): Promise<{ exitCode: number; output: string; error?: string; artifacts?: TaskArtifact[] }> {
     return new Promise((resolve, reject) => {
-      // Claude Code CLI: --print = fully autonomous non-interactive mode
-      // No approval prompts, no terminal interaction.
-      // Code executes locally on the host machine (not on Anthropic's cloud).
-      const args = [
-        '--print', // Fully autonomous — no permission prompts, runs to completion
-        '--verbose', // Required for stream-json with --print
-        '--output-format', 'stream-json', // JSON streaming output for structured parsing
-      ];
+      // OpenCode CLI: run --print --output-format json
+      // --print: Non-interactive mode (no TUI)
+      // --output-format json: JSONL streaming output
+      const model = task.model || this.configModel;
 
-      // Claude Code expects the prompt as the last argument or via stdin
-      // We'll pass it as an argument for simplicity
-      args.push(task.prompt);
+      const args = [
+        'run',
+        '--print',
+        '--output-format', 'json',
+        ...(model ? ['--model', model] : []),
+        task.prompt,
+      ];
 
       const env = {
         ...process.env,
         ...task.environment,
       };
 
-      let proc: ChildProcess;
-
-      console.log(`[claude-code] Spawning: ${this.claudePath} --print --output-format stream-json <prompt>`);
-      console.log(`[claude-code] cwd: ${task.workingDirectory}`);
-      console.log(`[claude-code] prompt length: ${task.prompt.length} chars`);
-
-      // Validate working directory exists before spawning.
-      // Node.js spawn throws a misleading "ENOENT" (which looks like the
-      // binary is missing) when the cwd doesn't exist.
+      // Validate working directory exists before spawning
       if (task.workingDirectory && !existsSync(task.workingDirectory)) {
-        const error = new Error(
+        reject(new Error(
           `Working directory does not exist: ${task.workingDirectory}. ` +
           `Ensure the directory exists on this machine before dispatching.`
-        );
-        console.error(`[claude-code] Spawn failed:`, error);
-        reject(error);
+        ));
         return;
       }
 
+      let proc: ChildProcess;
+
       try {
-        proc = spawn(this.claudePath!, args, {
+        proc = spawn(this.opencodePath!, args, {
           cwd: task.workingDirectory || undefined,
           env,
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (error) {
-        console.error(`[claude-code] Spawn failed:`, error);
         reject(error);
         return;
       }
 
-      // Close stdin immediately - we pass the prompt as an argument, not via stdin
+      // Close stdin immediately
       proc.stdin?.end();
-
-      console.log(`[claude-code] Process spawned, pid=${proc.pid}`);
 
       let stdout = '';
       let stderr = '';
       const artifacts: TaskArtifact[] = [];
 
-      // Handle abort signal
       const abortHandler = () => {
         proc.kill('SIGTERM');
-        // Give it a moment, then force kill
         setTimeout(() => {
           if (!proc.killed) {
             proc.kill('SIGKILL');
@@ -182,15 +194,16 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
       signal.addEventListener('abort', abortHandler);
 
+      // Line buffer for incomplete JSONL lines
       let lineBuf = '';
+
       proc.stdout?.on('data', (data: Buffer) => {
         const text = data.toString();
         stdout += text;
 
-        // Parse stream-json lines and forward only meaningful content
         lineBuf += text;
         const lines = lineBuf.split('\n');
-        lineBuf = lines.pop() || ''; // keep incomplete last line in buffer
+        lineBuf = lines.pop() || '';
         for (const line of lines) {
           if (line.trim()) {
             this.handleStreamLine(line, stream);
@@ -200,15 +213,33 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
       proc.stderr?.on('data', (data: Buffer) => {
         const text = data.toString();
-        console.log(`[claude-code] stderr: ${text.slice(0, 200)}`);
         stderr += text;
         stream.stderr(text);
       });
 
-      // Set up timeout if specified (declared before close handler so it can be cleared)
-      let taskTimeoutHandle: NodeJS.Timeout | undefined;
+      proc.on('error', (error) => {
+        signal.removeEventListener('abort', abortHandler);
+        reject(error);
+      });
+
+      proc.on('close', (code) => {
+        // Flush remaining buffer
+        if (lineBuf.trim()) {
+          this.handleStreamLine(lineBuf, stream);
+        }
+
+        signal.removeEventListener('abort', abortHandler);
+
+        resolve({
+          exitCode: code ?? 1,
+          output: stdout,
+          error: stderr || undefined,
+          artifacts: artifacts.length > 0 ? artifacts : undefined,
+        });
+      });
+
       if (task.timeout) {
-        taskTimeoutHandle = setTimeout(() => {
+        setTimeout(() => {
           if (!proc.killed) {
             proc.kill('SIGTERM');
             setTimeout(() => {
@@ -219,39 +250,19 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           }
         }, task.timeout);
       }
-
-      proc.on('error', (error) => {
-        console.error(`[claude-code] Process error:`, error);
-        signal.removeEventListener('abort', abortHandler);
-        if (taskTimeoutHandle) clearTimeout(taskTimeoutHandle);
-        reject(error);
-      });
-
-      proc.on('close', (code) => {
-        // Flush remaining buffer
-        if (lineBuf.trim()) {
-          this.handleStreamLine(lineBuf, stream);
-        }
-        console.log(`[claude-code] Process exited with code ${code}, stdout=${stdout.length} chars, stderr=${stderr.length} chars`);
-        signal.removeEventListener('abort', abortHandler);
-        if (taskTimeoutHandle) clearTimeout(taskTimeoutHandle);
-
-        resolve({
-          exitCode: code ?? 1,
-          output: stdout,
-          error: stderr || undefined,
-          artifacts: artifacts.length > 0 ? artifacts : undefined,
-        });
-      });
     });
   }
 
   /**
-   * Handle a single JSON line from Claude Code's stream-json output.
-   * Extracts human-readable text and structured events, forwarding only
-   * meaningful content to the stream (not raw JSON).
+   * Handle a single JSONL line from OpenCode's streaming output.
+   *
+   * OpenCode events follow a pattern similar to Claude Code's stream-json:
+   * - system         → sessionInit (session_id, model)
+   * - assistant      → text + tool_use content blocks
+   * - tool_result    → tool results
+   * - result         → final metrics (cost, tokens, turns)
    */
-  private handleStreamLine(
+  handleStreamLine(
     line: string,
     stream: TaskOutputStream,
   ): void {
@@ -272,18 +283,34 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
 
         case 'assistant': {
           // Assistant message with content blocks
-          const message = event.message as { content?: Array<{ type: string; id?: string; text?: string; name?: string; input?: unknown }> } | undefined;
-          if (message?.content) {
-            for (const block of message.content) {
+          const content = event.content as Array<{
+            type: string;
+            id?: string;
+            text?: string;
+            name?: string;
+            input?: unknown;
+          }> | undefined;
+
+          // Also handle message wrapper format
+          const message = event.message as {
+            content?: Array<{
+              type: string;
+              id?: string;
+              text?: string;
+              name?: string;
+              input?: unknown;
+            }>;
+          } | undefined;
+
+          const blocks = content || message?.content;
+          if (blocks) {
+            for (const block of blocks) {
               if (block.type === 'text' && block.text) {
-                // Use structured text instead of raw stdout
                 stream.text(block.text + '\n');
               } else if (block.type === 'tool_use') {
-                // Record id → name mapping for correlating with tool_result
                 if (block.id && block.name) {
                   this.toolIdToName.set(block.id, block.name);
                 }
-                // Send structured tool use for the Tools panel
                 stream.toolUse(block.name ?? 'unknown', block.input);
               }
             }
@@ -291,55 +318,65 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
           break;
         }
 
+        case 'tool_result': {
+          // Direct tool_result format: { type: 'tool_result', tool_name, content, is_error }
+          // Check if content is an array (structured) or string (direct)
+          if (typeof event.content === 'string' || !event.content) {
+            const toolName = event.tool_name as string || 'unknown';
+            const resultContent = (event.content as string) || '';
+            const isError = event.is_error as boolean || false;
+            stream.toolResult(toolName, resultContent, !isError);
+            break;
+          }
+          // Fall through to 'user' handling if content is an array
+        }
+        // falls through
         case 'user': {
-          // Tool results
-          const message = event.message as { content?: Array<{ type: string; tool_use_id?: string; content?: string; is_error?: boolean }> } | undefined;
-          const toolResultData = event.tool_use_result as { stdout?: string; stderr?: string } | undefined;
+          // Tool results via content blocks
+          const content = Array.isArray(event.content) ? event.content as Array<{
+            type: string;
+            tool_use_id?: string;
+            content?: string;
+            is_error?: boolean;
+          }> : undefined;
 
-          // Send structured tool result for the Tools panel
-          if (message?.content) {
-            for (const block of message.content) {
+          const message = event.message as {
+            content?: Array<{
+              type: string;
+              tool_use_id?: string;
+              content?: string;
+              is_error?: boolean;
+            }>;
+          } | undefined;
+
+          const blocks = content || message?.content;
+          if (blocks) {
+            for (const block of blocks) {
               if (block.type === 'tool_result') {
-                const resultContent = toolResultData?.stdout || block.content || '';
-                // Look up the actual tool name from the tool_use_id → name map
                 const toolName = (block.tool_use_id && this.toolIdToName.get(block.tool_use_id)) ?? 'unknown';
                 stream.toolResult(
                   toolName,
-                  resultContent,
+                  block.content || '',
                   !block.is_error,
                 );
               }
             }
           }
-
-          if (toolResultData?.stderr) {
-            stream.stderr(toolResultData.stderr);
-          }
           break;
         }
 
         case 'result': {
-          // Final result — don't send text (already streamed via assistant events)
-          // Extract cost/usage info and metrics
-          // Claude Code CLI may use `cost_usd` or `total_cost_usd` depending on version
-          const cost = (event.total_cost_usd ?? event.cost_usd) as number | undefined;
-          const numTurns = event.num_turns as number | undefined;
+          // Final result — extract cost/usage metrics
+          const cost = (event.total_cost_usd ?? event.cost_usd ?? event.cost) as number | undefined;
+          const numTurns = (event.num_turns ?? event.turns) as number | undefined;
           const durationMs = (event.duration_ms ?? event.duration_api_ms) as number | undefined;
           const usage = event.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+          const tokens = event.tokens as { input?: number; output?: number } | undefined;
           const model = event.model as string | undefined;
 
-          // Log result event fields for debugging token extraction
-          const eventKeys = Object.keys(event).filter(k => k !== 'result').sort();
-          console.log(`[claude-code] Result event fields: ${eventKeys.join(', ')}`);
-          if (usage) {
-            console.log(`[claude-code] Usage: input_tokens=${usage.input_tokens}, output_tokens=${usage.output_tokens}`);
-          } else {
-            console.log(`[claude-code] No usage field found on result event`);
-          }
-
           this.lastResultMetrics = {
-            inputTokens: usage?.input_tokens,
-            outputTokens: usage?.output_tokens,
+            inputTokens: usage?.input_tokens ?? tokens?.input,
+            outputTokens: usage?.output_tokens ?? tokens?.output,
             totalCost: cost,
             numTurns,
             durationMs,

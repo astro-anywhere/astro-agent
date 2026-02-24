@@ -6,7 +6,7 @@
 // Provider Types
 // ============================================================================
 
-export type ProviderType = 'claude-code' | 'claude-sdk' | 'codex' | 'slurm' | 'custom';
+export type ProviderType = 'claude-code' | 'claude-sdk' | 'codex' | 'openclaw' | 'opencode' | 'slurm' | 'custom';
 
 // Re-export from the canonical source
 export type { ExecutionStrategyType, ExecutionStrategyInfo } from './execution/types.js';
@@ -34,6 +34,8 @@ export interface ProviderCapabilities {
   tools: boolean;
   multiTurn: boolean;
   maxConcurrentTasks: number;
+  defaultModel?: string;
+  availableModels?: string[];
 }
 
 // ============================================================================
