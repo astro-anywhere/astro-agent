@@ -7,7 +7,7 @@
  */
 
 import { execFileSync, execSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -62,6 +62,18 @@ export interface RepoKeyFiles {
   packageInfo?: string;
 }
 
+export type RemoteType = 'github' | 'gitlab' | 'bitbucket' | 'generic' | 'none';
+export type DeliveryMode = 'pr' | 'push' | 'branch' | 'copy' | 'direct';
+
+export interface ProjectSource {
+  localPath: string;
+  subdirectory?: string;
+  remoteUrl?: string;
+  remoteType: RemoteType;
+  baseBranch: string;
+  isGit: boolean;
+}
+
 export interface LocalRepoSetupResult {
   success: boolean;
   workingDirectory?: string;
@@ -69,6 +81,9 @@ export interface LocalRepoSetupResult {
   repository?: string;
   needsGitInit?: boolean;
   keyFiles?: RepoKeyFiles;
+  source?: ProjectSource;
+  deliveryMode?: DeliveryMode;
+  agentDir?: string;
   error?: string;
 }
 
@@ -146,6 +161,139 @@ function cloneRepository(repoUrl: string, targetDir: string): string {
 }
 
 /**
+ * Detect the remote type from a git URL.
+ */
+function detectRemoteType(url: string | undefined): RemoteType {
+  if (!url) return 'none';
+  const lower = url.toLowerCase();
+  if (lower.includes('github.com')) return 'github';
+  if (lower.includes('gitlab.com') || lower.includes('gitlab.')) return 'gitlab';
+  if (lower.includes('bitbucket.org') || lower.includes('bitbucket.')) return 'bitbucket';
+  if (lower.startsWith('git@') || lower.startsWith('http') || lower.startsWith('ssh://')) return 'generic';
+  return 'none';
+}
+
+/**
+ * Derive the delivery mode from a ProjectSource.
+ */
+function deriveDeliveryMode(source: ProjectSource): DeliveryMode {
+  if (!source.isGit) return 'direct';
+  switch (source.remoteType) {
+    case 'github':
+    case 'gitlab':
+    case 'bitbucket':
+      return 'pr';
+    case 'generic':
+      return 'push';
+    case 'none':
+    default:
+      return 'branch';
+  }
+}
+
+/**
+ * Get the current branch name (for baseBranch detection).
+ */
+function getDefaultBranch(dir: string): string {
+  try {
+    return execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], {
+      cwd: dir,
+      encoding: 'utf-8',
+      timeout: 5_000,
+      stdio: 'pipe',
+    }).trim() || 'main';
+  } catch {
+    return 'main';
+  }
+}
+
+/**
+ * Get git root directory.
+ */
+function getGitRoot(dir: string): string | undefined {
+  try {
+    return execFileSync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: dir,
+      encoding: 'utf-8',
+      timeout: 5_000,
+      stdio: 'pipe',
+    }).trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Build a ProjectSource and derive delivery mode from a working directory.
+ */
+function buildProjectSource(dir: string, remoteUrl?: string, baseBranchOverride?: string): { source: ProjectSource; deliveryMode: DeliveryMode } {
+  const gitRoot = getGitRoot(dir);
+  const isGit = !!gitRoot;
+  const baseBranch = baseBranchOverride || (isGit ? getDefaultBranch(dir) : 'main');
+  const remoteType = detectRemoteType(remoteUrl);
+
+  let subdirectory: string | undefined;
+  if (gitRoot && dir !== gitRoot) {
+    const relative = dir.replace(gitRoot, '').replace(/^\//, '');
+    if (relative) subdirectory = relative;
+  }
+
+  const source: ProjectSource = {
+    localPath: dir,
+    subdirectory,
+    remoteUrl,
+    remoteType,
+    baseBranch,
+    isGit,
+  };
+
+  return { source, deliveryMode: deriveDeliveryMode(source) };
+}
+
+/**
+ * Ensure the .astro agent directory exists with a config.json.
+ * Creates {workingDir}/.astro/ and writes config.json with detected settings.
+ */
+function ensureAgentDir(workingDir: string, source: ProjectSource, deliveryMode: DeliveryMode): string {
+  const agentDirName = '.astro';
+  const agentDirPath = join(workingDir, agentDirName);
+
+  mkdirSync(agentDirPath, { recursive: true });
+
+  const configPath = join(agentDirPath, 'config.json');
+  if (!existsSync(configPath)) {
+    writeFileSync(configPath, JSON.stringify({
+      baseBranch: source.baseBranch,
+      branchPrefix: 'astro/',
+      remoteType: source.remoteType,
+      deliveryMode,
+    }, null, 2) + '\n', 'utf-8');
+  }
+
+  // Add agent dir entries to .gitignore
+  addToGitignore(workingDir, `${agentDirName}/worktrees/`);
+  addToGitignore(workingDir, `${agentDirName}/cache/`);
+
+  return agentDirName;
+}
+
+/**
+ * Add an entry to .gitignore if not already present.
+ */
+function addToGitignore(dir: string, entry: string): void {
+  const gitignorePath = join(dir, '.gitignore');
+  try {
+    if (existsSync(gitignorePath)) {
+      const content = readFileSync(gitignorePath, 'utf-8');
+      if (content.includes(entry)) return;
+      appendFileSync(gitignorePath, (content.endsWith('\n') ? '' : '\n') + entry + '\n');
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
+/**
  * Run repo setup locally on the agent runner's machine.
  * Handles existing directories and cloning repos from URL.
  */
@@ -168,10 +316,15 @@ export function localRepoSetup(options: {
       execSync('git config user.name "Astro Agent" || true', { cwd: dir, stdio: 'ignore' });
       execSync('git config user.email "agent@astro.local" || true', { cwd: dir, stdio: 'ignore' });
       const fileTree = getFileTree(dir);
+      const { source, deliveryMode } = buildProjectSource(dir);
+      const agentDir = ensureAgentDir(dir, source, deliveryMode);
       return {
         success: true,
         workingDirectory: dir,
         fileTree,
+        source,
+        deliveryMode,
+        agentDir,
       };
     } catch (error) {
       return { success: false, error: `Failed to create project directory: ${error instanceof Error ? error.message : String(error)}` };
@@ -186,12 +339,17 @@ export function localRepoSetup(options: {
       const clonedDir = cloneRepository(repository, cloneTarget);
       const fileTree = getFileTree(clonedDir);
       const keyFiles = readKeyFiles(clonedDir);
+      const { source, deliveryMode } = buildProjectSource(clonedDir, repository);
+      const agentDir = ensureAgentDir(clonedDir, source, deliveryMode);
       return {
         success: true,
         workingDirectory: clonedDir,
         fileTree,
         repository,
         keyFiles,
+        source,
+        deliveryMode,
+        agentDir,
       };
     } catch (error) {
       return { success: false, error: `Failed to clone repository: ${error instanceof Error ? error.message : String(error)}` };
@@ -226,12 +384,17 @@ export function localRepoSetup(options: {
       const fileTree = getFileTree(workingDirectory);
       const detectedRepo = getGitRemoteUrl(workingDirectory);
       const keyFiles = readKeyFiles(workingDirectory);
+      const { source, deliveryMode } = buildProjectSource(workingDirectory, detectedRepo);
+      const agentDir = ensureAgentDir(workingDirectory, source, deliveryMode);
       return {
         success: true,
         workingDirectory,
         fileTree,
         repository: detectedRepo,
         keyFiles,
+        source,
+        deliveryMode,
+        agentDir,
       };
     }
 

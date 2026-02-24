@@ -100,13 +100,18 @@ export class TaskExecutor {
     // Skip safety checks for lightweight text-only tasks (no file system access)
     const isTextOnlyTask = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan';
 
+    // Determine if worktree isolation will be used for this task.
+    const willUseWorktree = this.useWorktree
+      && normalizedTask.useWorktree !== false
+      && normalizedTask.deliveryMode !== 'direct';
+
     if (!isTextOnlyTask) {
-      // Perform safety check
-      const safetyCheck = await this.performSafetyCheck(normalizedTask);
+      // Perform safety check (worktree flag affects tier assignment)
+      const safetyCheck = await this.performSafetyCheck(normalizedTask, willUseWorktree);
 
       // Handle safety tiers
       if (safetyCheck.tier === WorkdirSafetyTier.UNSAFE) {
-        // BLOCK: unsafe conditions
+        // BLOCK: unsafe conditions (non-git parallel, or git + uncommitted + no worktree)
         this.wsClient.sendTaskResult({
           taskId: normalizedTask.id,
           status: 'failed',
@@ -364,9 +369,9 @@ export class TaskExecutor {
   /**
    * Perform safety check on working directory
    */
-  private async performSafetyCheck(task: Task): Promise<SafetyCheckResult> {
+  private async performSafetyCheck(task: Task, willUseWorktree: boolean): Promise<SafetyCheckResult> {
     const activeTasksInDir = this.getActiveTasksInDirectory(task.workingDirectory);
-    return await checkWorkdirSafety(task.workingDirectory, activeTasksInDir, this.gitAvailable);
+    return await checkWorkdirSafety(task.workingDirectory, activeTasksInDir, this.gitAvailable, willUseWorktree);
   }
 
   /**
@@ -474,7 +479,7 @@ export class TaskExecutor {
     const { promisify } = await import('node:util');
     const execFileAsync = promisify(execFile);
 
-    await execFileAsync('git', ['init'], { cwd: workdir, timeout: 10_000 });
+    await execFileAsync('git', ['init', '-b', 'main'], { cwd: workdir, timeout: 10_000 });
     await execFileAsync('git', ['add', '.'], { cwd: workdir, timeout: 10_000 });
     await execFileAsync('git', ['commit', '-m', 'Initial commit'], { cwd: workdir, timeout: 10_000 });
   }

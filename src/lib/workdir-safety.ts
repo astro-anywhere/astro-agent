@@ -125,12 +125,19 @@ export async function getDirectorySize(dirPath: string): Promise<number> {
 }
 
 /**
- * Check working directory safety for task execution
+ * Check working directory safety for task execution.
+ *
+ * Safety tiers:
+ * - SAFE:    git + worktree (isolation), or git + clean + no worktree
+ * - RISKY:   non-git single task, or git + uncommitted + no worktree single task
+ * - UNSAFE:  non-git + parallel, or git + uncommitted + no worktree + parallel
+ * - GUARDED: (reserved, currently unused)
  */
 export async function checkWorkdirSafety(
   workdir: string,
   activeTasksInDir: number,
   gitAvailable: boolean,
+  willUseWorktree?: boolean,
 ): Promise<SafetyCheckResult> {
   const isGit = gitAvailable && await isGitRepo(workdir);
   const hasUncommitted = isGit && await hasUncommittedChanges(workdir);
@@ -182,17 +189,58 @@ export async function checkWorkdirSafety(
     };
   }
 
-  // GUARDED: Git repo with uncommitted changes
+  // SAFE: Git repo with worktree isolation (uncommitted changes are safe)
+  if (willUseWorktree) {
+    return {
+      tier: WorkdirSafetyTier.SAFE,
+      isGitRepo: true,
+      hasUncommittedChanges: hasUncommitted,
+      parallelTaskCount: activeTasksInDir,
+    };
+  }
+
+  // UNSAFE: Git repo with uncommitted changes, no worktree, parallel tasks
+  if (hasUncommitted && activeTasksInDir > 0) {
+    return {
+      tier: WorkdirSafetyTier.UNSAFE,
+      blockReason: [
+        '🛑 PARALLEL EXECUTION WITH UNCOMMITTED CHANGES',
+        '',
+        'The working directory has uncommitted changes, worktree isolation',
+        'is disabled, and other tasks are already running here.',
+        'This would risk destroying your uncommitted work.',
+        '',
+        `Active tasks in this directory: ${activeTasksInDir}`,
+        '',
+        'Solutions:',
+        '  1. Wait for other tasks to complete',
+        '  2. Commit or stash your changes first',
+        '  3. Enable worktree isolation (default)',
+        '  4. Use --sandbox-mode to execute in isolation',
+      ].join('\n'),
+      isGitRepo: true,
+      hasUncommittedChanges: true,
+      parallelTaskCount: activeTasksInDir,
+    };
+  }
+
+  // RISKY: Git repo with uncommitted changes, no worktree, single task
   if (hasUncommitted) {
     return {
-      tier: WorkdirSafetyTier.GUARDED,
+      tier: WorkdirSafetyTier.RISKY,
       warning: [
-        '⚠️  UNCOMMITTED CHANGES DETECTED',
+        '⚠️  UNCOMMITTED CHANGES WITHOUT WORKTREE ISOLATION',
         '',
-        'The working directory has uncommitted changes.',
-        'The agent may modify, stage, or commit these changes.',
+        'The working directory has uncommitted changes and worktree',
+        'isolation is disabled. The agent may overwrite or destroy',
+        'your uncommitted work.',
         '',
-        'Recommendation: Commit or stash changes before proceeding.',
+        'Recommendations:',
+        '  1. Commit or stash your changes first',
+        '  2. Enable worktree isolation (default)',
+        '  3. Use --sandbox-mode to work on a copy',
+        '',
+        '⚠️  Continue at your own risk.',
       ].join('\n'),
       isGitRepo: true,
       hasUncommittedChanges: true,

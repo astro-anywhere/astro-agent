@@ -506,6 +506,16 @@ export interface RepoSetupResponseMessage extends WSMessage {
       readmeMd?: string;
       packageInfo?: string;
     };
+    source?: {
+      localPath: string;
+      subdirectory?: string;
+      remoteUrl?: string;
+      remoteType: string;
+      baseBranch: string;
+      isGit: boolean;
+    };
+    deliveryMode?: string;
+    agentDir?: string;
     error?: string;
   };
 }
