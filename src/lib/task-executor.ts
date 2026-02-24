@@ -98,7 +98,7 @@ export class TaskExecutor {
     };
 
     // Skip safety checks for lightweight text-only tasks (no file system access)
-    const isTextOnlyTask = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat';
+    const isTextOnlyTask = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan';
 
     if (!isTextOnlyTask) {
       // Perform safety check
