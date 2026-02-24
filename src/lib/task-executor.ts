@@ -97,31 +97,36 @@ export class TaskExecutor {
       workingDirectory: resolveWorkingDirectory(task.workingDirectory),
     };
 
-    // Perform safety check
-    const safetyCheck = await this.performSafetyCheck(normalizedTask);
+    // Skip safety checks for lightweight text-only tasks (no file system access)
+    const isTextOnlyTask = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat';
 
-    // Handle safety tiers
-    if (safetyCheck.tier === WorkdirSafetyTier.UNSAFE) {
-      // BLOCK: unsafe conditions
-      this.wsClient.sendTaskResult({
-        taskId: normalizedTask.id,
-        status: 'failed',
-        error: safetyCheck.blockReason,
-        completedAt: new Date().toISOString(),
-      });
-      return;
-    }
+    if (!isTextOnlyTask) {
+      // Perform safety check
+      const safetyCheck = await this.performSafetyCheck(normalizedTask);
 
-    if (safetyCheck.tier === WorkdirSafetyTier.RISKY && !this.allowNonGit) {
-      // PROMPT: risky conditions require user decision
-      await this.requestSafetyDecision(normalizedTask, safetyCheck);
-      // Execution will continue when decision is received
-      return;
-    }
+      // Handle safety tiers
+      if (safetyCheck.tier === WorkdirSafetyTier.UNSAFE) {
+        // BLOCK: unsafe conditions
+        this.wsClient.sendTaskResult({
+          taskId: normalizedTask.id,
+          status: 'failed',
+          error: safetyCheck.blockReason,
+          completedAt: new Date().toISOString(),
+        });
+        return;
+      }
 
-    if (safetyCheck.tier === WorkdirSafetyTier.GUARDED) {
-      // WARN: inform user but continue
-      this.wsClient.sendTaskStatus(normalizedTask.id, 'queued', 0, safetyCheck.warning);
+      if (safetyCheck.tier === WorkdirSafetyTier.RISKY && !this.allowNonGit) {
+        // PROMPT: risky conditions require user decision
+        await this.requestSafetyDecision(normalizedTask, safetyCheck);
+        // Execution will continue when decision is received
+        return;
+      }
+
+      if (safetyCheck.tier === WorkdirSafetyTier.GUARDED) {
+        // WARN: inform user but continue
+        this.wsClient.sendTaskStatus(normalizedTask.id, 'queued', 0, safetyCheck.warning);
+      }
     }
 
     // Track task by directory
