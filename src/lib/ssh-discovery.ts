@@ -7,6 +7,13 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { SSHHost, DiscoveredHost } from '../types.js';
 
+/** Hostnames that are git forges / not compute machines — auto-skipped */
+const GIT_FORGE_HOSTS = new Set([
+  'github.com', 'gitlab.com', 'bitbucket.org',
+  'ssh.github.com', 'altssh.gitlab.com',
+  'ssh.dev.azure.com', 'vs-ssh.visualstudio.com',
+]);
+
 /**
  * Parse SSH config file and extract host configurations
  */
@@ -37,10 +44,16 @@ async function parseSSHConfig(): Promise<SSHHost[]> {
       const keyLower = key?.toLowerCase();
 
       if (keyLower === 'host') {
-        // Save previous host if exists
+        // Save previous host if valid
         if (currentHost) {
-          hosts.push(currentHost);
-          console.log(`[ssh-discovery] ✓ Added host: ${currentHost.name} (${currentHost.hostname})`);
+          const hn = currentHost.hostname.toLowerCase();
+          if (hn === 'localhost' || hn === '127.0.0.1' || GIT_FORGE_HOSTS.has(hn)) {
+            console.log(`[ssh-discovery] ⊗ Skipped non-compute host: ${currentHost.name} (${currentHost.hostname})`);
+            skippedCount++;
+          } else {
+            hosts.push(currentHost);
+            console.log(`[ssh-discovery] ✓ Added host: ${currentHost.name} (${currentHost.hostname})`);
+          }
         }
 
         const hostPattern = value?.trim() ?? '';
@@ -63,9 +76,11 @@ async function parseSSHConfig(): Promise<SSHHost[]> {
         };
       } else if (currentHost && value) {
         switch (keyLower) {
-          case 'hostname':
-            currentHost.hostname = value.trim();
+          case 'hostname': {
+            // Strip inline comments (e.g., "1.2.3.4  # my server" → "1.2.3.4")
+            currentHost.hostname = value.trim().replace(/\s+#.*$/, '');
             break;
+          }
           case 'user':
             currentHost.user = value.trim();
             break;
@@ -82,10 +97,16 @@ async function parseSSHConfig(): Promise<SSHHost[]> {
       }
     }
 
-    // Don't forget the last host
+    // Don't forget the last host (same validation)
     if (currentHost) {
-      hosts.push(currentHost);
-      console.log(`[ssh-discovery] ✓ Added host: ${currentHost.name} (${currentHost.hostname})`);
+      const hn = currentHost.hostname.toLowerCase();
+      if (hn === 'localhost' || hn === '127.0.0.1' || GIT_FORGE_HOSTS.has(hn)) {
+        console.log(`[ssh-discovery] ⊗ Skipped non-compute host: ${currentHost.name} (${currentHost.hostname})`);
+        skippedCount++;
+      } else {
+        hosts.push(currentHost);
+        console.log(`[ssh-discovery] ✓ Added host: ${currentHost.name} (${currentHost.hostname})`);
+      }
     }
 
     console.log(`[ssh-discovery] Parsed ${hosts.length} valid hosts (skipped ${skippedCount} wildcards/localhost)`);
@@ -211,6 +232,11 @@ async function parseKnownHosts(): Promise<string[]> {
 
         // Skip hashed hostnames (start with |)
         if (hostname.startsWith('|')) {
+          continue;
+        }
+
+        // Skip git forges
+        if (GIT_FORGE_HOSTS.has(hostname.toLowerCase())) {
           continue;
         }
 
