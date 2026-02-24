@@ -105,9 +105,10 @@ export async function packAndInstall(
 
   // 3. Install to user-local prefix to avoid EACCES on system dirs
   // Use $HOME instead of ~ because ~ is not expanded inside double quotes in zsh/bash
+  // Remove old binary first to avoid EEXIST errors on reinstall
   log(`Installing on ${host.name}...`);
   const npmPrefix = '$HOME/.local';
-  await sshExec(host, `mkdir -p ${npmPrefix} && npm install -g --force --prefix ${npmPrefix} $HOME/astro-agent.tgz`);
+  await sshExec(host, `mkdir -p ${npmPrefix} && rm -f ${npmPrefix}/bin/astro-agent && npm install -g --force --prefix ${npmPrefix} $HOME/astro-agent.tgz`);
 
   // 4. Ensure $HOME/.local/bin is on PATH for this session and future logins
   const binDir = `${npmPrefix}/bin`;
@@ -250,16 +251,17 @@ export async function startRemoteAgents(
   for (const host of hosts) {
     log(host.name, 'Checking for running agent...');
 
-    // 1. Check if already running (pgrep with ps aux fallback)
+    // 1. Check if already running (pgrep with ps aux fallback) and stop stale process
     try {
       const { stdout } = await sshExec(
         host,
         'pgrep -f "astro-agent start" 2>/dev/null || ps aux 2>/dev/null | grep "astro-agent start" | grep -v grep',
       );
       if (stdout.trim()) {
-        log(host.name, 'Agent already running');
-        results.push({ host, success: true, message: 'Already running', alreadyRunning: true });
-        continue;
+        log(host.name, 'Stopping existing agent...');
+        await sshExec(host, 'pkill -f "astro-agent start" 2>/dev/null || true').catch(() => {});
+        // Wait for process to exit
+        await new Promise((r) => setTimeout(r, 1000));
       }
     } catch {
       // pgrep returns exit code 1 when no match — that's fine
