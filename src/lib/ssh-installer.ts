@@ -266,18 +266,19 @@ export async function startRemoteAgents(
     }
 
     // 2. Build start command with forwarded options
-    const pathExport = 'export PATH="$HOME/.local/bin:$PATH"';
+    // Use full path to avoid PATH resolution issues across different shells (zsh, bash)
+    const agentBin = '$HOME/.local/bin/astro-agent';
     const flags: string[] = ['--foreground'];
     if (options.maxTasks) flags.push(`--max-tasks ${options.maxTasks}`);
     if (options.logLevel) flags.push(`--log-level ${options.logLevel}`);
     if (options.preserveWorktrees) flags.push('--preserve-worktrees');
-    const startCmd = `astro-agent start ${flags.join(' ')}`;
+    const startCmd = `${agentBin} start ${flags.join(' ')}`;
 
     log(host.name, 'Starting agent...');
     try {
       await sshExec(
         host,
-        `${pathExport} && mkdir -p $HOME/.astro/logs && nohup ${startCmd} > $HOME/.astro/logs/agent-runner.log 2>&1 & disown`,
+        `export PATH="$HOME/.local/bin:$PATH" && mkdir -p $HOME/.astro/logs && nohup ${startCmd} > $HOME/.astro/logs/agent-runner.log 2>&1 & disown`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
