@@ -375,6 +375,7 @@ program
   .option('--max-tasks <number>', 'Maximum concurrent tasks', parseInt)
   .option('--log-level <level>', 'Log level: debug, info, warn, error')
   .option('--force-setup', 'Force re-run setup even if already configured')
+  .option('-f, --foreground', 'Run in foreground (default: background)')
   .option('--preserve-worktrees', 'Preserve worktrees after task completion')
   .option('--allow-non-git', 'Allow execution in non-git directories without prompting')
   .option('--sandbox', 'Always use sandbox mode')
@@ -447,7 +448,7 @@ program
 
       // Start local agent
       await startCommand({
-        foreground: true,
+        foreground: options.foreground,
         relay: options.relay,
         maxTasks: options.maxTasks,
         logLevel: options.logLevel,
