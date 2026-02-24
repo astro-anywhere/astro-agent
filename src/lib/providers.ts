@@ -291,6 +291,167 @@ async function detectCodex(): Promise<ProviderInfo | null> {
 }
 
 /**
+ * Common installation paths for OpenClaw
+ */
+function getOpenClawPaths(): string[] {
+  const home = homedir();
+  const platform = process.platform;
+
+  const paths: string[] = [];
+
+  // npm/pnpm global installs
+  paths.push(join(home, '.npm', 'bin', 'openclaw'));
+  paths.push(join(home, '.npm-global', 'bin', 'openclaw'));
+  paths.push(join(home, '.local', 'bin', 'openclaw'));
+  paths.push(join(home, '.yarn', 'bin', 'openclaw'));
+  paths.push(join(home, '.pnpm-global', 'bin', 'openclaw'));
+
+  if (platform === 'darwin') {
+    paths.push('/usr/local/bin/openclaw');
+    paths.push('/opt/homebrew/bin/openclaw');
+  } else if (platform === 'win32') {
+    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
+    paths.push(join(appData, 'npm', 'openclaw.cmd'));
+    paths.push(join(appData, 'npm', 'openclaw'));
+  } else {
+    paths.push('/usr/local/bin/openclaw');
+    paths.push('/usr/bin/openclaw');
+  }
+
+  return paths;
+}
+
+/**
+ * Detect OpenClaw CLI installation
+ */
+async function detectOpenClaw(): Promise<ProviderInfo | null> {
+  const exists = await commandExists('openclaw');
+  if (exists) {
+    const path = await getCommandPath('openclaw');
+    const version = await getCommandVersion('openclaw', '--version');
+
+    return {
+      type: 'openclaw' as ProviderType,
+      name: 'OpenClaw',
+      version,
+      path: path ?? 'openclaw',
+      available: true,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        multiTurn: true,
+        maxConcurrentTasks: 1,
+      },
+    };
+  }
+
+  const commonPaths = getOpenClawPaths();
+  for (const clawPath of commonPaths) {
+    const isExecutable = await fileExecutable(clawPath);
+    if (isExecutable) {
+      const version = await getCommandVersion(clawPath, '--version');
+      return {
+        type: 'openclaw' as ProviderType,
+        name: 'OpenClaw',
+        version,
+        path: clawPath,
+        available: true,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          multiTurn: true,
+          maxConcurrentTasks: 1,
+        },
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Common installation paths for OpenCode
+ */
+function getOpenCodePaths(): string[] {
+  const home = homedir();
+  const platform = process.platform;
+
+  const paths: string[] = [];
+
+  // bun global installs (OpenCode uses bun)
+  paths.push(join(home, '.bun', 'bin', 'opencode'));
+
+  // npm/pnpm global installs
+  paths.push(join(home, '.npm', 'bin', 'opencode'));
+  paths.push(join(home, '.npm-global', 'bin', 'opencode'));
+  paths.push(join(home, '.local', 'bin', 'opencode'));
+  paths.push(join(home, '.yarn', 'bin', 'opencode'));
+  paths.push(join(home, '.pnpm-global', 'bin', 'opencode'));
+
+  if (platform === 'darwin') {
+    paths.push('/usr/local/bin/opencode');
+    paths.push('/opt/homebrew/bin/opencode');
+  } else if (platform === 'win32') {
+    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
+    paths.push(join(appData, 'npm', 'opencode.cmd'));
+    paths.push(join(appData, 'npm', 'opencode'));
+  } else {
+    paths.push('/usr/local/bin/opencode');
+    paths.push('/usr/bin/opencode');
+  }
+
+  return paths;
+}
+
+/**
+ * Detect OpenCode CLI installation
+ */
+async function detectOpenCode(): Promise<ProviderInfo | null> {
+  const exists = await commandExists('opencode');
+  if (exists) {
+    const path = await getCommandPath('opencode');
+    const version = await getCommandVersion('opencode', '--version');
+
+    return {
+      type: 'opencode' as ProviderType,
+      name: 'OpenCode',
+      version,
+      path: path ?? 'opencode',
+      available: true,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        multiTurn: true,
+        maxConcurrentTasks: 1,
+      },
+    };
+  }
+
+  const commonPaths = getOpenCodePaths();
+  for (const codePath of commonPaths) {
+    const isExecutable = await fileExecutable(codePath);
+    if (isExecutable) {
+      const version = await getCommandVersion(codePath, '--version');
+      return {
+        type: 'opencode' as ProviderType,
+        name: 'OpenCode',
+        version,
+        path: codePath,
+        available: true,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          multiTurn: true,
+          maxConcurrentTasks: 1,
+        },
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Check for custom provider configuration
  */
 async function detectCustomProviders(): Promise<ProviderInfo[]> {
@@ -389,13 +550,15 @@ export async function detectProviders(): Promise<ProviderInfo[]> {
     detectClaudeSdk(),
     detectClaudeCode(),
     detectCodex(),
+    detectOpenClaw(),
+    detectOpenCode(),
     detectHpcCapability(),
     detectCustomProviders(),
   ]);
 
   const providers: ProviderInfo[] = [];
 
-  const [claudeSdk, claudeCode, codex, hpcCapability, customProviders] = detectionResults;
+  const [claudeSdk, claudeCode, codex, openclaw, opencode, hpcCapability, customProviders] = detectionResults;
 
   // Add Claude provider (SDK preferred over CLI — runs in-process with lower overhead)
   if (claudeSdk) {
@@ -412,6 +575,14 @@ export async function detectProviders(): Promise<ProviderInfo[]> {
 
   if (codex) {
     providers.push(codex);
+  }
+
+  if (openclaw) {
+    providers.push(openclaw);
+  }
+
+  if (opencode) {
+    providers.push(opencode);
   }
 
   // Add custom providers
