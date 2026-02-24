@@ -43,7 +43,6 @@ program
   .option('--skip-auth', 'Skip device authentication')
   .option('--non-interactive', 'Run in non-interactive mode')
   .option('--with-ssh-config', 'Discover and configure remote hosts from SSH config')
-  .option('--force', 'Force re-setup on remote hosts that already have agent-runner running')
   .option('--auto-start', 'Enable auto-start on login')
   .option('--install-mcp', 'Install MCP integration for Claude Code')
   .option('--verbose', 'Show detailed debug output')
@@ -56,7 +55,6 @@ program
         skipAuth: options.skipAuth,
         nonInteractive: options.nonInteractive,
         withSshConfig: options.withSshConfig,
-        force: options.force,
         autoStart: options.autoStart,
         installMcp: options.installMcp,
         verbose: options.verbose,
