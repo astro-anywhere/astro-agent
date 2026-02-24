@@ -12,6 +12,16 @@ import type { Task, TaskResult, TaskArtifact } from '../types.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
 
+/** Metrics shape extracted from TaskResult (non-optional) */
+interface CodexMetrics {
+  durationMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalCost?: number;
+  model?: string;
+  numTurns?: number;
+}
+
 export class CodexAdapter implements ProviderAdapter {
   readonly type = 'codex';
   readonly name = 'OpenAI Codex';
@@ -21,6 +31,14 @@ export class CodexAdapter implements ProviderAdapter {
   private lastError?: string;
   private codexPath: string | null = null;
   private configModel: string | null = null;
+
+  /**
+   * Accumulated metrics from the current execution.
+   * Populated by handleStreamLine() as usage events arrive,
+   * then read by execute() when producing the final TaskResult.
+   */
+  private lastResultMetrics?: CodexMetrics;
+  private turnCount = 0;
 
   async isAvailable(): Promise<boolean> {
     const provider = await getProvider('codex');
@@ -63,12 +81,18 @@ export class CodexAdapter implements ProviderAdapter {
     }
 
     this.activeTasks++;
+    this.lastResultMetrics = undefined;
+    this.turnCount = 0;
     const startedAt = new Date().toISOString();
 
     try {
       stream.status('running', 0, 'Starting Codex');
 
       const result = await this.runCodex(task, stream, signal);
+
+      // Build metrics from accumulated stream data + result model.
+      // lastResultMetrics is populated by extractUsageFromEvent() during streaming.
+      const finalMetrics = this.buildFinalMetrics(result.model, startedAt);
 
       return {
         taskId: task.id,
@@ -79,7 +103,7 @@ export class CodexAdapter implements ProviderAdapter {
         startedAt,
         completedAt: new Date().toISOString(),
         artifacts: result.artifacts,
-        metrics: result.model ? { model: result.model } : undefined,
+        metrics: finalMetrics,
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -276,13 +300,38 @@ export class CodexAdapter implements ProviderAdapter {
   }
 
   /**
+   * Build the final metrics object from accumulated stream data.
+   * Called after runCodex() completes, when this.lastResultMetrics
+   * has been populated by extractUsageFromEvent() during streaming.
+   */
+  private buildFinalMetrics(resultModel: string | undefined, startedAt: string): CodexMetrics | undefined {
+    const durationMs = Date.now() - new Date(startedAt).getTime();
+    const accum = this.lastResultMetrics;
+    const model = resultModel || accum?.model;
+    const metrics: CodexMetrics = {
+      inputTokens: accum?.inputTokens,
+      outputTokens: accum?.outputTokens,
+      totalCost: accum?.totalCost,
+      model,
+      durationMs,
+      numTurns: this.turnCount || accum?.numTurns,
+    };
+
+    // Only include metrics if we have meaningful data
+    const hasMetrics = model || metrics.inputTokens || metrics.outputTokens || metrics.totalCost;
+    return hasMetrics ? metrics : undefined;
+  }
+
+  /**
    * Handle a single JSON line from Codex CLI's --json JSONL output.
    *
    * Codex JSONL event types:
-   * - thread.started   → sessionInit (thread_id)
-   * - turn.started     → status update
-   * - item.started     → toolUse for command_execution
-   * - item.completed   → text for reasoning/agent_message, toolResult for command_execution
+   * - thread.started     → sessionInit (thread_id)
+   * - turn.started       → status update, turn counter
+   * - turn.completed     → may contain usage data
+   * - item.started       → toolUse for command_execution
+   * - item.completed     → text for reasoning/agent_message, toolResult for command_execution
+   * - response.completed → final usage summary (input_tokens, output_tokens, total_tokens)
    */
   private handleStreamLine(
     line: string,
@@ -293,6 +342,10 @@ export class CodexAdapter implements ProviderAdapter {
     try {
       const event = JSON.parse(line) as Record<string, unknown>;
       const type = event.type as string;
+
+      // Extract usage from any event that carries it (OpenAI Responses API pattern).
+      // This catches both `response.completed` and `turn.completed` events.
+      this.extractUsageFromEvent(event);
 
       switch (type) {
         case 'thread.started': {
@@ -305,7 +358,30 @@ export class CodexAdapter implements ProviderAdapter {
         }
 
         case 'turn.started': {
+          this.turnCount++;
           stream.status('running', undefined, 'Agent thinking...');
+          break;
+        }
+
+        case 'response.completed': {
+          // Final response event — log fields for debugging token extraction
+          const eventKeys = Object.keys(event).filter(k => k !== 'type').sort();
+          console.log(`[codex] response.completed fields: ${eventKeys.join(', ')}`);
+
+          // Extract usage from response object if present
+          const response = event.response as Record<string, unknown> | undefined;
+          if (response) {
+            this.extractUsageFromEvent(response);
+            const responseKeys = Object.keys(response).sort();
+            console.log(`[codex] response object fields: ${responseKeys.join(', ')}`);
+          }
+
+          // Log accumulated metrics
+          if (this.lastResultMetrics) {
+            console.log(`[codex] Accumulated metrics: input_tokens=${this.lastResultMetrics.inputTokens}, output_tokens=${this.lastResultMetrics.outputTokens}, total_cost=${this.lastResultMetrics.totalCost}`);
+          } else {
+            console.log(`[codex] No usage metrics found in response.completed`);
+          }
           break;
         }
 
@@ -380,6 +456,57 @@ export class CodexAdapter implements ProviderAdapter {
     } catch {
       // Not valid JSON — send as raw stdout
       stream.stdout(line + '\n');
+    }
+  }
+
+  /**
+   * Extract token usage metrics from a Codex JSONL event object.
+   *
+   * Codex CLI (using the OpenAI Responses API) may include usage data in:
+   * - Top-level `usage` field: `{ input_tokens, output_tokens, total_tokens }`
+   * - Nested `response.usage` field on `response.completed` events
+   * - `total_cost` or `cost_usd` at the event or response level
+   *
+   * This method is called on every parsed event, accumulating the latest usage
+   * data into `lastResultMetrics`. Later events overwrite earlier ones, so
+   * `response.completed` (which appears last) provides the authoritative totals.
+   */
+  private extractUsageFromEvent(event: Record<string, unknown>): void {
+    // Check for usage object (OpenAI Responses API format)
+    const usage = event.usage as {
+      input_tokens?: number;
+      output_tokens?: number;
+      total_tokens?: number;
+    } | undefined;
+
+    if (usage && (usage.input_tokens != null || usage.output_tokens != null)) {
+      if (!this.lastResultMetrics) {
+        this.lastResultMetrics = {};
+      }
+      if (usage.input_tokens != null) {
+        this.lastResultMetrics.inputTokens = usage.input_tokens;
+      }
+      if (usage.output_tokens != null) {
+        this.lastResultMetrics.outputTokens = usage.output_tokens;
+      }
+    }
+
+    // Check for cost fields (may be present on response.completed or top-level)
+    const totalCost = (event.total_cost ?? event.total_cost_usd ?? event.cost_usd) as number | undefined;
+    if (totalCost != null) {
+      if (!this.lastResultMetrics) {
+        this.lastResultMetrics = {};
+      }
+      this.lastResultMetrics.totalCost = totalCost;
+    }
+
+    // Check for model field
+    const eventModel = event.model as string | undefined;
+    if (eventModel) {
+      if (!this.lastResultMetrics) {
+        this.lastResultMetrics = {};
+      }
+      this.lastResultMetrics.model = eventModel;
     }
   }
 

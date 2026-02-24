@@ -502,4 +502,196 @@ describe('Codex JSONL parser: handleStreamLine', () => {
       expect(results[1][2]).toBe(false)
     })
   })
+
+  // ==========================================================================
+  // Token/usage metrics extraction (Issue #167)
+  // ==========================================================================
+
+  describe('usage metrics extraction', () => {
+    it('extracts usage from response.completed event', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'response.completed',
+        response: {
+          id: 'resp_001',
+          model: 'o4-mini',
+          usage: {
+            input_tokens: 5000,
+            output_tokens: 1200,
+            total_tokens: 6200,
+          },
+        },
+      }), stream, artifacts, 'o4-mini')
+
+      // Access private field via type assertion
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const metrics = (adapter as any).lastResultMetrics
+      expect(metrics).toBeDefined()
+      expect(metrics.inputTokens).toBe(5000)
+      expect(metrics.outputTokens).toBe(1200)
+    })
+
+    it('extracts usage from top-level usage field on any event', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'turn.completed',
+        usage: {
+          input_tokens: 3000,
+          output_tokens: 800,
+          total_tokens: 3800,
+        },
+      }), stream, artifacts)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const metrics = (adapter as any).lastResultMetrics
+      expect(metrics).toBeDefined()
+      expect(metrics.inputTokens).toBe(3000)
+      expect(metrics.outputTokens).toBe(800)
+    })
+
+    it('accumulates usage across multiple events (later events overwrite)', () => {
+      // First turn
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'turn.completed',
+        usage: {
+          input_tokens: 1000,
+          output_tokens: 500,
+        },
+      }), stream, artifacts)
+
+      // Second turn (should overwrite)
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'turn.completed',
+        usage: {
+          input_tokens: 2000,
+          output_tokens: 1000,
+        },
+      }), stream, artifacts)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const metrics = (adapter as any).lastResultMetrics
+      expect(metrics).toBeDefined()
+      expect(metrics.inputTokens).toBe(2000)
+      expect(metrics.outputTokens).toBe(1000)
+    })
+
+    it('extracts total_cost from response.completed', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'response.completed',
+        response: {
+          id: 'resp_002',
+          usage: {
+            input_tokens: 4000,
+            output_tokens: 900,
+          },
+          total_cost: 0.0325,
+        },
+      }), stream, artifacts)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const metrics = (adapter as any).lastResultMetrics
+      expect(metrics).toBeDefined()
+      expect(metrics.inputTokens).toBe(4000)
+      expect(metrics.outputTokens).toBe(900)
+      expect(metrics.totalCost).toBe(0.0325)
+    })
+
+    it('extracts cost_usd as fallback', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'some.event',
+        cost_usd: 0.05,
+      }), stream, artifacts)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const metrics = (adapter as any).lastResultMetrics
+      expect(metrics).toBeDefined()
+      expect(metrics.totalCost).toBe(0.05)
+    })
+
+    it('extracts model from events', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'response.completed',
+        response: {
+          model: 'gpt-5.3-codex',
+        },
+      }), stream, artifacts)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const metrics = (adapter as any).lastResultMetrics
+      expect(metrics).toBeDefined()
+      expect(metrics.model).toBe('gpt-5.3-codex')
+    })
+
+    it('counts turns via turn.started events', () => {
+      callHandleStreamLine(adapter, JSON.stringify({ type: 'turn.started' }), stream, artifacts)
+      callHandleStreamLine(adapter, JSON.stringify({ type: 'turn.started' }), stream, artifacts)
+      callHandleStreamLine(adapter, JSON.stringify({ type: 'turn.started' }), stream, artifacts)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((adapter as any).turnCount).toBe(3)
+    })
+
+    it('does not create metrics object when no usage data is present', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          type: 'reasoning',
+          text: 'Just thinking...',
+        },
+      }), stream, artifacts)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const metrics = (adapter as any).lastResultMetrics
+      expect(metrics).toBeUndefined()
+    })
+
+    it('handles partial usage (only input_tokens)', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'turn.completed',
+        usage: {
+          input_tokens: 7500,
+        },
+      }), stream, artifacts)
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const metrics = (adapter as any).lastResultMetrics
+      expect(metrics).toBeDefined()
+      expect(metrics.inputTokens).toBe(7500)
+      expect(metrics.outputTokens).toBeUndefined()
+    })
+
+    it('handles full session with usage at response.completed', () => {
+      const jsonlLines = [
+        { type: 'thread.started', thread_id: 'thread-metrics-001' },
+        { type: 'turn.started' },
+        { type: 'item.completed', item: { type: 'reasoning', text: 'Planning...' } },
+        { type: 'item.started', item: { type: 'command_execution', command: 'echo hello', status: 'in_progress' } },
+        { type: 'item.completed', item: { type: 'command_execution', command: 'echo hello', aggregated_output: 'hello\n', exit_code: 0, status: 'completed' } },
+        { type: 'turn.started' },
+        { type: 'item.completed', item: { type: 'agent_message', text: 'Done!' } },
+        {
+          type: 'response.completed',
+          response: {
+            id: 'resp_final',
+            model: 'o4-mini',
+            usage: { input_tokens: 12000, output_tokens: 3500, total_tokens: 15500 },
+            total_cost: 0.078,
+          },
+        },
+      ]
+
+      for (const event of jsonlLines) {
+        callHandleStreamLine(adapter, JSON.stringify(event), stream, artifacts, 'o4-mini')
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const metrics = (adapter as any).lastResultMetrics
+      expect(metrics).toBeDefined()
+      expect(metrics.inputTokens).toBe(12000)
+      expect(metrics.outputTokens).toBe(3500)
+      expect(metrics.totalCost).toBe(0.078)
+      expect(metrics.model).toBe('o4-mini')
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      expect((adapter as any).turnCount).toBe(2)
+    })
+  })
 })
