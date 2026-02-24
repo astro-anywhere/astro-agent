@@ -5,6 +5,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import type { Task, TaskResult, TaskArtifact } from '../types.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
@@ -134,9 +135,22 @@ export class ClaudeCodeAdapter implements ProviderAdapter {
       console.log(`[claude-code] cwd: ${task.workingDirectory}`);
       console.log(`[claude-code] prompt length: ${task.prompt.length} chars`);
 
+      // Validate working directory exists before spawning.
+      // Node.js spawn throws a misleading "ENOENT" (which looks like the
+      // binary is missing) when the cwd doesn't exist.
+      if (task.workingDirectory && !existsSync(task.workingDirectory)) {
+        const error = new Error(
+          `Working directory does not exist: ${task.workingDirectory}. ` +
+          `Ensure the directory exists on this machine before dispatching.`
+        );
+        console.error(`[claude-code] Spawn failed:`, error);
+        reject(error);
+        return;
+      }
+
       try {
         proc = spawn(this.claudePath!, args, {
-          cwd: task.workingDirectory,
+          cwd: task.workingDirectory || undefined,
           env,
           stdio: ['pipe', 'pipe', 'pipe'],
         });

@@ -34,6 +34,8 @@ export interface ProviderCapabilities {
   tools: boolean;
   multiTurn: boolean;
   maxConcurrentTasks: number;
+  defaultModel?: string;
+  availableModels?: string[];
 }
 
 // ============================================================================

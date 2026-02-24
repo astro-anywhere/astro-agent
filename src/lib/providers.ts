@@ -193,6 +193,48 @@ function getCodexPaths(): string[] {
 }
 
 /**
+ * Read the configured model from ~/.codex/config.toml
+ * Parses basic TOML to extract the model field.
+ */
+async function readCodexConfigModel(): Promise<string | null> {
+  try {
+    const configPath = join(homedir(), '.codex', 'config.toml');
+    const content = await readFile(configPath, 'utf-8');
+
+    // Parse active profile name (top-level `profile = "name"`)
+    let activeProfile: string | null = null;
+    const profileMatch = content.match(/^profile\s*=\s*"([^"]+)"/m);
+    if (profileMatch) {
+      activeProfile = profileMatch[1];
+    }
+
+    // If a profile is set, look for [profiles.<name>] section's model
+    if (activeProfile) {
+      const profileSection = new RegExp(
+        `\\[profiles\\.${activeProfile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]([\\s\\S]*?)(?=\\n\\[|$)`
+      );
+      const sectionMatch = content.match(profileSection);
+      if (sectionMatch) {
+        const modelInProfile = sectionMatch[1].match(/^model\s*=\s*"([^"]+)"/m);
+        if (modelInProfile) {
+          return modelInProfile[1];
+        }
+      }
+    }
+
+    // Fall back to top-level model
+    const topLevelModel = content.match(/^model\s*=\s*"([^"]+)"/m);
+    if (topLevelModel) {
+      return topLevelModel[1];
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Detect OpenAI Codex CLI installation
  */
 async function detectCodex(): Promise<ProviderInfo | null> {
@@ -201,6 +243,7 @@ async function detectCodex(): Promise<ProviderInfo | null> {
   if (exists) {
     const path = await getCommandPath('codex');
     const version = await getCommandVersion('codex', '--version');
+    const configModel = await readCodexConfigModel();
 
     return {
       type: 'codex',
@@ -213,6 +256,7 @@ async function detectCodex(): Promise<ProviderInfo | null> {
         tools: true,
         multiTurn: true,
         maxConcurrentTasks: 1,
+        ...(configModel ? { defaultModel: configModel, availableModels: [configModel] } : {}),
       },
     };
   }
@@ -224,6 +268,7 @@ async function detectCodex(): Promise<ProviderInfo | null> {
     const isExecutable = await fileExecutable(codexPath);
     if (isExecutable) {
       const version = await getCommandVersion(codexPath, '--version');
+      const configModel = await readCodexConfigModel();
 
       return {
         type: 'codex',
@@ -236,6 +281,7 @@ async function detectCodex(): Promise<ProviderInfo | null> {
           tools: true,
           multiTurn: true,
           maxConcurrentTasks: 1,
+          ...(configModel ? { defaultModel: configModel, availableModels: [configModel] } : {}),
         },
       };
     }
