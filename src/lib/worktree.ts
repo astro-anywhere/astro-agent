@@ -237,9 +237,33 @@ async function deleteRemoteBranch(gitRoot: string, branchName: string): Promise<
 }
 
 /**
- * Detect the default branch (main/master) for the repo.
+ * Detect the default branch for the repo.
+ * Priority: .astro/config.json baseBranch → origin/HEAD → origin/main or master → 'main'.
  */
 async function getDefaultBranch(gitRoot: string): Promise<string> {
+  // 1. Check .astro/config.json for user-configured baseBranch
+  try {
+    const configPath = join(gitRoot, '.astro', 'config.json');
+    const content = await readFile(configPath, 'utf-8');
+    const config = JSON.parse(content);
+    if (config.baseBranch && typeof config.baseBranch === 'string') {
+      // Validate it exists as a remote branch
+      try {
+        await execFileAsync(
+          'git',
+          ['-C', gitRoot, 'rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}`],
+          { env: withGitEnv(), timeout: 5_000 }
+        );
+        return config.baseBranch;
+      } catch {
+        // Branch doesn't exist on remote, fall through to auto-detection
+      }
+    }
+  } catch {
+    // Config doesn't exist or is invalid — fall through
+  }
+
+  // 2. Try origin/HEAD symbolic ref
   try {
     const { stdout } = await execFileAsync(
       'git',
@@ -252,6 +276,7 @@ async function getDefaultBranch(gitRoot: string): Promise<string> {
     // Fallback
   }
 
+  // 3. Check if origin/main or origin/master exist
   try {
     const { stdout } = await execFileAsync(
       'git',
