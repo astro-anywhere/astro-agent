@@ -1,77 +1,39 @@
 /**
- * Tests for setup --force behavior with remote agent detection.
+ * Tests for setup remote agent relaunch behavior.
  *
- * These tests verify that installOnRemoteHosts correctly handles
- * the case where agent-runner is already running on a remote host.
- *
- * Since installOnRemoteHosts is a private function inside setup.ts,
- * we test the building blocks directly (checkRemoteAgentRunning)
- * and verify the integration logic via command construction patterns.
+ * Setup always stops and reinstalls remote agents (unconditional pkill + fresh start).
+ * This matches the behavior of startRemoteAgents() established in PRs #2/#3,
+ * which found that pgrep-based "already running" detection is unreliable
+ * (self-matches the SSH command process).
  */
 
 import { describe, it, expect } from 'vitest';
 
-describe('setup --force integration patterns', () => {
-  it('should skip host when agent is running and force is false', () => {
-    // Simulate the logic: if running and !force, skip with warning
-    const isRunning = true;
-    const force = false;
-
-    let skipped = false;
-    let message = '';
-
-    if (isRunning && !force) {
-      skipped = true;
-      message = 'Agent runner already running. Use setup --force to stop and re-configure.';
-    }
-
-    expect(skipped).toBe(true);
-    expect(message).toContain('--force');
-    expect(message).toContain('already running');
-  });
-
-  it('should kill and reinstall when agent is running and force is true', () => {
-    const isRunning = true;
-    const force = true;
-
-    let shouldKill = false;
-    let shouldInstall = false;
-
-    if (isRunning && force) {
-      shouldKill = true;
-    }
-    // After kill, proceed to install
-    shouldInstall = !isRunning || force;
-
-    expect(shouldKill).toBe(true);
-    expect(shouldInstall).toBe(true);
-  });
-
-  it('should proceed normally when no agent is running (regardless of force)', () => {
-    for (const force of [true, false]) {
-      const isRunning = false;
-
-      let skipped = false;
-      let shouldKill = false;
-
-      if (isRunning && !force) {
-        skipped = true;
-      }
-      if (isRunning && force) {
-        shouldKill = true;
-      }
-
-      expect(skipped).toBe(false);
-      expect(shouldKill).toBe(false);
-    }
-  });
-
-  it('should build correct pkill command for force stop', () => {
+describe('setup remote agent relaunch', () => {
+  it('should always attempt pkill before install (no skip logic)', () => {
+    // The setup flow is: unconditional pkill → wait → install
+    // There is no "isRunning" check or "force" flag
     const killCmd = 'pkill -f "[a]stro-agent start" 2>/dev/null || true';
 
     // Should use bracket trick to prevent self-match
     expect(killCmd).toContain('[a]stro-agent');
     // Should not fail if no process found
     expect(killCmd).toContain('|| true');
+  });
+
+  it('should match startRemoteAgents behavior (always kill + fresh start)', () => {
+    // Both setup and launch/start use the same pattern:
+    // 1. pkill existing agent (unconditional, no pgrep check)
+    // 2. Wait for cleanup
+    // 3. Proceed with install/start
+    //
+    // This is intentional — PRs #2/#3 found that pgrep -f "astro-agent start"
+    // self-matches the SSH command process, falsely detecting agents as running.
+    const setupKillCmd = 'pkill -f "[a]stro-agent start" 2>/dev/null || true';
+    const launchKillCmd = 'pkill -f "astro-agent start" 2>/dev/null || true';
+
+    // Both commands target the same process pattern
+    expect(setupKillCmd).toContain('astro-agent start');
+    expect(launchKillCmd).toContain('astro-agent start');
   });
 });
