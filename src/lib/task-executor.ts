@@ -748,8 +748,14 @@ export class TaskExecutor {
     branchName?: string;
     cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
   }> {
+    // Per-task explicit opt-out: user consciously chose to skip worktree
+    if (task.useWorktree === false) {
+      console.log(`[executor] Task ${task.id}: worktree explicitly disabled by user, using raw workdir: ${task.workingDirectory}`);
+      return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
+    }
+
     if (!this.useWorktree) {
-      console.warn(`[executor] Task ${task.id}: worktree disabled, using raw workdir: ${task.workingDirectory}`);
+      console.warn(`[executor] Task ${task.id}: worktree disabled (executor-level), using raw workdir: ${task.workingDirectory}`);
       return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
     }
 
@@ -780,6 +786,9 @@ export class TaskExecutor {
       }
     }
 
+    // Git worktree path — worktree creation must succeed or fail the task.
+    // Running in the raw workdir without isolation risks cross-task commit
+    // contamination and breaks PR creation.
     try {
       console.log(`[executor] Task ${task.id}: creating worktree for workdir=${task.workingDirectory}`);
       const worktree = await createWorktree({
@@ -793,16 +802,15 @@ export class TaskExecutor {
         stderr: stream.stderr,
       });
       if (!worktree) {
-        console.warn(`[executor] Task ${task.id}: createWorktree returned null, falling back to raw workdir: ${task.workingDirectory}`);
-        return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
+        throw new Error(`Worktree creation returned null for ${task.workingDirectory}. Cannot proceed without isolation.`);
       }
       console.log(`[executor] Task ${task.id}: worktree created at ${worktree.workingDirectory} (branch: ${worktree.branchName})`);
       return worktree;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      console.error(`[executor] Task ${task.id}: worktree creation FAILED: ${errorMsg} — falling back to raw workdir: ${task.workingDirectory}`);
-      this.wsClient.sendTaskStatus(task.id, 'running', 0, `Worktree setup failed: ${errorMsg}`);
-      return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
+      console.error(`[executor] Task ${task.id}: worktree creation FAILED: ${errorMsg}`);
+      this.wsClient.sendTaskStatus(task.id, 'failed', 0, `Worktree setup failed: ${errorMsg}`);
+      throw error;
     }
   }
 

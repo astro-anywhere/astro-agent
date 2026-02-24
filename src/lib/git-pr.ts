@@ -4,6 +4,8 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
@@ -237,6 +239,24 @@ export async function autoCommitChanges(
 }
 
 /**
+ * Read baseBranch from .astro/config.json (set during repo setup).
+ * Returns null if config doesn't exist or baseBranch is not set.
+ */
+async function readBaseBranchFromConfig(gitRoot: string): Promise<string | null> {
+  try {
+    const configPath = join(gitRoot, '.astro', 'config.json');
+    const content = await readFile(configPath, 'utf-8');
+    const config = JSON.parse(content);
+    if (config.baseBranch && typeof config.baseBranch === 'string') {
+      return config.baseBranch;
+    }
+  } catch {
+    // Config doesn't exist or is invalid
+  }
+  return null;
+}
+
+/**
  * Full PR creation flow: auto-commit + push + create PR, with graceful fallbacks
  */
 export async function pushAndCreatePR(
@@ -266,8 +286,8 @@ export async function pushAndCreatePR(
     return result;
   }
 
-  // Get default branch
-  const baseBranch = await getDefaultBranch(gitRoot);
+  // Get default branch: prefer config, fall back to auto-detection
+  const baseBranch = await readBaseBranchFromConfig(gitRoot) ?? await getDefaultBranch(gitRoot);
 
   // Auto-commit any uncommitted changes the agent left behind (opt-in, default true)
   if (options.autoCommit !== false) {

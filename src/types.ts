@@ -136,6 +136,9 @@ export interface Task {
 
   /** Worktree strategy for non-git or copy-based execution */
   worktreeStrategy?: 'copy' | 'reference' | 'direct';
+
+  /** Per-task worktree control. When false, skip worktree and run in raw workdir. */
+  useWorktree?: boolean;
 }
 
 export interface TaskResult {
