@@ -248,6 +248,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         process.env.CLAUDE_CONFIG_DIR = join(homedir(), '.claude');
       }
 
+      const hasWorkdir = !!workingDirectory;
+
       const options: Parameters<typeof query>[0]['options'] = {
         abortController,
         maxTurns: 100,
@@ -255,8 +257,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         // NOTE: Do NOT pass `sandbox` option — any non-undefined value crashes Claude Code on Bedrock.
         settingSources: ['user', 'project', 'local'],
         persistSession: false,
-        cwd: workingDirectory,
-        additionalDirectories: [workingDirectory],
+        ...(hasWorkdir ? { cwd: workingDirectory, additionalDirectories: [workingDirectory] } : {}),
         env: {
           ...process.env,
           CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
@@ -268,6 +269,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
       // Load MCP servers from config if available
       const agentConfig = config.getConfig();
+      const mcpAllowedTools: string[] = [];
       if (agentConfig.mcpServers && Object.keys(agentConfig.mcpServers).length > 0) {
         const mcpServers: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};
         for (const [name, serverConfig] of Object.entries(agentConfig.mcpServers)) {
@@ -281,7 +283,20 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           };
         }
         (options as Record<string, unknown>).mcpServers = mcpServers;
-        (options as Record<string, unknown>).allowedTools = Object.keys(mcpServers).map(name => `mcp__${name}__*`);
+        for (const name of Object.keys(mcpServers)) {
+          mcpAllowedTools.push(`mcp__${name}__*`);
+        }
+      }
+
+      // Restrict tools based on whether we have a working directory
+      if (!hasWorkdir) {
+        (options as Record<string, unknown>).allowedTools = ['WebSearch', 'WebFetch', ...mcpAllowedTools];
+      } else if (mcpAllowedTools.length > 0) {
+        (options as Record<string, unknown>).allowedTools = [
+          'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
+          'TodoWrite', 'AskUserQuestion', 'Skill', 'Task', 'NotebookEdit',
+          ...mcpAllowedTools,
+        ];
       }
 
       const gen = query({ prompt: message, options });
@@ -416,6 +431,9 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // Determine appropriate maxTurns based on task type
     const defaultMaxTurns = (task.type === 'chat' || task.type === 'summarize') ? 10 : 150;
 
+    // Plan/chat/summarize tasks without a working directory run without cwd context
+    const hasWorkdir = !!task.workingDirectory;
+
     // Build options for the query
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
@@ -424,8 +442,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       // NOTE: Do NOT pass `sandbox` option — any non-undefined value crashes Claude Code on Bedrock.
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
       persistSession: false,
-      cwd: task.workingDirectory,
-      additionalDirectories: [task.workingDirectory], // Allow file operations in worktree
+      ...(hasWorkdir ? { cwd: task.workingDirectory, additionalDirectories: [task.workingDirectory] } : {}),
       env: {
         ...process.env,
         ...task.environment,
@@ -553,6 +570,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     // Load MCP servers from config if available
     const agentConfig = config.getConfig();
+    const mcpAllowedTools: string[] = [];
     if (agentConfig.mcpServers && Object.keys(agentConfig.mcpServers).length > 0) {
       console.log(`[claude-sdk] Loading ${Object.keys(agentConfig.mcpServers).length} MCP server(s): ${Object.keys(agentConfig.mcpServers).join(', ')}`);
 
@@ -571,9 +589,25 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
       (options as Record<string, unknown>).mcpServers = mcpServers;
 
-      // Allow all MCP tools from configured servers
-      const allowedTools = Object.keys(mcpServers).map(name => `mcp__${name}__*`);
-      (options as Record<string, unknown>).allowedTools = allowedTools;
+      // Collect MCP tool patterns
+      for (const name of Object.keys(mcpServers)) {
+        mcpAllowedTools.push(`mcp__${name}__*`);
+      }
+    }
+
+    // For tasks without a working directory, disable file system and shell tools
+    // but keep web search so the agent can research. MCP tools are also allowed.
+    if (!hasWorkdir) {
+      const noWorkdirTools = ['WebSearch', 'WebFetch', ...mcpAllowedTools];
+      (options as Record<string, unknown>).allowedTools = noWorkdirTools;
+      console.log(`[claude-sdk] No workdir — allowed tools: [${noWorkdirTools.join(', ')}]`);
+    } else if (mcpAllowedTools.length > 0) {
+      // With a workdir, allow all built-in tools plus MCP tools.
+      (options as Record<string, unknown>).allowedTools = [
+        'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
+        'TodoWrite', 'AskUserQuestion', 'Skill', 'Task', 'NotebookEdit',
+        ...mcpAllowedTools,
+      ];
     }
 
     // Build the prompt: use messages array if provided (chat tasks), otherwise flat string

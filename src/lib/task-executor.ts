@@ -94,13 +94,15 @@ export class TaskExecutor {
    * Submit a task for execution (with safety checks)
    */
   async submitTask(task: Task): Promise<void> {
+    // Skip workingDirectory resolution for lightweight text-only tasks (no file system access)
+    const isTextOnlyTask = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan';
+
     const normalizedTask = {
       ...task,
-      workingDirectory: resolveWorkingDirectory(task.workingDirectory),
+      workingDirectory: isTextOnlyTask && !task.workingDirectory
+        ? undefined!  // Text-only tasks can run without a working directory
+        : resolveWorkingDirectory(task.workingDirectory),
     };
-
-    // Skip safety checks for lightweight text-only tasks (no file system access)
-    const isTextOnlyTask = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan';
 
     // Determine if worktree isolation will be used for this task.
     const willUseWorktree = this.useWorktree
@@ -474,16 +476,46 @@ export class TaskExecutor {
   }
 
   /**
-   * Initialize git repository in a directory
+   * Initialize git repository in a directory.
+   * Creates .gitignore and CLAUDE.md if they don't exist before the initial commit.
    */
   private async initializeGit(workdir: string): Promise<void> {
     const { execFile } = await import('node:child_process');
     const { promisify } = await import('node:util');
+    const { writeFile, access } = await import('node:fs/promises');
+    const { join } = await import('node:path');
     const execFileAsync = promisify(execFile);
 
     await execFileAsync('git', ['init', '-b', 'main'], { cwd: workdir, timeout: 10_000 });
+
+    // Bootstrap with .gitignore and CLAUDE.md if they don't exist
+    const gitignorePath = join(workdir, '.gitignore');
+    const claudeMdPath = join(workdir, 'CLAUDE.md');
+
+    try { await access(gitignorePath); } catch {
+      await writeFile(gitignorePath, '.astro\nnode_modules\n.env\n.env.local\n');
+    }
+    try { await access(claudeMdPath); } catch {
+      await writeFile(claudeMdPath, '# Project\n\nThis project is managed by Astro.\n');
+    }
+
     await execFileAsync('git', ['add', '.'], { cwd: workdir, timeout: 10_000 });
     await execFileAsync('git', ['commit', '-m', 'Initial commit'], { cwd: workdir, timeout: 10_000 });
+  }
+
+  /**
+   * Check if a git repo has any commits.
+   */
+  private async repoHasCommits(workdir: string): Promise<boolean> {
+    try {
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const execFileAsync = promisify(execFile);
+      const { stdout } = await execFileAsync('git', ['-C', workdir, 'rev-list', '--count', 'HEAD'], { timeout: 5_000 });
+      return parseInt(stdout.trim(), 10) > 0;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -616,7 +648,11 @@ export class TaskExecutor {
     this.runningTasks.set(normalizedTask.id, runningTask);
     this.wsClient.addActiveTask(normalizedTask.id);
 
-    const prepared = await this.prepareTaskWorkspace(normalizedTask, stream);
+    // Text-only tasks (plan/chat/summarize) without a working directory skip workspace prep
+    const isTextOnly = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan';
+    const prepared = isTextOnly && !normalizedTask.workingDirectory
+      ? { workingDirectory: '', cleanup: async () => {} }
+      : await this.prepareTaskWorkspace(normalizedTask, stream);
     const taskWithWorkspace = { ...normalizedTask, workingDirectory: prepared.workingDirectory };
     runningTask.task = taskWithWorkspace;
     console.log(`[executor] Task ${task.id}: workspace prepared, cwd=${prepared.workingDirectory}`);
@@ -804,6 +840,14 @@ export class TaskExecutor {
     if (this.gitAvailable && !(await isGitRepo(task.workingDirectory))) {
       console.warn(`[executor] Task ${task.id}: not a git repo (${task.workingDirectory}), falling back to direct execution`);
       return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
+    }
+
+    // Zero-commit git repo: bootstrap with .gitignore + CLAUDE.md + initial commit
+    // so that worktree creation and PR delivery work correctly.
+    if (this.gitAvailable && !(await this.repoHasCommits(task.workingDirectory))) {
+      console.log(`[executor] Task ${task.id}: git repo has no commits, bootstrapping...`);
+      stream.stdout(`[astro] Bootstrapping empty git repo with initial commit...\n`);
+      await this.initializeGit(task.workingDirectory);
     }
 
     // Git worktree path — worktree creation must succeed or fail the task.
