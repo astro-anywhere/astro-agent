@@ -112,7 +112,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       withSshConfig: true,
     });
     if (!config.isSetupComplete()) {
-      console.log(chalk.red('Setup failed. Run manually: npx @astroanywhere/agent setup'));
+      console.log(chalk.red('Setup failed. Run manually: npx @astroanywhere/agent@latest launch'));
       process.exit(1);
     }
   }

@@ -16,7 +16,7 @@ export async function statusCommand(): Promise<void> {
     console.log(chalk.green('  ✓ Setup complete'));
   } else {
     console.log(chalk.yellow('  ✗ Setup not complete'));
-    console.log(chalk.dim('    Run: npx @astroanywhere/agent setup'));
+    console.log(chalk.dim('    Run: npx @astroanywhere/agent@latest launch'));
   }
 
   console.log(`  Runner ID: ${chalk.cyan(config.getRunnerId())}`);
