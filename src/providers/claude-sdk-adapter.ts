@@ -9,6 +9,7 @@
 import { query, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { writeFile, mkdir, rm } from 'node:fs/promises';
 import type { Task, TaskResult, TaskArtifact } from '../types.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
@@ -507,6 +508,34 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       effectivePrompt = this.hpcContext.contextString + '\n\n---\n\n' + task.prompt;
     }
 
+    // Write images to temp files so the agent can read them with its Read tool.
+    // The SDK's query() doesn't support inline multimodal content blocks in the
+    // AsyncIterable format (SDKUserMessage requires session_id which isn't available
+    // at prompt construction time). Writing to files is reliable across all providers.
+    const imageCleanupPaths: string[] = [];
+    if (task.images && task.images.length > 0) {
+      const imageDir = join(task.workingDirectory, '.astro', 'images');
+      try {
+        await mkdir(imageDir, { recursive: true });
+        const imagePaths: string[] = [];
+        for (const img of task.images) {
+          const ext = img.mimeType.split('/')[1] || 'png';
+          const filename = img.filename || `image-${img.blobId}.${ext}`;
+          const filepath = join(imageDir, filename);
+          await writeFile(filepath, Buffer.from(img.data, 'base64'));
+          imagePaths.push(filepath);
+          imageCleanupPaths.push(filepath);
+        }
+        // Append image references to the prompt
+        const imageList = imagePaths.map((p, i) => `${i + 1}. ${p}`).join('\n');
+        effectivePrompt += `\n\n---\n\n## Attached Images\n\nThe following ${imagePaths.length} image(s) from the task description have been saved for your analysis. Use the Read tool to view them:\n${imageList}`;
+        console.log(`[claude-sdk] Wrote ${imagePaths.length} image(s) to ${imageDir}`);
+      } catch (err) {
+        console.warn(`[claude-sdk] Failed to write images to disk:`, err);
+        // Non-fatal: continue without images
+      }
+    }
+
     // Add structured output format if requested (e.g., plan generation)
     if (task.outputFormat) {
       (options as Record<string, unknown>).outputFormat = task.outputFormat;
@@ -700,6 +729,13 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           stream.status('failed', progress, errorMessage);
         }
         break;
+      }
+    }
+
+    // Clean up temp image files
+    if (imageCleanupPaths.length > 0) {
+      for (const p of imageCleanupPaths) {
+        rm(p, { force: true }).catch(() => {});
       }
     }
 

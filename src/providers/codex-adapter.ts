@@ -6,6 +6,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { Task, TaskResult, TaskArtifact } from '../types.js';
@@ -144,11 +145,39 @@ export class CodexAdapter implements ProviderAdapter {
     };
   }
 
-  private runCodex(
+  private async runCodex(
     task: Task,
     stream: TaskOutputStream,
     signal: AbortSignal
   ): Promise<{ exitCode: number; output: string; error?: string; artifacts?: TaskArtifact[]; model?: string }> {
+    // Codex requires --skip-git-repo-check when running outside a git repository.
+    // The task executor already handles git safety at a higher level (worktree creation,
+    // safety checks), so we can safely allow non-git directories here.
+    const isGitRepo = task.workingDirectory
+      && existsSync(join(task.workingDirectory, '.git'));
+
+    // Resolve model: task-level override > config file default
+    const model = task.model || this.configModel;
+
+    // Write images to temp files for the --image flag
+    const imagePaths: string[] = [];
+    if (task.images && task.images.length > 0) {
+      const imageDir = join(task.workingDirectory || homedir(), '.astro', 'images');
+      try {
+        await mkdir(imageDir, { recursive: true });
+        for (const img of task.images) {
+          const ext = img.mimeType.split('/')[1] || 'png';
+          const filename = img.filename || `image-${img.blobId}.${ext}`;
+          const filepath = join(imageDir, filename);
+          await writeFile(filepath, Buffer.from(img.data, 'base64'));
+          imagePaths.push(filepath);
+        }
+        console.log(`[codex] Wrote ${imagePaths.length} image(s) to ${imageDir}`);
+      } catch (err) {
+        console.warn(`[codex] Failed to write images to disk:`, err);
+      }
+    }
+
     return new Promise((resolve, reject) => {
       // Codex CLI: use `exec` subcommand for non-interactive execution
       // --json: structured JSONL output for parsing
@@ -162,21 +191,14 @@ export class CodexAdapter implements ProviderAdapter {
       // The task executor provides isolation at a higher level (worktree creation,
       // working directory restriction).
 
-      // Codex requires --skip-git-repo-check when running outside a git repository.
-      // The task executor already handles git safety at a higher level (worktree creation,
-      // safety checks), so we can safely allow non-git directories here.
-      const isGitRepo = task.workingDirectory
-        && existsSync(join(task.workingDirectory, '.git'));
-
-      // Resolve model: task-level override > config file default
-      const model = task.model || this.configModel;
-
       const args = [
         'exec',
         '-s', 'danger-full-access',       // Full filesystem + network access
         ...(model ? ['-m', model] : []),   // Explicit model selection
         ...(!isGitRepo ? ['--skip-git-repo-check'] : []),
         '--json',                         // JSONL output for structured parsing
+        // Attach images via --image flag (comma-separated paths)
+        ...(imagePaths.length > 0 ? ['--image', imagePaths.join(',')] : []),
         task.prompt,
       ];
 
@@ -274,6 +296,13 @@ export class CodexAdapter implements ProviderAdapter {
 
         // Also extract artifacts from heuristic patterns in raw output
         this.extractArtifacts(stdout, artifacts);
+
+        // Clean up temp image files
+        if (imagePaths.length > 0) {
+          for (const p of imagePaths) {
+            rm(p, { force: true }).catch(() => {});
+          }
+        }
 
         resolve({
           exitCode: code ?? 1,
