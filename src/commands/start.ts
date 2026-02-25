@@ -4,7 +4,8 @@
 
 import chalk from 'chalk';
 import ora from 'ora';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn, execFileSync, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -29,6 +30,8 @@ interface StartOptions {
   maxSandboxSize?: number;
   verbose?: boolean;
 }
+
+const execFileAsync = promisify(execFile);
 
 // Get package version from package.json
 const __filename = fileURLToPath(import.meta.url);
@@ -100,6 +103,80 @@ function scanSlashCommands(workingDirectory?: string): Array<{ name: string; des
   return commands;
 }
 
+/**
+ * Kill any existing agent-runner processes before starting a new one.
+ * Prevents accumulation of stale instances competing for the same WebSocket connection.
+ */
+async function killExistingProcesses(): Promise<void> {
+  const myPid = process.pid;
+  let pids: string[] = [];
+
+  // Check PID file first
+  const pidFile = join(homedir(), '.astro', 'agent-runner.pid');
+  try {
+    const pidContent = readFileSync(pidFile, 'utf-8').trim();
+    if (/^\d+$/.test(pidContent) && pidContent !== String(myPid)) {
+      pids.push(pidContent);
+    }
+    try { unlinkSync(pidFile); } catch { /* ignore */ }
+  } catch {
+    // No PID file
+  }
+
+  // Also find via pgrep to catch orphaned processes without PID files
+  if (process.platform !== 'win32') {
+    try {
+      const { stdout } = await execFileAsync('pgrep', ['-f', 'astro-agent.*start'], {
+        timeout: 5000,
+      });
+      const found = stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => /^\d+$/.test(line) && line !== String(myPid));
+      for (const pid of found) {
+        if (!pids.includes(pid)) pids.push(pid);
+      }
+    } catch {
+      // No processes found (pgrep exits 1 when no match)
+    }
+  } else {
+    try {
+      const { stdout } = await execFileAsync(
+        'wmic',
+        ['process', 'where', "commandline like '%astro-agent%start%'", 'get', 'processid'],
+        { timeout: 5000 },
+      );
+      const found = stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => /^\d+$/.test(line) && line !== String(myPid));
+      for (const pid of found) {
+        if (!pids.includes(pid)) pids.push(pid);
+      }
+    } catch {
+      // No processes found
+    }
+  }
+
+  if (pids.length > 0) {
+    console.log(chalk.yellow(`Found ${pids.length} existing agent-runner process(es): ${pids.join(', ')}`));
+    console.log(chalk.yellow('Stopping them before relaunch...'));
+
+    for (const pid of pids) {
+      try {
+        process.kill(parseInt(pid, 10), 'SIGTERM');
+        console.log(chalk.dim(`  Stopped PID ${pid}`));
+      } catch {
+        // Already dead or permission denied — ignore
+      }
+    }
+
+    // Wait for processes to exit cleanly
+    await new Promise((r) => setTimeout(r, 1500));
+    console.log();
+  }
+}
+
 export async function startCommand(options: StartOptions = {}): Promise<void> {
   // Auto-run setup if not completed
   if (!config.isSetupComplete()) {
@@ -126,6 +203,9 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
   const relayUrl = options.relay ?? config.getRelayUrl();
   const maxTasks = options.maxTasks ?? 20;
   const logLevel = options.logLevel ?? config.getLogLevel();
+
+  // Kill any existing agent-runner processes to prevent stale instances accumulating
+  await killExistingProcesses();
 
   // Background mode: spawn detached process
   if (!options.foreground) {
