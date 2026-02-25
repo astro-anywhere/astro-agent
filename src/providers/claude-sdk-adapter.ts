@@ -9,8 +9,8 @@
 import { query, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { writeFile, mkdir, rm } from 'node:fs/promises';
 import type { Task, TaskResult, TaskArtifact } from '../types.js';
+import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
@@ -140,6 +140,13 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       };
     } finally {
       signal.removeEventListener('abort', abortHandler);
+
+      // Clean up temp image files (runs even on abort/error)
+      const imageCleanupPaths = (task as Task & { _imageCleanupPaths?: string[] })._imageCleanupPaths;
+      if (imageCleanupPaths?.length) {
+        cleanupImages(imageCleanupPaths).catch(() => {});
+      }
+
       // Preserve session state for post-completion steering (mirrors server-side behavior).
       // The query generator is exhausted, but the sessionId is kept so `injectMessage()`
       // can still succeed on the SDK side and a `resumeTask()` could be implemented later.
@@ -508,31 +515,23 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       effectivePrompt = this.hpcContext.contextString + '\n\n---\n\n' + task.prompt;
     }
 
-    // Write images to temp files so the agent can read them with its Read tool.
-    // The SDK's query() doesn't support inline multimodal content blocks in the
-    // AsyncIterable format (SDKUserMessage requires session_id which isn't available
-    // at prompt construction time). Writing to files is reliable across all providers.
-    const imageCleanupPaths: string[] = [];
+    // Write images to temp files for multimodal analysis.
+    // The image paths are referenced in the prompt so the agent can view them
+    // (Claude Code's Read tool supports images natively as it is multimodal).
+    // Cleanup is handled by the caller (execute()) via try/finally.
     if (task.images && task.images.length > 0) {
       const imageDir = join(task.workingDirectory, '.astro', 'images');
       try {
-        await mkdir(imageDir, { recursive: true });
-        const imagePaths: string[] = [];
-        for (const img of task.images) {
-          const ext = img.mimeType.split('/')[1] || 'png';
-          const filename = img.filename || `image-${img.blobId}.${ext}`;
-          const filepath = join(imageDir, filename);
-          await writeFile(filepath, Buffer.from(img.data, 'base64'));
-          imagePaths.push(filepath);
-          imageCleanupPaths.push(filepath);
+        const imagePaths = await writeImagesToDir(task.images, imageDir);
+        if (imagePaths.length > 0) {
+          const imageList = imagePaths.map((p, i) => `${i + 1}. ${p}`).join('\n');
+          effectivePrompt += `\n\n---\n\n## Attached Images\n\nThe following ${imagePaths.length} image(s) from the task description have been saved to disk. Use the Read tool to view them (it supports images natively):\n${imageList}`;
+          // Store paths on task for cleanup by execute()
+          (task as Task & { _imageCleanupPaths?: string[] })._imageCleanupPaths = imagePaths;
+          console.log(`[claude-sdk] Wrote ${imagePaths.length} image(s) to ${imageDir}`);
         }
-        // Append image references to the prompt
-        const imageList = imagePaths.map((p, i) => `${i + 1}. ${p}`).join('\n');
-        effectivePrompt += `\n\n---\n\n## Attached Images\n\nThe following ${imagePaths.length} image(s) from the task description have been saved for your analysis. Use the Read tool to view them:\n${imageList}`;
-        console.log(`[claude-sdk] Wrote ${imagePaths.length} image(s) to ${imageDir}`);
       } catch (err) {
         console.warn(`[claude-sdk] Failed to write images to disk:`, err);
-        // Non-fatal: continue without images
       }
     }
 
@@ -729,13 +728,6 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           stream.status('failed', progress, errorMessage);
         }
         break;
-      }
-    }
-
-    // Clean up temp image files
-    if (imageCleanupPaths.length > 0) {
-      for (const p of imageCleanupPaths) {
-        rm(p, { force: true }).catch(() => {});
       }
     }
 

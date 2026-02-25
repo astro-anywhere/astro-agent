@@ -6,9 +6,9 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import type { Task, TaskResult, TaskArtifact } from '../types.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
@@ -160,18 +160,11 @@ export class CodexAdapter implements ProviderAdapter {
     const model = task.model || this.configModel;
 
     // Write images to temp files for the --image flag
-    const imagePaths: string[] = [];
+    let imagePaths: string[] = [];
     if (task.images && task.images.length > 0) {
       const imageDir = join(task.workingDirectory || homedir(), '.astro', 'images');
       try {
-        await mkdir(imageDir, { recursive: true });
-        for (const img of task.images) {
-          const ext = img.mimeType.split('/')[1] || 'png';
-          const filename = img.filename || `image-${img.blobId}.${ext}`;
-          const filepath = join(imageDir, filename);
-          await writeFile(filepath, Buffer.from(img.data, 'base64'));
-          imagePaths.push(filepath);
-        }
+        imagePaths = await writeImagesToDir(task.images, imageDir);
         console.log(`[codex] Wrote ${imagePaths.length} image(s) to ${imageDir}`);
       } catch (err) {
         console.warn(`[codex] Failed to write images to disk:`, err);
@@ -191,15 +184,24 @@ export class CodexAdapter implements ProviderAdapter {
       // The task executor provides isolation at a higher level (worktree creation,
       // working directory restriction).
 
+      // Build prompt with image references if images were written to disk.
+      // The --image flag may not be available in all Codex CLI versions,
+      // so we also reference files in the prompt text as a fallback.
+      let effectivePrompt = task.prompt;
+      if (imagePaths.length > 0) {
+        const imageList = imagePaths.map((p, i) => `${i + 1}. ${p}`).join('\n');
+        effectivePrompt += `\n\n---\n\n## Attached Images\n\nThe following ${imagePaths.length} image(s) from the task description have been saved to disk for your analysis:\n${imageList}`;
+      }
+
       const args = [
         'exec',
         '-s', 'danger-full-access',       // Full filesystem + network access
         ...(model ? ['-m', model] : []),   // Explicit model selection
         ...(!isGitRepo ? ['--skip-git-repo-check'] : []),
         '--json',                         // JSONL output for structured parsing
-        // Attach images via --image flag (comma-separated paths)
+        // Pass images via --image flag if available (Codex CLI feature)
         ...(imagePaths.length > 0 ? ['--image', imagePaths.join(',')] : []),
-        task.prompt,
+        effectivePrompt,
       ];
 
       const env = {
@@ -283,6 +285,9 @@ export class CodexAdapter implements ProviderAdapter {
 
       proc.on('error', (error) => {
         signal.removeEventListener('abort', abortHandler);
+        if (imagePaths.length > 0) {
+          cleanupImages(imagePaths).catch(() => {});
+        }
         reject(error);
       });
 
@@ -299,9 +304,7 @@ export class CodexAdapter implements ProviderAdapter {
 
         // Clean up temp image files
         if (imagePaths.length > 0) {
-          for (const p of imagePaths) {
-            rm(p, { force: true }).catch(() => {});
-          }
+          cleanupImages(imagePaths).catch(() => {});
         }
 
         resolve({
