@@ -74,6 +74,22 @@ export interface GpuInfo {
 }
 
 // ============================================================================
+// Image / Multimodal Types
+// ============================================================================
+
+/** Base64-encoded image for multimodal dispatch */
+export interface ImageAttachment {
+  /** Blob ID from the blobs table */
+  blobId: string;
+  /** MIME type (image/png, image/jpeg, etc.) */
+  mimeType: string;
+  /** Base64-encoded image data */
+  data: string;
+  /** Optional filename */
+  filename?: string;
+}
+
+// ============================================================================
 // Task Types
 // ============================================================================
 
@@ -147,6 +163,9 @@ export interface Task {
 
   /** Human-readable task description — used for PR body instead of raw prompt */
   description?: string;
+
+  /** Images embedded in task content, sent as base64 for multimodal prompts */
+  images?: ImageAttachment[];
 }
 
 export interface TaskResult {
@@ -202,6 +221,7 @@ export type WSMessageType =
   | 'task_safety_response'
   | 'resource_update'
   | 'file_list_response'
+  | 'directory_list_response'
   | 'slash_commands_response'
   | 'repo_detect_response'
   | 'branch_list_response'
@@ -216,6 +236,7 @@ export type WSMessageType =
   | 'task_safety_decision'
   | 'config_update'
   | 'file_list_request'
+  | 'directory_list_request'
   | 'repo_setup_request'
   | 'repo_setup_response'
   | 'slash_commands_request'
@@ -479,6 +500,30 @@ export interface FileListResponseMessage extends WSMessage {
   payload: {
     correlationId: string;
     files: string[];
+  };
+}
+
+export interface DirectoryListRequestMessage extends WSMessage {
+  type: 'directory_list_request';
+  payload: {
+    path: string;
+    correlationId: string;
+  };
+}
+
+export interface DirectoryListResponseMessage extends WSMessage {
+  type: 'directory_list_response';
+  payload: {
+    correlationId: string;
+    path: string;
+    entries: Array<{
+      name: string;
+      path: string;
+      isDirectory: boolean;
+      isSymlink?: boolean;
+    }>;
+    error?: string;
+    homeDirectory?: string;
   };
 }
 

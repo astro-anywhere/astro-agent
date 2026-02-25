@@ -270,9 +270,8 @@ function ensureAgentDir(workingDir: string, source: ProjectSource, deliveryMode:
     }, null, 2) + '\n', 'utf-8');
   }
 
-  // Add agent dir entries to .gitignore
-  addToGitignore(workingDir, `${agentDirName}/worktrees/`);
-  addToGitignore(workingDir, `${agentDirName}/cache/`);
+  // Add entire agent dir to .gitignore (worktrees, cache, images, config all live here)
+  addToGitignore(workingDir, `${agentDirName}/`);
 
   return agentDirName;
 }

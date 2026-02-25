@@ -336,8 +336,7 @@ async function readBranchPrefix(gitRoot: string, agentDirName: string): Promise<
  * Creates `{agentDirName}/worktrees/` inside the git root so worktrees live
  * alongside the project (easy access to untracked data files, no bloat in ~/.astro/).
  *
- * Automatically adds `{agentDirName}/worktrees/` and `{agentDirName}/cache/`
- * to the repo's `.gitignore` if missing.
+ * Automatically adds `{agentDirName}/` to the repo's `.gitignore` if missing.
  *
  * Falls back to `~/.astro/worktrees/{repoName}/` if the git root is read-only.
  */
@@ -345,8 +344,7 @@ async function resolveWorktreeRoot(gitRoot: string, agentDirName: string): Promi
   const worktreesDir = join(gitRoot, agentDirName, 'worktrees');
   try {
     await mkdir(worktreesDir, { recursive: true });
-    await ensureGitignoreEntry(gitRoot, `${agentDirName}/worktrees/`);
-    await ensureGitignoreEntry(gitRoot, `${agentDirName}/cache/`);
+    await ensureGitignoreEntry(gitRoot, `${agentDirName}/`);
     return worktreesDir;
   } catch {
     // Git root is read-only — fall back to home dir

@@ -16,6 +16,7 @@ import { pushAndCreatePR } from './git-pr.js';
 import {
   checkWorkdirSafety,
   isGitAvailable,
+  isGitRepo,
   createSandbox,
   WorkdirSafetyTier,
   type SafetyCheckResult,
@@ -795,6 +796,14 @@ export class TaskExecutor {
         console.error(`[executor] Task ${task.id}: copy worktree failed: ${errorMsg}, using raw workdir`);
         return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
       }
+    }
+
+    // Non-git directory: fall back to direct execution (no worktree possible).
+    // The safety check (checkWorkdirSafety) already handles blocking parallel
+    // execution in non-git dirs, so single-task direct execution is safe here.
+    if (this.gitAvailable && !(await isGitRepo(task.workingDirectory))) {
+      console.warn(`[executor] Task ${task.id}: not a git repo (${task.workingDirectory}), falling back to direct execution`);
+      return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
     }
 
     // Git worktree path — worktree creation must succeed or fail the task.

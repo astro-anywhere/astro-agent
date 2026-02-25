@@ -10,6 +10,7 @@ import { query, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Task, TaskResult, TaskArtifact } from '../types.js';
+import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
@@ -139,6 +140,13 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       };
     } finally {
       signal.removeEventListener('abort', abortHandler);
+
+      // Clean up temp image files (runs even on abort/error)
+      const imageCleanupPaths = (task as Task & { _imageCleanupPaths?: string[] })._imageCleanupPaths;
+      if (imageCleanupPaths?.length) {
+        cleanupImages(imageCleanupPaths).catch(() => {});
+      }
+
       // Preserve session state for post-completion steering (mirrors server-side behavior).
       // The query generator is exhausted, but the sessionId is kept so `injectMessage()`
       // can still succeed on the SDK side and a `resumeTask()` could be implemented later.
@@ -505,6 +513,26 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     let effectivePrompt = task.prompt;
     if (this.hpcContext?.available) {
       effectivePrompt = this.hpcContext.contextString + '\n\n---\n\n' + task.prompt;
+    }
+
+    // Write images to temp files for multimodal analysis.
+    // The image paths are referenced in the prompt so the agent can view them
+    // (Claude Code's Read tool supports images natively as it is multimodal).
+    // Cleanup is handled by the caller (execute()) via try/finally.
+    if (task.images && task.images.length > 0) {
+      const imageDir = join(task.workingDirectory, '.astro', 'images');
+      try {
+        const imagePaths = await writeImagesToDir(task.images, imageDir);
+        if (imagePaths.length > 0) {
+          const imageList = imagePaths.map((p, i) => `${i + 1}. ${p}`).join('\n');
+          effectivePrompt += `\n\n---\n\n## Attached Images\n\nThe following ${imagePaths.length} image(s) from the task description have been saved to disk. Use the Read tool to view them (it supports images natively):\n${imageList}`;
+          // Store paths on task for cleanup by execute()
+          (task as Task & { _imageCleanupPaths?: string[] })._imageCleanupPaths = imagePaths;
+          console.log(`[claude-sdk] Wrote ${imagePaths.length} image(s) to ${imageDir}`);
+        }
+      } catch (err) {
+        console.warn(`[claude-sdk] Failed to write images to disk:`, err);
+      }
     }
 
     // Add structured output format if requested (e.g., plan generation)
