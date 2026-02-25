@@ -21,9 +21,6 @@ import {
   stopCommand,
   mcpCommand,
   logsCommand,
-  planListCommand,
-  planShowCommand,
-  planGraphCommand,
 } from './commands/index.js';
 
 const program = new Command();
@@ -506,61 +503,6 @@ program
       });
     } catch (error) {
       console.error('MCP server error:', error instanceof Error ? error.message : String(error));
-      process.exit(1);
-    }
-  });
-
-// Plan commands
-const plan = program
-  .command('plan')
-  .description('Manage plan nodes and view dependency graphs');
-
-plan
-  .command('list')
-  .description('List all plan nodes for a project')
-  .requiredOption('--project-id <id>', 'Project ID')
-  .option('--json', 'Output as JSON')
-  .action(async (options) => {
-    try {
-      await planListCommand({
-        projectId: options.projectId,
-        json: options.json,
-      });
-    } catch (error) {
-      console.error('Plan list failed:', error instanceof Error ? error.message : String(error));
-      process.exit(1);
-    }
-  });
-
-plan
-  .command('show <nodeId>')
-  .description('Show details for a specific plan node')
-  .option('--json', 'Output as JSON')
-  .action(async (nodeId, options) => {
-    try {
-      await planShowCommand({
-        nodeId,
-        json: options.json,
-      });
-    } catch (error) {
-      console.error('Plan show failed:', error instanceof Error ? error.message : String(error));
-      process.exit(1);
-    }
-  });
-
-plan
-  .command('graph')
-  .description('Show ASCII dependency graph for a project')
-  .requiredOption('--project-id <id>', 'Project ID')
-  .option('--json', 'Output as nested JSON with children arrays')
-  .action(async (options) => {
-    try {
-      await planGraphCommand({
-        projectId: options.projectId,
-        json: options.json,
-      });
-    } catch (error) {
-      console.error('Plan graph failed:', error instanceof Error ? error.message : String(error));
       process.exit(1);
     }
   });

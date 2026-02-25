@@ -6,7 +6,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 import { spawn, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, readdirSync, existsSync, writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -405,6 +405,51 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       } catch (error) {
         log('warn', `Failed to list files in ${path}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
         wsClient.sendFileListResponse(correlationId, []);
+      }
+    },
+    onDirectoryList: (path: string, correlationId: string) => {
+      log('debug', `Directory list request for path: ${path || '~'}`, logLevel);
+      try {
+        const resolvedPath = path === '~' || !path ? homedir() : path;
+        const homeDir = homedir();
+
+        if (!existsSync(resolvedPath)) {
+          wsClient.sendDirectoryListResponse(correlationId, resolvedPath, [], 'Directory does not exist', homeDir);
+          return;
+        }
+
+        const stat = statSync(resolvedPath);
+        if (!stat.isDirectory()) {
+          wsClient.sendDirectoryListResponse(correlationId, resolvedPath, [], 'Not a directory', homeDir);
+          return;
+        }
+
+        const dirents = readdirSync(resolvedPath, { withFileTypes: true });
+        const entries = dirents
+          .filter(d => !d.name.startsWith('.'))
+          .map(d => {
+            const fullPath = join(resolvedPath, d.name);
+            let isDirectory = d.isDirectory();
+            let isSymlink = d.isSymbolicLink();
+            // Resolve symlinks to check if they point to directories
+            if (isSymlink) {
+              try {
+                const realStat = statSync(fullPath);
+                isDirectory = realStat.isDirectory();
+              } catch {
+                // Broken symlink
+              }
+            }
+            return { name: d.name, path: fullPath, isDirectory, isSymlink };
+          })
+          .filter(e => e.isDirectory)
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        wsClient.sendDirectoryListResponse(correlationId, resolvedPath, entries, undefined, homeDir);
+        log('debug', `Sent ${entries.length} directories for path: ${resolvedPath}`, logLevel);
+      } catch (error) {
+        log('warn', `Failed to list directories in ${path}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendDirectoryListResponse(correlationId, path || '~', [], `Failed: ${error instanceof Error ? error.message : String(error)}`, homedir());
       }
     },
     onSlashCommands: (correlationId: string, workingDirectory?: string) => {
