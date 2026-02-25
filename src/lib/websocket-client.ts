@@ -31,6 +31,8 @@ import type {
   ErrorMessage,
   FileListRequestMessage,
   FileListResponseMessage,
+  DirectoryListRequestMessage,
+  DirectoryListResponseMessage,
   RepoSetupRequestMessage,
   RepoSetupResponseMessage,
   SlashCommandsRequestMessage,
@@ -75,6 +77,7 @@ export interface WebSocketClientOptions {
   onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean) => void;
   onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
   onFileList?: (path: string, correlationId: string) => void;
+  onDirectoryList?: (path: string, correlationId: string) => void;
   onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
   onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
   onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
@@ -94,6 +97,7 @@ type IncomingMessage =
   | TaskSafetyDecisionMessage
   | ConfigUpdateMessage
   | FileListRequestMessage
+  | DirectoryListRequestMessage
   | RepoSetupRequestMessage
   | SlashCommandsRequestMessage
   | RepoDetectRequestMessage
@@ -125,6 +129,7 @@ export class WebSocketClient {
   private onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean) => void;
   private onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
   private onFileList?: (path: string, correlationId: string) => void;
+  private onDirectoryList?: (path: string, correlationId: string) => void;
   private onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
   private onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
   private onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
@@ -145,6 +150,7 @@ export class WebSocketClient {
     this.onTaskSteer = options.onTaskSteer;
     this.onTaskSafetyDecision = options.onTaskSafetyDecision;
     this.onFileList = options.onFileList;
+    this.onDirectoryList = options.onDirectoryList;
     this.onRepoSetup = options.onRepoSetup;
     this.onSlashCommands = options.onSlashCommands;
     this.onRepoDetect = options.onRepoDetect;
@@ -632,6 +638,20 @@ export class WebSocketClient {
         return;
       }
 
+      // Handle directory_list.request (dot notation from relay)
+      if (raw.type === 'directory_list.request') {
+        const dirListMsg: DirectoryListRequestMessage = {
+          type: 'directory_list_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: {
+            path: raw.path as string ?? (raw.payload as { path?: string })?.path ?? '~',
+            correlationId: raw.correlationId as string ?? (raw.payload as { correlationId?: string })?.correlationId ?? '',
+          },
+        };
+        this.handleDirectoryListRequest(dirListMsg);
+        return;
+      }
+
       // Handle slash_commands.request (dot notation from relay)
       if (raw.type === 'slash_commands.request') {
         const slashMsg: SlashCommandsRequestMessage = {
@@ -725,6 +745,9 @@ export class WebSocketClient {
         break;
       case 'file_list_request':
         this.handleFileListRequest(message as FileListRequestMessage);
+        break;
+      case 'directory_list_request':
+        this.handleDirectoryListRequest(message as DirectoryListRequestMessage);
         break;
       case 'repo_setup_request':
         this.handleRepoSetupRequest(message as RepoSetupRequestMessage);
@@ -829,6 +852,29 @@ export class WebSocketClient {
       type: 'file_list_response',
       timestamp: new Date().toISOString(),
       payload: { correlationId, files },
+    };
+    this.send(msg);
+  }
+
+  private handleDirectoryListRequest(message: DirectoryListRequestMessage): void {
+    const { path, correlationId } = message.payload;
+    this.onDirectoryList?.(path, correlationId);
+  }
+
+  /**
+   * Send directory list response
+   */
+  sendDirectoryListResponse(
+    correlationId: string,
+    path: string,
+    entries: DirectoryListResponseMessage['payload']['entries'],
+    error?: string,
+    homeDirectory?: string,
+  ): void {
+    const msg: DirectoryListResponseMessage = {
+      type: 'directory_list_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, path, entries, error, homeDirectory },
     };
     this.send(msg);
   }
