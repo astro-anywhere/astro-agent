@@ -262,6 +262,42 @@ export class OpenCodeAdapter implements ProviderAdapter {
    * - tool_result    → tool results
    * - result         → final metrics (cost, tokens, turns)
    */
+  /** Extract tool_result content blocks from an event and emit toolResult calls. */
+  handleToolResultBlocks(
+    event: Record<string, unknown>,
+    stream: TaskOutputStream,
+  ): void {
+    const content = Array.isArray(event.content) ? event.content as Array<{
+      type: string;
+      tool_use_id?: string;
+      content?: string;
+      is_error?: boolean;
+    }> : undefined;
+
+    const message = event.message as {
+      content?: Array<{
+        type: string;
+        tool_use_id?: string;
+        content?: string;
+        is_error?: boolean;
+      }>;
+    } | undefined;
+
+    const blocks = content || message?.content;
+    if (blocks) {
+      for (const block of blocks) {
+        if (block.type === 'tool_result') {
+          const toolName = (block.tool_use_id && this.toolIdToName.get(block.tool_use_id)) ?? 'unknown';
+          stream.toolResult(
+            toolName,
+            block.content || '',
+            !block.is_error,
+          );
+        }
+      }
+    }
+  }
+
   handleStreamLine(
     line: string,
     stream: TaskOutputStream,
@@ -320,7 +356,6 @@ export class OpenCodeAdapter implements ProviderAdapter {
 
         case 'tool_result': {
           // Direct tool_result format: { type: 'tool_result', tool_name, content, is_error }
-          // Check if content is an array (structured) or string (direct)
           if (typeof event.content === 'string' || !event.content) {
             const toolName = event.tool_name as string || 'unknown';
             const resultContent = (event.content as string) || '';
@@ -328,40 +363,13 @@ export class OpenCodeAdapter implements ProviderAdapter {
             stream.toolResult(toolName, resultContent, !isError);
             break;
           }
-          // Fall through to 'user' handling if content is an array
+          // Content is an array — handle via content blocks (same as 'user')
+          this.handleToolResultBlocks(event, stream);
+          break;
         }
-        // falls through
+
         case 'user': {
-          // Tool results via content blocks
-          const content = Array.isArray(event.content) ? event.content as Array<{
-            type: string;
-            tool_use_id?: string;
-            content?: string;
-            is_error?: boolean;
-          }> : undefined;
-
-          const message = event.message as {
-            content?: Array<{
-              type: string;
-              tool_use_id?: string;
-              content?: string;
-              is_error?: boolean;
-            }>;
-          } | undefined;
-
-          const blocks = content || message?.content;
-          if (blocks) {
-            for (const block of blocks) {
-              if (block.type === 'tool_result') {
-                const toolName = (block.tool_use_id && this.toolIdToName.get(block.tool_use_id)) ?? 'unknown';
-                stream.toolResult(
-                  toolName,
-                  block.content || '',
-                  !block.is_error,
-                );
-              }
-            }
-          }
+          this.handleToolResultBlocks(event, stream);
           break;
         }
 
