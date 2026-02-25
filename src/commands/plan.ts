@@ -75,7 +75,7 @@ async function fetchPlanData(projectId: string): Promise<PlanData> {
   const accessToken = config.getAccessToken();
 
   if (!accessToken) {
-    throw new Error('Not authenticated. Run: npx @astroanywhere/agent setup');
+    throw new Error('Not authenticated. Run: npx @astroanywhere/agent@latest launch');
   }
 
   const res = await fetch(`${apiUrl}/api/data/plan/${projectId}`, {
@@ -408,7 +408,7 @@ export async function planShowCommand(options: PlanShowOptions): Promise<void> {
     const accessToken = config.getAccessToken();
 
     if (!accessToken) {
-      throw new Error('Not authenticated. Run: npx @astroanywhere/agent setup');
+      throw new Error('Not authenticated. Run: npx @astroanywhere/agent@latest launch');
     }
 
     // Fetch all plans
