@@ -405,8 +405,6 @@ describe('ExecutionStrategyRegistry', () => {
     expect(ids).toContain('docker');
     expect(ids).toContain('k8s-exec');
     // SSH hosts appear as ssh:<alias>, not a parent 'ssh' entry
-    const sshEntries = ids.filter((id) => id.startsWith('ssh:'));
-    // May be 0 if no ~/.ssh/config, but should not have bare 'ssh'
     expect(ids).not.toContain('ssh');
   }, 15_000);
 
