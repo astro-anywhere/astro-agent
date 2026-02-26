@@ -143,12 +143,17 @@ export class OpenClawAdapter implements ProviderAdapter {
       // --json: JSONL streaming output to stdout
       const model = task.model || this.configModel;
 
+      // Combine systemPrompt with prompt when provided (e.g., interactive plan sessions)
+      const effectivePrompt = task.systemPrompt
+        ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
+        : task.prompt;
+
       const args = [
         'agent',
         '--mode', 'rpc',
         '--json',
         ...(model ? ['--model', model] : []),
-        '--prompt', task.prompt,
+        '--prompt', effectivePrompt,
       ];
 
       const env = {

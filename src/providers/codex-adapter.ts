@@ -184,10 +184,16 @@ export class CodexAdapter implements ProviderAdapter {
       // The task executor provides isolation at a higher level (worktree creation,
       // working directory restriction).
 
-      // Build prompt with image references if images were written to disk.
+      // Build prompt: prepend systemPrompt when provided (e.g., interactive plan sessions).
+      // Codex CLI's `exec` subcommand doesn't have a --system-prompt flag,
+      // so we inline the system prompt into the user prompt.
+      let effectivePrompt = task.systemPrompt
+        ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
+        : task.prompt;
+
+      // Add image references if images were written to disk.
       // The --image flag may not be available in all Codex CLI versions,
       // so we also reference files in the prompt text as a fallback.
-      let effectivePrompt = task.prompt;
       if (imagePaths.length > 0) {
         const imageList = imagePaths.map((p, i) => `${i + 1}. ${p}`).join('\n');
         effectivePrompt += `\n\n---\n\n## Attached Images\n\nThe following ${imagePaths.length} image(s) from the task description have been saved to disk for your analysis:\n${imageList}`;

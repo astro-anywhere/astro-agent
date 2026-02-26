@@ -141,12 +141,17 @@ export class OpenCodeAdapter implements ProviderAdapter {
       // --output-format json: JSONL streaming output
       const model = task.model || this.configModel;
 
+      // Combine systemPrompt with prompt when provided (e.g., interactive plan sessions)
+      const effectivePrompt = task.systemPrompt
+        ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
+        : task.prompt;
+
       const args = [
         'run',
         '--print',
         '--output-format', 'json',
         ...(model ? ['--model', model] : []),
-        task.prompt,
+        effectivePrompt,
       ];
 
       const env = {
