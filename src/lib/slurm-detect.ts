@@ -154,7 +154,7 @@ export async function getPartitionInfo(): Promise<SlurmPartitionDetail[]> {
       const count = parseInt(nodesCount || '0') || 0;
       partition.totalNodes += count;
 
-      if (nodeState === 'idle' || nodeState === 'mixed') {
+      if (nodeState?.startsWith('idle') || nodeState?.startsWith('mixed') || nodeState?.startsWith('alloc')) {
         partition.availableNodes += count;
       }
     });

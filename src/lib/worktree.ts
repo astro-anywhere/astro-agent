@@ -15,6 +15,10 @@ export interface WorktreeOptions {
   rootOverride?: string;
   projectId?: string;
   nodeId?: string;
+  /** Short hex ID from projectId (6 chars) — used for readable branch/worktree names */
+  shortProjectId?: string;
+  /** Short hex ID from nodeId (6 chars) — used for readable branch/worktree names */
+  shortNodeId?: string;
   agentDir?: string;
   stdout?: (data: string) => void;
   stderr?: (data: string) => void;
@@ -35,6 +39,8 @@ export async function createWorktree(
     rootOverride,
     projectId,
     nodeId,
+    shortProjectId,
+    shortNodeId,
     agentDir,
     stdout,
     stderr,
@@ -61,8 +67,14 @@ export async function createWorktree(
   const baseRoot = rootOverride ?? await resolveWorktreeRoot(gitRoot, agentDirName);
 
   const branchPrefix = await readBranchPrefix(gitRoot, agentDirName);
-  const branchName = `${branchPrefix}${sanitize(taskId)}`;
-  const worktreePath = join(baseRoot, sanitize(taskId));
+  // Use short hex IDs for readable branch/worktree names when available,
+  // fall back to full taskId for backward compatibility.
+  // Format: astro/{shortProjectId}-{shortNodeId} (e.g., "astro/550e84-a3f2c1")
+  const branchSuffix = shortProjectId && shortNodeId
+    ? `${sanitize(shortProjectId)}-${sanitize(shortNodeId)}`
+    : sanitize(taskId);
+  const branchName = `${branchPrefix}${branchSuffix}`;
+  const worktreePath = join(baseRoot, branchSuffix);
   await rm(worktreePath, { recursive: true, force: true });
   await pruneWorktrees(gitRoot);
 

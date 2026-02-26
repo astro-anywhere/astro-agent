@@ -691,6 +691,11 @@ export class TaskExecutor {
 
       // Delivery-mode-aware result handling
       const deliveryMode = task.deliveryMode ?? 'pr';
+      // Build PR title with short hex prefix for linking back to Astro app
+      const rawTitle = task.title || task.prompt.slice(0, 100);
+      const prTitle = task.shortProjectId && task.shortNodeId
+        ? `[${task.shortProjectId}/${task.shortNodeId}] ${rawTitle}`
+        : rawTitle;
       if (prepared.branchName && (result.status === 'completed' || !result.error)) {
         try {
           if (deliveryMode === 'direct') {
@@ -709,7 +714,7 @@ export class TaskExecutor {
             console.log(`[executor] Task ${task.id}: push mode, pushing branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
               branchName: prepared.branchName,
-              taskTitle: task.title || task.prompt.slice(0, 100),
+              taskTitle: prTitle,
               taskDescription: task.description || task.prompt.slice(0, 500),
               skipPR: true,
             });
@@ -725,7 +730,7 @@ export class TaskExecutor {
             console.log(`[executor] Task ${task.id}: pr mode, attempting PR creation for branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
               branchName: prepared.branchName,
-              taskTitle: task.title || task.prompt.slice(0, 100),
+              taskTitle: prTitle,
               taskDescription: task.description || task.prompt.slice(0, 500),
             });
             result.branchName = prResult.branchName;
@@ -878,6 +883,8 @@ export class TaskExecutor {
         rootOverride: this.worktreeRoot,
         projectId: task.projectId,
         nodeId: task.planNodeId,
+        shortProjectId: task.shortProjectId,
+        shortNodeId: task.shortNodeId,
         agentDir: task.agentDir,
         stdout: stream.stdout,
         stderr: stream.stderr,
