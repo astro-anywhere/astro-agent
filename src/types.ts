@@ -222,6 +222,7 @@ export type WSMessageType =
   | 'resource_update'
   | 'file_list_response'
   | 'directory_list_response'
+  | 'create_directory_response'
   | 'slash_commands_response'
   | 'repo_detect_response'
   | 'branch_list_response'
@@ -237,6 +238,7 @@ export type WSMessageType =
   | 'config_update'
   | 'file_list_request'
   | 'directory_list_request'
+  | 'create_directory_request'
   | 'repo_setup_request'
   | 'repo_setup_response'
   | 'slash_commands_request'
@@ -524,6 +526,25 @@ export interface DirectoryListResponseMessage extends WSMessage {
     }>;
     error?: string;
     homeDirectory?: string;
+  };
+}
+
+export interface CreateDirectoryRequestMessage extends WSMessage {
+  type: 'create_directory_request';
+  payload: {
+    parentPath: string;
+    name: string;
+    correlationId: string;
+  };
+}
+
+export interface CreateDirectoryResponseMessage extends WSMessage {
+  type: 'create_directory_response';
+  payload: {
+    correlationId: string;
+    success: boolean;
+    path?: string;
+    error?: string;
   };
 }
 

@@ -452,6 +452,37 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         wsClient.sendDirectoryListResponse(correlationId, path || '~', [], `Failed: ${error instanceof Error ? error.message : String(error)}`, homedir());
       }
     },
+    onCreateDirectory: (parentPath: string, name: string, correlationId: string) => {
+      log('debug', `Create directory request: ${name} in ${parentPath}`, logLevel);
+      try {
+        const resolvedParent = parentPath === '~' || !parentPath ? homedir() : parentPath;
+
+        if (!existsSync(resolvedParent)) {
+          wsClient.sendCreateDirectoryResponse(correlationId, false, undefined, 'Parent directory does not exist');
+          return;
+        }
+
+        const parentStat = statSync(resolvedParent);
+        if (!parentStat.isDirectory()) {
+          wsClient.sendCreateDirectoryResponse(correlationId, false, undefined, 'Parent path is not a directory');
+          return;
+        }
+
+        const fullPath = join(resolvedParent, name);
+
+        if (existsSync(fullPath)) {
+          wsClient.sendCreateDirectoryResponse(correlationId, false, undefined, 'A file or directory with that name already exists');
+          return;
+        }
+
+        mkdirSync(fullPath);
+        wsClient.sendCreateDirectoryResponse(correlationId, true, fullPath);
+        log('debug', `Created directory: ${fullPath}`, logLevel);
+      } catch (error) {
+        log('warn', `Failed to create directory ${name} in ${parentPath}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendCreateDirectoryResponse(correlationId, false, undefined, `Failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
     onSlashCommands: (correlationId: string, workingDirectory?: string) => {
       log('debug', `Slash commands request for dir: ${workingDirectory || '(global)'}`, logLevel);
       try {

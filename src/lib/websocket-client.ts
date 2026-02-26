@@ -33,6 +33,8 @@ import type {
   FileListResponseMessage,
   DirectoryListRequestMessage,
   DirectoryListResponseMessage,
+  CreateDirectoryRequestMessage,
+  CreateDirectoryResponseMessage,
   RepoSetupRequestMessage,
   RepoSetupResponseMessage,
   SlashCommandsRequestMessage,
@@ -78,6 +80,7 @@ export interface WebSocketClientOptions {
   onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
   onFileList?: (path: string, correlationId: string) => void;
   onDirectoryList?: (path: string, correlationId: string) => void;
+  onCreateDirectory?: (parentPath: string, name: string, correlationId: string) => void;
   onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
   onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
   onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
@@ -98,6 +101,7 @@ type IncomingMessage =
   | ConfigUpdateMessage
   | FileListRequestMessage
   | DirectoryListRequestMessage
+  | CreateDirectoryRequestMessage
   | RepoSetupRequestMessage
   | SlashCommandsRequestMessage
   | RepoDetectRequestMessage
@@ -130,6 +134,7 @@ export class WebSocketClient {
   private onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
   private onFileList?: (path: string, correlationId: string) => void;
   private onDirectoryList?: (path: string, correlationId: string) => void;
+  private onCreateDirectory?: (parentPath: string, name: string, correlationId: string) => void;
   private onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
   private onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
   private onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
@@ -151,6 +156,7 @@ export class WebSocketClient {
     this.onTaskSafetyDecision = options.onTaskSafetyDecision;
     this.onFileList = options.onFileList;
     this.onDirectoryList = options.onDirectoryList;
+    this.onCreateDirectory = options.onCreateDirectory;
     this.onRepoSetup = options.onRepoSetup;
     this.onSlashCommands = options.onSlashCommands;
     this.onRepoDetect = options.onRepoDetect;
@@ -652,6 +658,21 @@ export class WebSocketClient {
         return;
       }
 
+      // Handle create_directory.request (dot notation from relay)
+      if (raw.type === 'create_directory.request') {
+        const createDirMsg: CreateDirectoryRequestMessage = {
+          type: 'create_directory_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: {
+            parentPath: raw.parentPath as string ?? (raw.payload as { parentPath?: string })?.parentPath ?? '',
+            name: raw.name as string ?? (raw.payload as { name?: string })?.name ?? '',
+            correlationId: raw.correlationId as string ?? (raw.payload as { correlationId?: string })?.correlationId ?? '',
+          },
+        };
+        this.handleCreateDirectoryRequest(createDirMsg);
+        return;
+      }
+
       // Handle slash_commands.request (dot notation from relay)
       if (raw.type === 'slash_commands.request') {
         const slashMsg: SlashCommandsRequestMessage = {
@@ -748,6 +769,9 @@ export class WebSocketClient {
         break;
       case 'directory_list_request':
         this.handleDirectoryListRequest(message as DirectoryListRequestMessage);
+        break;
+      case 'create_directory_request':
+        this.handleCreateDirectoryRequest(message as CreateDirectoryRequestMessage);
         break;
       case 'repo_setup_request':
         this.handleRepoSetupRequest(message as RepoSetupRequestMessage);
@@ -875,6 +899,28 @@ export class WebSocketClient {
       type: 'directory_list_response',
       timestamp: new Date().toISOString(),
       payload: { correlationId, path, entries, error, homeDirectory },
+    };
+    this.send(msg);
+  }
+
+  private handleCreateDirectoryRequest(message: CreateDirectoryRequestMessage): void {
+    const { parentPath, name, correlationId } = message.payload;
+    this.onCreateDirectory?.(parentPath, name, correlationId);
+  }
+
+  /**
+   * Send create directory response
+   */
+  sendCreateDirectoryResponse(
+    correlationId: string,
+    success: boolean,
+    path?: string,
+    error?: string,
+  ): void {
+    const msg: CreateDirectoryResponseMessage = {
+      type: 'create_directory_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, success, path, error },
     };
     this.send(msg);
   }
