@@ -696,7 +696,23 @@ export class TaskExecutor {
       const prTitle = task.shortProjectId && task.shortNodeId
         ? `[${task.shortProjectId}/${task.shortNodeId}] ${rawTitle}`
         : rawTitle;
-      if (prepared.branchName && (result.status === 'completed' || !result.error)) {
+      if (prepared.branchName && result.status === 'completed') {
+        // Build PR body with Astro link and issue reference
+        const prBodyParts: string[] = [];
+        if (task.description || task.prompt) {
+          prBodyParts.push(`## Task\n\n${task.description || task.prompt.slice(0, 500)}`);
+        }
+        if (task.astroBaseUrl && task.projectId && task.planNodeId) {
+          prBodyParts.push(`## Astro\n\n[View task in Astro](${task.astroBaseUrl}/project/${task.projectId}/task/${task.planNodeId})`);
+        }
+        if (task.githubIssueUrl) {
+          prBodyParts.push(`## Related Issue\n\nCloses ${task.githubIssueUrl}`);
+        } else if (task.githubIssueNumber) {
+          prBodyParts.push(`## Related Issue\n\nCloses #${task.githubIssueNumber}`);
+        }
+        prBodyParts.push('---\n*Created by Astro task automation*');
+        const prBody = prBodyParts.join('\n\n');
+
         try {
           if (deliveryMode === 'direct') {
             // No git delivery — files modified in-place
@@ -719,7 +735,12 @@ export class TaskExecutor {
               skipPR: true,
             });
             result.branchName = prResult.branchName;
-            if (prResult.pushed) {
+            if (prResult.error) {
+              // Push failure is a task failure for 'push' mode
+              result.status = 'failed';
+              result.error = `Push delivery failed: ${prResult.error}`;
+              console.error(`[executor] Task ${task.id}: push delivery failed: ${prResult.error}`);
+            } else if (prResult.pushed) {
               keepBranch = true;
               console.log(`[executor] Task ${task.id}: branch pushed (${prepared.branchName})`);
             } else {
@@ -732,6 +753,7 @@ export class TaskExecutor {
               branchName: prepared.branchName,
               taskTitle: prTitle,
               taskDescription: task.description || task.prompt.slice(0, 500),
+              body: prBody,
             });
             result.branchName = prResult.branchName;
             if (prResult.prUrl) {
@@ -739,17 +761,24 @@ export class TaskExecutor {
               result.prNumber = prResult.prNumber;
               keepBranch = true;
               console.log(`[executor] Task ${task.id}: PR created at ${prResult.prUrl}`);
-            } else if (prResult.pushed) {
-              keepBranch = true;
-              console.log(`[executor] Task ${task.id}: branch pushed, no PR created (gh not available?)`);
+            } else if (prResult.error) {
+              // PR delivery failure is a task failure for 'pr' mode
+              result.status = 'failed';
+              result.error = `PR delivery failed: ${prResult.error}`;
+              keepBranch = prResult.pushed ?? false; // Keep branch if it was pushed
+              console.error(`[executor] Task ${task.id}: PR delivery failed: ${prResult.error}`);
             } else {
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           }
         } catch (prError) {
           const prMsg = prError instanceof Error ? prError.message : String(prError);
-          console.warn(`[executor] Task ${task.id}: delivery (${deliveryMode}) failed: ${prMsg}`);
-          // Non-fatal: still report the task result without PR info
+          console.error(`[executor] Task ${task.id}: delivery (${deliveryMode}) failed: ${prMsg}`);
+          // For pr/push modes, delivery failures are task failures
+          if (deliveryMode === 'pr' || deliveryMode === 'push') {
+            result.status = 'failed';
+            result.error = `Delivery failed: ${prMsg}`;
+          }
         }
       }
 

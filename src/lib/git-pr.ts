@@ -21,6 +21,8 @@ export interface PRResult {
   pushed?: boolean;
   prUrl?: string;
   prNumber?: number;
+  /** Error message if any step of the delivery pipeline failed */
+  error?: string;
 }
 
 /**
@@ -83,7 +85,7 @@ export async function hasBranchCommits(
 export async function pushBranch(
   worktreePath: string,
   branchName: string,
-): Promise<boolean> {
+): Promise<{ ok: boolean; error?: string }> {
   // Log remote URL for debugging push target
   try {
     const { stdout: remoteUrl } = await execFileAsync(
@@ -104,12 +106,12 @@ export async function pushBranch(
     );
     if (stderr) console.log(`[git-pr] Push stderr: ${stderr.trim()}`);
     if (stdout) console.log(`[git-pr] Push stdout: ${stdout.trim()}`);
-    return true;
+    return { ok: true };
   } catch (err) {
     const execErr = err as { stderr?: string; stdout?: string; message?: string };
-    console.error(`[git-pr] Failed to push branch ${branchName}: ${execErr.message ?? err}`);
-    if (execErr.stderr) console.error(`[git-pr] Push stderr: ${execErr.stderr}`);
-    return false;
+    const errorDetail = execErr.stderr?.trim() || execErr.message || String(err);
+    console.error(`[git-pr] Failed to push branch ${branchName}: ${errorDetail}`);
+    return { ok: false, error: `Failed to push branch: ${errorDetail}` };
   }
 }
 
@@ -269,6 +271,8 @@ export async function pushAndCreatePR(
     skipPR?: boolean;
     /** If true, auto-commit uncommitted changes before pushing (default: true) */
     autoCommit?: boolean;
+    /** Override the default PR body */
+    body?: string;
   },
 ): Promise<PRResult> {
   const result: PRResult = { branchName: options.branchName };
@@ -277,12 +281,14 @@ export async function pushAndCreatePR(
   const gitRoot = await getGitRoot(worktreePath);
   if (!gitRoot) {
     console.warn(`[git-pr] No git root found for ${worktreePath}, skipping PR`);
+    result.error = 'Not a git repository';
     return result;
   }
 
   // Check if repo has a remote
   if (!(await hasRemoteOrigin(gitRoot))) {
     console.warn(`[git-pr] No remote origin for ${gitRoot}, skipping PR`);
+    result.error = 'No remote origin configured — cannot push';
     return result;
   }
 
@@ -298,13 +304,17 @@ export async function pushAndCreatePR(
   const hasCommits = await hasBranchCommits(worktreePath, baseBranch);
   if (!hasCommits) {
     console.log(`[git-pr] No commits ahead of ${baseBranch} in ${worktreePath}, skipping PR`);
+    // Not an error — agent made no changes
     return result;
   }
   console.log(`[git-pr] Branch ${options.branchName} has commits ahead of ${baseBranch}`);
 
   // Push the branch
-  const pushed = await pushBranch(worktreePath, options.branchName);
-  if (!pushed) return result;
+  const pushResult = await pushBranch(worktreePath, options.branchName);
+  if (!pushResult.ok) {
+    result.error = pushResult.error || 'Failed to push branch';
+    return result;
+  }
   result.pushed = true;
 
   // Skip PR creation if requested (push-only mode)
@@ -316,12 +326,14 @@ export async function pushAndCreatePR(
   // Create PR if gh is available
   if (!(await isGhAvailable())) {
     console.log('[git-pr] gh CLI not available, skipping PR creation (branch pushed)');
+    result.error = 'GitHub CLI (gh) not installed or not authenticated';
     return result;
   }
 
-  const body = options.taskDescription
-    ? `## Task\n\n${options.taskDescription}\n\n---\n*Created by Astro task automation*`
-    : '*Created by Astro task automation*';
+  const body = options.body
+    ?? (options.taskDescription
+      ? `## Task\n\n${options.taskDescription}\n\n---\n*Created by Astro task automation*`
+      : '*Created by Astro task automation*');
 
   const pr = await createPullRequest(worktreePath, {
     branchName: options.branchName,
@@ -333,6 +345,8 @@ export async function pushAndCreatePR(
   if (pr) {
     result.prUrl = pr.prUrl;
     result.prNumber = pr.prNumber;
+  } else {
+    result.error = 'PR creation failed (gh pr create returned an error)';
   }
 
   return result;
