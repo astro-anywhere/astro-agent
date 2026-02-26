@@ -395,16 +395,19 @@ describe('ExecutionStrategyRegistry', () => {
     expect(direct!.available).toBe(true);
   }, 15_000);
 
-  it('detectAll() includes all 5 base strategies', async () => {
+  it('detectAll() includes base strategies plus SSH host entries', async () => {
     const results = await registry.detectAll();
-    // 5 base strategies + any additional SSH host entries
-    expect(results.length).toBeGreaterThanOrEqual(5);
+    // 4 base strategies (direct, slurm, docker, k8s-exec) + SSH host entries (no parent 'ssh')
+    expect(results.length).toBeGreaterThanOrEqual(4);
     const ids = results.map((s) => s.id);
     expect(ids).toContain('direct');
     expect(ids).toContain('slurm');
     expect(ids).toContain('docker');
     expect(ids).toContain('k8s-exec');
-    expect(ids).toContain('ssh');
+    // SSH hosts appear as ssh:<alias>, not a parent 'ssh' entry
+    const sshEntries = ids.filter((id) => id.startsWith('ssh:'));
+    // May be 0 if no ~/.ssh/config, but should not have bare 'ssh'
+    expect(ids).not.toContain('ssh');
   }, 15_000);
 
   it('listAvailable() has at least 1 entry (direct)', async () => {
@@ -440,7 +443,7 @@ describe('ExecutionStrategyRegistry', () => {
   it('listAll() returns all strategies after detection', async () => {
     await registry.detectAll();
     const all = registry.listAll();
-    // 5 base strategies + any additional SSH host entries
-    expect(all.length).toBeGreaterThanOrEqual(5);
+    // 4 base strategies + SSH host entries (no parent 'ssh')
+    expect(all.length).toBeGreaterThanOrEqual(4);
   }, 15_000);
 });

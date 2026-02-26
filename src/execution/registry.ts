@@ -45,18 +45,17 @@ export class ExecutionStrategyRegistry {
           metadata: detection.metadata,
         };
 
-        this.detectionResults.set(strategy.id, info);
-
-        // Some strategies (like SSH) return multiple entries — one per host
-        const entries: ExecutionStrategyInfo[] = [info];
-        if (detection.additionalEntries) {
+        // Some strategies (like SSH) return multiple entries — one per host.
+        // When additionalEntries exist, only expose those (not the parent summary).
+        if (detection.additionalEntries && detection.additionalEntries.length > 0) {
           for (const entry of detection.additionalEntries) {
             this.detectionResults.set(entry.id, entry);
-            entries.push(entry);
           }
+          return detection.additionalEntries;
         }
 
-        return entries;
+        this.detectionResults.set(strategy.id, info);
+        return [info];
       }),
     );
 
