@@ -115,6 +115,33 @@ export async function detectSlurm(): Promise<SlurmInfo> {
     // QOS detection failed
   }
 
+  // Enriched partition details (nodes, features, availability)
+  try {
+    info.partitionDetails = await getPartitionInfo();
+  } catch {
+    // Partition detail detection failed
+  }
+
+  // GPU summary from GRES
+  try {
+    const { stdout } = await execFileAsync('sinfo', ['-h', '-N', '-o', '%N|%G'], { timeout: 10000 });
+    let gpuNodeCount = 0;
+    let totalGpus = 0;
+    for (const line of stdout.trim().split('\n')) {
+      if (!line.trim()) continue;
+      const [, gres] = line.split('|');
+      if (!gres || gres === '(null)' || !gres.includes('gpu')) continue;
+      gpuNodeCount++;
+      // Parse "gpu:a100:4(S:0-1)" or "gpu:4" → extract count
+      const countMatch = gres.match(/gpu(?::[^:]+)?:(\d+)/);
+      if (countMatch) totalGpus += parseInt(countMatch[1]!, 10);
+    }
+    if (totalGpus > 0) info.totalGpus = totalGpus;
+    if (gpuNodeCount > 0) info.gpuNodeCount = gpuNodeCount;
+  } catch {
+    // GPU detection failed
+  }
+
   return info;
 }
 
@@ -131,7 +158,7 @@ export async function getPartitionInfo(): Promise<SlurmPartitionDetail[]> {
       const parts = line.split('|');
       if (parts.length < 6) return;
 
-      const [partitionRaw, , maxTime, nodesCount, nodeState, features] = parts;
+      const [partitionRaw, avail, maxTime, nodesCount, nodeState, features] = parts;
 
       const isDefault = partitionRaw?.endsWith('*') || false;
       const name = partitionRaw?.replace('*', '') || '';
@@ -143,6 +170,7 @@ export async function getPartitionInfo(): Promise<SlurmPartitionDetail[]> {
         partition = {
           name,
           isDefault,
+          available: avail === 'up',
           totalNodes: 0,
           availableNodes: 0,
           maxTime: maxTime !== '(null)' ? maxTime : undefined,
@@ -150,6 +178,9 @@ export async function getPartitionInfo(): Promise<SlurmPartitionDetail[]> {
         };
         partitionMap.set(name, partition);
       }
+
+      // Mark as available if any sinfo line shows 'up'
+      if (avail === 'up') partition.available = true;
 
       const count = parseInt(nodesCount || '0') || 0;
       partition.totalNodes += count;

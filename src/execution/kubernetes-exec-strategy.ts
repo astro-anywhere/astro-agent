@@ -83,6 +83,95 @@ export class K8sExecStrategy implements ExecutionStrategy {
         // No context
       }
 
+      // Node details (CPU, memory, GPU capacity)
+      interface K8sNodeInfo {
+        name: string;
+        status: string;
+        cpu: string;
+        memory: string;
+        gpus: number;
+      }
+      let nodes: K8sNodeInfo[] = [];
+      let totalCPU = 0;
+      let totalMemoryGi = 0;
+      let totalGPUs = 0;
+
+      try {
+        const { stdout: nodesOut } = await execAsync(
+          'kubectl get nodes -o json --request-timeout=10s 2>/dev/null',
+          { timeout: 15000 },
+        );
+        const nodesData = JSON.parse(nodesOut) as {
+          items?: Array<{
+            metadata?: { name?: string };
+            status?: {
+              conditions?: Array<{ type?: string; status?: string }>;
+              capacity?: Record<string, string>;
+            };
+          }>;
+        };
+        if (nodesData.items) {
+          nodes = nodesData.items.map((item) => {
+            const name = item.metadata?.name ?? 'unknown';
+            const readyCond = item.status?.conditions?.find((c) => c.type === 'Ready');
+            const status = readyCond?.status === 'True' ? 'Ready' : 'NotReady';
+            const capacity = item.status?.capacity ?? {};
+            const cpu = capacity.cpu ?? '0';
+            const memory = capacity.memory ?? '0';
+            const gpuStr = capacity['nvidia.com/gpu'] ?? '0';
+            const gpus = parseInt(gpuStr, 10) || 0;
+
+            // Parse CPU (may be millicores like "4000m" or cores like "4")
+            const cpuNum = cpu.endsWith('m') ? parseInt(cpu, 10) / 1000 : parseInt(cpu, 10) || 0;
+            totalCPU += cpuNum;
+
+            // Parse memory (Ki -> Gi)
+            const memMatch = memory.match(/^(\d+)(Ki|Mi|Gi)?$/);
+            if (memMatch) {
+              const val = parseInt(memMatch[1]!, 10);
+              const unit = memMatch[2];
+              if (unit === 'Ki') totalMemoryGi += val / (1024 * 1024);
+              else if (unit === 'Mi') totalMemoryGi += val / 1024;
+              else if (unit === 'Gi') totalMemoryGi += val;
+              else totalMemoryGi += val / (1024 * 1024 * 1024); // bytes
+            }
+
+            totalGPUs += gpus;
+            return { name, status, cpu, memory, gpus };
+          });
+        }
+      } catch {
+        // Node details are optional enrichment
+      }
+
+      totalMemoryGi = Math.round(totalMemoryGi * 10) / 10;
+
+      // Pod fallback: when nodes are empty (RBAC denied or autoscaler scaled to 0),
+      // count pods by namespace to show the cluster is still active
+      let podCount = 0;
+      let podsByNamespace: Record<string, number> = {};
+
+      if (nodes.length === 0) {
+        try {
+          const { stdout: podOut } = await execAsync(
+            'kubectl get pods --all-namespaces --no-headers -o custom-columns=NS:.metadata.namespace --request-timeout=10s 2>/dev/null',
+            { timeout: 15000 },
+          );
+          const lines = podOut.trim().split('\n').filter(Boolean);
+          podCount = lines.length;
+          const nsCounts: Record<string, number> = {};
+          for (const line of lines) {
+            const ns = line.trim();
+            if (ns) {
+              nsCounts[ns] = (nsCounts[ns] ?? 0) + 1;
+            }
+          }
+          podsByNamespace = nsCounts;
+        } catch {
+          // Pod listing may also be restricted
+        }
+      }
+
       return {
         available: true,
         version: serverVersion,
@@ -90,6 +179,12 @@ export class K8sExecStrategy implements ExecutionStrategy {
           clusterUrl: urlMatch?.[0],
           currentContext,
           namespaces,
+          nodes,
+          totalNodes: nodes.length,
+          totalCPU,
+          totalMemoryGi,
+          totalGPUs,
+          ...(podCount > 0 ? { podCount, podsByNamespace } : {}),
         },
       };
     } catch {

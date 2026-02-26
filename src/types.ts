@@ -825,11 +825,19 @@ export interface SlurmInfo {
   defaultPartition?: string;
   accounts: string[];
   qosLevels: string[];
+  /** Enriched partition details (objects with node counts, features, etc.) */
+  partitionDetails?: SlurmPartitionDetail[];
+  /** Total GPUs across all nodes (from GRES) */
+  totalGpus?: number;
+  /** Number of nodes with GPUs */
+  gpuNodeCount?: number;
 }
 
 export interface SlurmPartitionDetail {
   name: string;
   isDefault: boolean;
+  /** Whether the partition is administratively available (up vs down/drain) */
+  available: boolean;
   totalNodes: number;
   availableNodes: number;
   maxTime?: string;

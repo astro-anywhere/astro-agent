@@ -10,10 +10,11 @@ import { DirectStrategy } from './direct-strategy.js';
 import { SlurmStrategy } from './slurm-strategy.js';
 import { DockerStrategy } from './docker-strategy.js';
 import { K8sExecStrategy } from './kubernetes-exec-strategy.js';
+import { SSHStrategy } from './ssh-strategy.js';
 
 export class ExecutionStrategyRegistry {
   private strategies = new Map<ExecutionStrategyType, ExecutionStrategy>();
-  private detectionResults = new Map<ExecutionStrategyType, ExecutionStrategyInfo>();
+  private detectionResults = new Map<string, ExecutionStrategyInfo>();
   private detected = false;
 
   /**
@@ -26,10 +27,11 @@ export class ExecutionStrategyRegistry {
       new SlurmStrategy(),
       new DockerStrategy(),
       new K8sExecStrategy(),
+      new SSHStrategy(),
     ];
 
     const results = await Promise.allSettled(
-      allStrategies.map(async (strategy): Promise<ExecutionStrategyInfo> => {
+      allStrategies.map(async (strategy): Promise<ExecutionStrategyInfo[]> => {
         const detection = await strategy.detect();
 
         // Always register the strategy instance so it can be retrieved
@@ -44,15 +46,25 @@ export class ExecutionStrategyRegistry {
         };
 
         this.detectionResults.set(strategy.id, info);
-        return info;
+
+        // Some strategies (like SSH) return multiple entries — one per host
+        const entries: ExecutionStrategyInfo[] = [info];
+        if (detection.additionalEntries) {
+          for (const entry of detection.additionalEntries) {
+            this.detectionResults.set(entry.id, entry);
+            entries.push(entry);
+          }
+        }
+
+        return entries;
       }),
     );
 
     this.detected = true;
 
     return results
-      .filter((r): r is PromiseFulfilledResult<ExecutionStrategyInfo> => r.status === 'fulfilled')
-      .map((r) => r.value);
+      .filter((r): r is PromiseFulfilledResult<ExecutionStrategyInfo[]> => r.status === 'fulfilled')
+      .flatMap((r) => r.value);
   }
 
   /**

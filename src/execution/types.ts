@@ -11,7 +11,7 @@
 // Strategy Identification
 // ============================================================================
 
-export type ExecutionStrategyType = 'direct' | 'slurm' | 'docker' | 'k8s-exec';
+export type ExecutionStrategyType = 'direct' | 'slurm' | 'docker' | 'k8s-exec' | 'ssh';
 
 // ============================================================================
 // Core Interface
@@ -52,6 +52,8 @@ export interface ExecutionStrategyDetection {
   version?: string;
   /** Strategy-specific metadata: partitions, namespaces, clouds, etc. */
   metadata?: Record<string, unknown>;
+  /** For strategies that detect multiple backends (e.g., SSH hosts) */
+  additionalEntries?: ExecutionStrategyInfo[];
 }
 
 // ============================================================================
@@ -106,7 +108,9 @@ export interface ExecutionJobStatus {
 // ============================================================================
 
 export interface ExecutionStrategyInfo {
-  id: ExecutionStrategyType;
+  /** Strategy ID. Base strategies use ExecutionStrategyType values.
+   *  SSH hosts use dynamic IDs like "ssh:<alias>". */
+  id: string;
   name: string;
   available: boolean;
   version?: string;

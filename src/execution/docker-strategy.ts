@@ -54,13 +54,67 @@ export class DockerStrategy implements ExecutionStrategy {
       }
 
       // Get additional metadata
-      let osArch: string | undefined;
+      const metadata: Record<string, unknown> = {};
+
       try {
         const { stdout: infoOut } = await execFileAsync(
           'docker', ['info', '--format', '{{.OSType}}/{{.Architecture}}'],
           { timeout: 5000 },
         );
-        osArch = infoOut.trim();
+        metadata.osArch = infoOut.trim();
+      } catch {
+        // Ignore
+      }
+
+      // CPUs
+      try {
+        const { stdout: cpuOut } = await execFileAsync(
+          'docker', ['info', '--format', '{{.NCPU}}'],
+          { timeout: 5000 },
+        );
+        const cpus = parseInt(cpuOut.trim(), 10);
+        if (!isNaN(cpus)) metadata.cpus = cpus;
+      } catch {
+        // Ignore
+      }
+
+      // Memory
+      try {
+        const { stdout: memOut } = await execFileAsync(
+          'docker', ['info', '--format', '{{.MemTotal}}'],
+          { timeout: 5000 },
+        );
+        const memBytes = parseInt(memOut.trim(), 10);
+        if (!isNaN(memBytes)) {
+          metadata.memoryGb = Math.round(memBytes / (1024 * 1024 * 1024) * 10) / 10;
+        }
+      } catch {
+        // Ignore
+      }
+
+      // Running container count
+      try {
+        const { stdout: countOut } = await execFileAsync(
+          'docker', ['ps', '-q'],
+          { timeout: 5000 },
+        );
+        const lines = countOut.trim().split('\n').filter(Boolean);
+        metadata.runningContainers = lines.length;
+      } catch {
+        // Ignore
+      }
+
+      // Top images (limit to 10)
+      try {
+        const { stdout: imgOut } = await execFileAsync(
+          'docker', ['images', '--format', '{{.Repository}}\t{{.Tag}}\t{{.Size}}'],
+          { timeout: 5000 },
+        );
+        const images = imgOut.trim().split('\n').filter(Boolean).slice(0, 10).map((line) => {
+          const [repository, tag, size] = line.split('\t');
+          return { repository, tag, size };
+        });
+        if (images.length > 0) metadata.images = images;
       } catch {
         // Ignore
       }
@@ -68,9 +122,7 @@ export class DockerStrategy implements ExecutionStrategy {
       return {
         available: true,
         version,
-        metadata: {
-          osArch,
-        },
+        metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       };
     } catch {
       return { available: false };

@@ -21,6 +21,7 @@ export { DirectStrategy } from './direct-strategy.js';
 export { SlurmStrategy } from './slurm-strategy.js';
 export { DockerStrategy } from './docker-strategy.js';
 export { K8sExecStrategy } from './kubernetes-exec-strategy.js';
+export { SSHStrategy } from './ssh-strategy.js';
 
 // Strategy-specific option types
 export type { DockerExecOptions } from './docker-strategy.js';

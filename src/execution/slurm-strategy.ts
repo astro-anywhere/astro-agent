@@ -45,10 +45,15 @@ export class SlurmStrategy implements ExecutionStrategy {
         version: this.slurmInfo.version,
         metadata: {
           clusterName: this.slurmInfo.clusterName,
-          partitions: this.slurmInfo.partitions,
+          // Enriched partition details (objects) for the server/frontend
+          partitions: this.slurmInfo.partitionDetails && this.slurmInfo.partitionDetails.length > 0
+            ? this.slurmInfo.partitionDetails
+            : this.slurmInfo.partitions,
           defaultPartition: this.slurmInfo.defaultPartition,
           accounts: this.slurmInfo.accounts,
           qosLevels: this.slurmInfo.qosLevels,
+          totalGpus: this.slurmInfo.totalGpus,
+          gpuNodeCount: this.slurmInfo.gpuNodeCount,
         },
       };
     } catch {

@@ -395,14 +395,16 @@ describe('ExecutionStrategyRegistry', () => {
     expect(direct!.available).toBe(true);
   }, 15_000);
 
-  it('detectAll() includes all 4 strategies', async () => {
+  it('detectAll() includes all 5 base strategies', async () => {
     const results = await registry.detectAll();
-    expect(results.length).toBe(4);
+    // 5 base strategies + any additional SSH host entries
+    expect(results.length).toBeGreaterThanOrEqual(5);
     const ids = results.map((s) => s.id);
     expect(ids).toContain('direct');
     expect(ids).toContain('slurm');
     expect(ids).toContain('docker');
     expect(ids).toContain('k8s-exec');
+    expect(ids).toContain('ssh');
   }, 15_000);
 
   it('listAvailable() has at least 1 entry (direct)', async () => {
@@ -438,6 +440,7 @@ describe('ExecutionStrategyRegistry', () => {
   it('listAll() returns all strategies after detection', async () => {
     await registry.detectAll();
     const all = registry.listAll();
-    expect(all.length).toBe(4);
+    // 5 base strategies + any additional SSH host entries
+    expect(all.length).toBeGreaterThanOrEqual(5);
   }, 15_000);
 });
