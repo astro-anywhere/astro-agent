@@ -71,7 +71,7 @@ export class TaskExecutor {
 
   constructor(options: TaskExecutorOptions) {
     this.wsClient = options.wsClient;
-    this.maxConcurrentTasks = options.maxConcurrentTasks ?? 4;
+    this.maxConcurrentTasks = options.maxConcurrentTasks ?? 40;
     this.defaultTimeout = options.defaultTimeout ?? 3600000; // 1 hour
     this.useWorktree = options.useWorktree ?? true;
     this.worktreeRoot = options.worktreeRoot;
@@ -411,7 +411,7 @@ export class TaskExecutor {
     ];
 
     // Create promise that will be resolved when decision arrives, with a 5-minute timeout
-    const SAFETY_DECISION_TIMEOUT_MS = 5 * 60 * 1000;
+    const SAFETY_DECISION_TIMEOUT_MS = 5 * 24 * 60 * 60 * 1000; // 5 days
     const decisionPromise = new Promise<'proceed' | 'init-git' | 'sandbox' | 'cancel'>((resolve) => {
       this.pendingSafetyChecks.set(task.id, {
         task,

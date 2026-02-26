@@ -21,7 +21,7 @@ export interface SetupScriptOptions {
 }
 
 const SETUP_SCRIPT = 'astro-setup.sh';
-const DEFAULT_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+const DEFAULT_TIMEOUT = 30 * 60 * 1000; // 30 minutes
 const KILL_GRACE = 5_000; // 5s after SIGTERM before SIGKILL
 
 export async function runSetupScript(options: SetupScriptOptions): Promise<void> {

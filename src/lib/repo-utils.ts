@@ -330,9 +330,48 @@ export function localRepoSetup(options: {
     }
   }
 
-  // If repo URL + working directory, clone into the working directory
+  // If repo URL + working directory, check if already cloned in-place or clone into it
   if (repository && workingDirectory) {
     try {
+      // Check if the working directory itself is already the repo (has .git and matching remote)
+      if (existsSync(join(workingDirectory, '.git'))) {
+        let isMatchingRepo = false;
+        try {
+          const remoteUrl = execFileSync('git', ['config', '--get', 'remote.origin.url'], {
+            cwd: workingDirectory,
+            encoding: 'utf-8',
+            timeout: 5_000,
+          }).trim();
+          // Normalize both URLs for comparison (strip .git suffix, trailing slashes)
+          const normalize = (url: string) => url.replace(/\.git$/, '').replace(/\/$/, '');
+          isMatchingRepo = normalize(remoteUrl) === normalize(repository);
+        } catch {
+          // No remote configured — not a match
+        }
+
+        if (isMatchingRepo) {
+          // Already cloned here — just fetch latest and use as-is
+          try {
+            execFileSync('git', ['fetch', '--all'], { cwd: workingDirectory, stdio: 'ignore', timeout: 30_000 });
+          } catch { /* non-fatal */ }
+          const fileTree = getFileTree(workingDirectory);
+          const keyFiles = readKeyFiles(workingDirectory);
+          const { source, deliveryMode } = buildProjectSource(workingDirectory, repository);
+          const agentDir = ensureAgentDir(workingDirectory, source, deliveryMode);
+          return {
+            success: true,
+            workingDirectory,
+            fileTree,
+            repository,
+            keyFiles,
+            source,
+            deliveryMode,
+            agentDir,
+          };
+        }
+      }
+
+      // Not already cloned here — clone into workingDirectory/repoName
       const repoName = extractRepoName(repository);
       const cloneTarget = join(workingDirectory, repoName);
       const clonedDir = cloneRepository(repository, cloneTarget);

@@ -58,7 +58,7 @@ import { config as configManager } from './config.js';
 
 const DEFAULT_CONFIG: RunnerConfig = {
   relayUrl: 'wss://relay.astro.dev',
-  maxConcurrentTasks: 4,
+  maxConcurrentTasks: 40,
   heartbeatInterval: 30000, // 30 seconds
   reconnectMaxRetries: -1, // Infinite retries
   reconnectBaseDelay: 1000, // 1 second
