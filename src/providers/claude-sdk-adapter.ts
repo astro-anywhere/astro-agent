@@ -16,6 +16,39 @@ import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
 import { config } from '../lib/config.js';
 
+/**
+ * Determine whether to enable sandbox mode for Claude Code.
+ *
+ * - If config.sandbox is explicitly set, use that value.
+ * - Otherwise, auto-detect: enable for standard 'claude-*' models,
+ *   skip for Bedrock/custom models (which crash with non-undefined sandbox).
+ *
+ * Returns an object to spread into options (empty object means don't set sandbox).
+ */
+function getSandboxOption(model: string | undefined): { sandbox?: { enabled: boolean } } {
+  const configSandbox = config.getSandbox();
+
+  // Explicit config override
+  if (configSandbox !== undefined) {
+    return { sandbox: { enabled: configSandbox } };
+  }
+
+  // Auto-detect: skip sandbox for custom/Bedrock models
+  // Bedrock models typically use formats like "anthropic.claude-3-sonnet" or contain ':'
+  const isCustomModel = model && (
+    !model.startsWith('claude-') ||
+    model.includes(':') ||
+    model.includes('.')
+  );
+
+  if (isCustomModel) {
+    return {}; // Don't pass sandbox option at all (undefined behavior for Bedrock)
+  }
+
+  // Standard Claude model — enable sandbox
+  return { sandbox: { enabled: true } };
+}
+
 /** Active query state for a running task */
 interface ActiveQuery {
   query: Query | null;  // null after completion (session preserved for resume)
@@ -254,7 +287,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         abortController,
         maxTurns: 100,
         permissionMode: 'bypassPermissions',
-        // NOTE: Do NOT pass `sandbox` option — any non-undefined value crashes Claude Code on Bedrock.
+        // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
+        ...getSandboxOption(undefined),
         settingSources: ['user', 'project', 'local'],
         persistSession: false,
         ...(hasWorkdir ? { cwd: workingDirectory, additionalDirectories: [workingDirectory] } : {}),
@@ -439,7 +473,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       abortController,
       maxTurns: task.maxTurns ?? defaultMaxTurns,
       permissionMode: 'bypassPermissions', // Auto-accept all tool calls
-      // NOTE: Do NOT pass `sandbox` option — any non-undefined value crashes Claude Code on Bedrock.
+      // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
+      ...getSandboxOption(task.model),
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
       persistSession: false,
       ...(hasWorkdir ? { cwd: task.workingDirectory, additionalDirectories: [task.workingDirectory] } : {}),

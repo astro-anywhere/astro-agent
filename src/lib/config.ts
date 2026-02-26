@@ -3,9 +3,11 @@
  */
 
 import Conf from 'conf';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, type webcrypto } from 'node:crypto';
 import type { StoredConfig, ProviderType, DiscoveredHost } from '../types.js';
 import { getHardwareId } from './hardware-id.js';
+
+type JsonWebKey = webcrypto.JsonWebKey;
 
 // Production defaults (Fly.io backend)
 const DEFAULT_API_URL = 'https://api.astroanywhere.com';
@@ -82,6 +84,10 @@ interface ConfigSchema {
     env?: Record<string, string>;
   }>;
   remoteHosts?: DiscoveredHost[];
+  sandbox?: boolean;
+  dispatchPublicKey?: JsonWebKey;
+  dispatchPublicKeys?: JsonWebKey[];
+  requireSignedDispatches?: boolean;
 }
 
 class ConfigManager {
@@ -106,6 +112,9 @@ class ConfigManager {
         logLevel: 'info',
         lastConnected: undefined,
         setupCompleted: false,
+        dispatchPublicKey: undefined,
+        dispatchPublicKeys: undefined,
+        requireSignedDispatches: false,
       },
     });
   }
@@ -453,6 +462,83 @@ class ConfigManager {
    */
   setRemoteHosts(hosts: DiscoveredHost[]): void {
     this.conf.set('remoteHosts', hosts);
+  }
+
+  /**
+   * Get sandbox mode setting.
+   * Returns undefined if not explicitly set (auto-detection applies).
+   */
+  getSandbox(): boolean | undefined {
+    return this.conf.get('sandbox');
+  }
+
+  /**
+   * Set sandbox mode.
+   * true = force sandbox on, false = force sandbox off, undefined = auto-detect.
+   */
+  setSandbox(value: boolean | undefined): void {
+    if (value === undefined) {
+      this.conf.delete('sandbox');
+    } else {
+      this.conf.set('sandbox', value);
+    }
+  }
+
+  /**
+   * Get all trusted ECDSA P-256 public keys for dispatch signature verification.
+   * Merges legacy single key with the multi-key array for backward compatibility.
+   */
+  getDispatchPublicKeys(): JsonWebKey[] {
+    const keys: JsonWebKey[] = this.conf.get('dispatchPublicKeys') ?? [];
+    // Backward compat: include legacy single key if not already in the array
+    const legacy = this.conf.get('dispatchPublicKey');
+    if (legacy && !keys.some(k => k.x === legacy.x && k.y === legacy.y)) {
+      keys.push(legacy);
+    }
+    return keys;
+  }
+
+  /**
+   * Get the legacy single dispatch public key (backward compat).
+   */
+  getDispatchPublicKey(): JsonWebKey | undefined {
+    return this.conf.get('dispatchPublicKey');
+  }
+
+  /**
+   * Add a trusted dispatch public key. Deduplicates by (x, y) coordinates.
+   */
+  addDispatchPublicKey(key: JsonWebKey): void {
+    const keys = this.conf.get('dispatchPublicKeys') ?? [];
+    // Deduplicate by EC point (x, y)
+    if (!keys.some(k => k.x === key.x && k.y === key.y)) {
+      keys.push(key);
+      this.conf.set('dispatchPublicKeys', keys);
+    }
+    // Also set legacy field for backward compat (latest key wins)
+    this.conf.set('dispatchPublicKey', key);
+  }
+
+  /**
+   * Set the ECDSA P-256 public key (legacy single-key setter).
+   * Delegates to addDispatchPublicKey for multi-key support.
+   */
+  setDispatchPublicKey(key: JsonWebKey): void {
+    this.addDispatchPublicKey(key);
+  }
+
+  /**
+   * Get whether signed dispatches are required
+   */
+  getRequireSignedDispatches(): boolean {
+    return this.conf.get('requireSignedDispatches') ?? false;
+  }
+
+  /**
+   * Set whether signed dispatches are required
+   */
+  setRequireSignedDispatches(value: boolean): void {
+    this.conf.set('requireSignedDispatches', value);
   }
 
   /**

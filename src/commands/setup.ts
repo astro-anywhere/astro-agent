@@ -536,6 +536,14 @@ async function runDeviceAuthFlow(
       config.setRelayUrl(regResponse.relayUrl);
     }
 
+    // Add dispatch public key to trusted keys for signature verification.
+    // Multiple keys are supported (e.g., from different browsers).
+    if (regResponse.dispatchPublicKey) {
+      config.addDispatchPublicKey(regResponse.dispatchPublicKey);
+      const total = config.getDispatchPublicKeys().length;
+      console.log(`[setup] Added dispatch public key (${total} trusted key${total === 1 ? '' : 's'} total)`);
+    }
+
     console.log();
   } catch (err) {
     regSpinner.fail('Failed to register machine');

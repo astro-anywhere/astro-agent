@@ -2,6 +2,10 @@
  * Core types for the Astro Agent Runner CLI
  */
 
+import type { webcrypto } from 'node:crypto';
+
+type JsonWebKey = webcrypto.JsonWebKey;
+
 // ============================================================================
 // Provider Types
 // ============================================================================
@@ -184,6 +188,18 @@ export interface Task {
 
   /** GitHub issue number to reference in the PR body (e.g., 42 → "Closes #42") */
   githubIssueNumber?: number;
+
+  /** ECDSA P-256 signature of the dispatch signing payload (base64url-encoded) */
+  dispatchSignature?: string;
+  /** The signed payload for verification by the agent runner */
+  dispatchSigningPayload?: {
+    v: 1;
+    nodeId: string;
+    projectId: string;
+    machineId: string;
+    timestamp: string;
+    nonce: string;
+  };
 }
 
 export interface TaskResult {
@@ -804,6 +820,8 @@ export interface MachineRegisterResponse {
   accessToken: string;
   refreshToken: string;
   expiresIn: number;
+  /** ECDSA P-256 public key (JWK) for verifying dispatch signatures */
+  dispatchPublicKey?: JsonWebKey;
 }
 
 // ============================================================================

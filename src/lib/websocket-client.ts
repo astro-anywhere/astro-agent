@@ -792,12 +792,47 @@ export class WebSocketClient {
     }
   }
 
-  private handleTaskDispatch(message: TaskDispatchMessage): void {
+  private async handleTaskDispatch(message: TaskDispatchMessage): Promise<void> {
     const task = message.payload;
 
     // Check if we can accept more tasks
     if (this.activeTasks.size >= this.config.maxConcurrentTasks) {
       this.sendTaskStatus(task.id, 'queued', 0, 'Waiting for available slot');
+      return;
+    }
+
+    // Verify dispatch signature if present
+    const publicKeys = configManager.getDispatchPublicKeys();
+    const requireSigned = configManager.getRequireSignedDispatches();
+
+    if (task.dispatchSignature && task.dispatchSigningPayload) {
+      if (publicKeys.length > 0) {
+        const { verifyDispatch } = await import('./dispatch-verifier.js');
+        const result = await verifyDispatch(
+          publicKeys,
+          task.dispatchSignature,
+          task.dispatchSigningPayload,
+          task,
+          configManager.getMachineId(),
+        );
+        if (!result.valid) {
+          console.error(`[ws-client] Dispatch signature verification FAILED: ${result.reason}`);
+          this.sendTaskResult({
+            taskId: task.id,
+            status: 'failed',
+            error: `Dispatch signature verification failed: ${result.reason}`,
+          });
+          return;
+        }
+        console.log(`[ws-client] Dispatch signature verified for task ${task.id}`);
+      }
+    } else if (requireSigned) {
+      console.error(`[ws-client] Unsigned dispatch rejected (requireSignedDispatches=true)`);
+      this.sendTaskResult({
+        taskId: task.id,
+        status: 'failed',
+        error: 'Unsigned dispatch rejected. This agent requires signed dispatches.',
+      });
       return;
     }
 
