@@ -475,8 +475,8 @@ export class WebSocketClient {
   }
 
   /**
-   * Send approval request and wait for response (following Cyrus pattern)
-   * Returns a promise that resolves when the user responds or rejects on timeout
+   * Send approval request and wait for response
+   * Returns a promise that resolves when the user responds (no timeout)
    */
   sendApprovalRequest(taskId: string, question: string, options: string[]): Promise<{ answered: boolean; answer?: string; message?: string }> {
     const requestId = `${taskId}-${Date.now()}`;
@@ -494,15 +494,6 @@ export class WebSocketClient {
       this.send(msg);
 
       console.log(`[ws-client] Sent approval request ${requestId} for task ${taskId}`);
-
-      // Set timeout (60 seconds for user to respond)
-      setTimeout(() => {
-        const pending = this.pendingApprovals.get(requestId);
-        if (pending) {
-          this.pendingApprovals.delete(requestId);
-          pending.resolve({ answered: false, message: 'Approval request timed out (60s)' });
-        }
-      }, 60000);
     });
   }
 
