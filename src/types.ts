@@ -166,6 +166,9 @@ export interface Task {
 
   /** Images embedded in task content, sent as base64 for multimodal prompts */
   images?: ImageAttachment[];
+
+  /** Skip safety check — server already approved this working directory */
+  skipSafetyCheck?: boolean;
 }
 
 export interface TaskResult {

@@ -109,6 +109,23 @@ export class TaskExecutor {
       && normalizedTask.useWorktree !== false
       && normalizedTask.deliveryMode !== 'direct';
 
+    if (!isTextOnlyTask && task.skipSafetyCheck) {
+      // Server already approved safety for this directory — skip the prompt.
+      // Still need to handle init-git if directory isn't a git repo.
+      const needsGitInit = this.gitAvailable && !(await isGitRepo(normalizedTask.workingDirectory));
+      if (needsGitInit) {
+        await this.initializeGit(normalizedTask.workingDirectory);
+      }
+      this.trackTaskDirectory(normalizedTask);
+      if (this.runningTasks.size < this.maxConcurrentTasks) {
+        await this.executeTask(normalizedTask, false);
+      } else {
+        this.taskQueue.push(normalizedTask);
+        this.wsClient.sendTaskStatus(normalizedTask.id, 'queued', 0, 'Waiting for available slot');
+      }
+      return;
+    }
+
     if (!isTextOnlyTask) {
       // Perform safety check (worktree flag affects tier assignment)
       const safetyCheck = await this.performSafetyCheck(normalizedTask, willUseWorktree);
