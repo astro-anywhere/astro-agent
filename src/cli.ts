@@ -394,6 +394,7 @@ program
 program
   .command('launch')
   .description('Setup (if needed) and start the agent runner in one step')
+  .addHelpText('after', '\nTroubleshooting:\n  If you encounter any issue during setup, try:\n    npx @astroanywhere/agent@latest launch --force-setup')
   .option('--api <url>', 'API server URL')
   .option('--relay <url>', 'Override relay server URL')
   .option('--hostname <hostname>', 'Machine hostname')
