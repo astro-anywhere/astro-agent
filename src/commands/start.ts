@@ -833,6 +833,91 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         });
       }
     },
+    onSessionsList: (correlationId: string) => {
+      log('debug', 'Sessions list request received', logLevel);
+      try {
+        const claudeDir = join(homedir(), '.claude', 'projects');
+        if (!existsSync(claudeDir)) {
+          wsClient.sendSessionsListResponse(correlationId, []);
+          return;
+        }
+
+        const sessions: import('../types.js').ClaudeCodeSessionInfo[] = [];
+        const projectDirs = readdirSync(claudeDir, { withFileTypes: true })
+          .filter(d => d.isDirectory());
+
+        for (const projDir of projectDirs) {
+          const projPath = join(claudeDir, projDir.name);
+          // Decode cwd from directory name: dashes replace path separators
+          // e.g. "-home-user-myproject" → "/home/user/myproject"
+          const cwd = projDir.name.replace(/^-/, '/').replace(/-/g, '/');
+
+          let jsonlFiles: string[];
+          try {
+            jsonlFiles = readdirSync(projPath).filter(f => f.endsWith('.jsonl'));
+          } catch { continue; }
+
+          for (const file of jsonlFiles) {
+            const sessionId = file.replace('.jsonl', '');
+            const filePath = join(projPath, file);
+            try {
+              const stat = statSync(filePath);
+              // Skip tiny files (likely empty sessions)
+              if (stat.size < 100) continue;
+
+              // Read first few lines to extract metadata
+              const content = readFileSync(filePath, 'utf-8');
+              const firstNewline = content.indexOf('\n');
+              const secondNewline = firstNewline > -1 ? content.indexOf('\n', firstNewline + 1) : -1;
+              // Parse first user message for summary
+              let summary = '';
+              let firstPrompt = '';
+              let gitBranch = '';
+              let customTitle = '';
+
+              // Check first few lines for metadata
+              const linesToCheck = secondNewline > -1 ? content.slice(0, secondNewline) : content.slice(0, 2000);
+              for (const line of linesToCheck.split('\n')) {
+                if (!line.trim()) continue;
+                try {
+                  const entry = JSON.parse(line);
+                  if (entry.type === 'user' && entry.message?.content) {
+                    const textContent = Array.isArray(entry.message.content)
+                      ? entry.message.content.find((c: { type: string }) => c.type === 'text')?.text || ''
+                      : String(entry.message.content);
+                    if (!firstPrompt) firstPrompt = textContent.slice(0, 200);
+                    if (!summary) summary = textContent.slice(0, 100);
+                  }
+                  if (entry.gitBranch && !gitBranch) gitBranch = entry.gitBranch;
+                  if (entry.customTitle) customTitle = entry.customTitle;
+                } catch { /* skip unparseable lines */ }
+              }
+
+              sessions.push({
+                sessionId,
+                summary,
+                lastModified: stat.mtimeMs,
+                fileSize: stat.size,
+                customTitle,
+                firstPrompt,
+                gitBranch,
+                cwd,
+              });
+            } catch { /* skip unreadable files */ }
+          }
+        }
+
+        // Sort by lastModified descending, limit to 50 most recent
+        sessions.sort((a, b) => b.lastModified - a.lastModified);
+        const result = sessions.slice(0, 50);
+
+        wsClient.sendSessionsListResponse(correlationId, result);
+        log('debug', `Sent ${result.length} sessions`, logLevel);
+      } catch (error) {
+        log('warn', `Failed to list sessions: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendSessionsListResponse(correlationId, [], error instanceof Error ? error.message : String(error));
+      }
+    },
   });
 
   // Create task executor

@@ -261,6 +261,7 @@ export type WSMessageType =
   | 'repo_detect_response'
   | 'branch_list_response'
   | 'git_init_response'
+  | 'sessions_list_response'
   // Server -> Client
   | 'registered'
   | 'heartbeat_ack'
@@ -279,6 +280,7 @@ export type WSMessageType =
   | 'repo_detect_request'
   | 'branch_list_request'
   | 'git_init_request'
+  | 'sessions_list_request'
   | 'error';
 
 export interface WSMessage {
@@ -711,6 +713,37 @@ export interface GitInitResponseMessage extends WSMessage {
     fileTree?: string[];
     source?: Record<string, unknown>;
     deliveryMode?: string;
+    error?: string;
+  };
+}
+
+// ============================================================================
+// Sessions List Types
+// ============================================================================
+
+export interface SessionsListRequestMessage extends WSMessage {
+  type: 'sessions_list_request';
+  payload: {
+    correlationId: string;
+  };
+}
+
+export interface ClaudeCodeSessionInfo {
+  sessionId: string;
+  summary: string;
+  lastModified: number;
+  fileSize: number;
+  customTitle?: string;
+  firstPrompt?: string;
+  gitBranch?: string;
+  cwd?: string;
+}
+
+export interface SessionsListResponseMessage extends WSMessage {
+  type: 'sessions_list_response';
+  payload: {
+    correlationId: string;
+    sessions: ClaudeCodeSessionInfo[];
     error?: string;
   };
 }

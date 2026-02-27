@@ -86,6 +86,7 @@ export interface WebSocketClientOptions {
   onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
   onBranchList?: (payload: BranchListRequestMessage['payload']) => void;
   onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
+  onSessionsList?: (correlationId: string) => void;
   version?: string;
   wsToken?: string;
 }
@@ -107,6 +108,7 @@ type IncomingMessage =
   | RepoDetectRequestMessage
   | BranchListRequestMessage
   | GitInitRequestMessage
+  | import('../types.js').SessionsListRequestMessage
   | ErrorMessage;
 
 export class WebSocketClient {
@@ -140,6 +142,7 @@ export class WebSocketClient {
   private onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
   private onBranchList?: (payload: BranchListRequestMessage['payload']) => void;
   private onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
+  private onSessionsList?: (correlationId: string) => void;
 
   constructor(options: WebSocketClientOptions) {
     this.runnerId = options.runnerId;
@@ -162,6 +165,7 @@ export class WebSocketClient {
     this.onRepoDetect = options.onRepoDetect;
     this.onBranchList = options.onBranchList;
     this.onGitInit = options.onGitInit;
+    this.onSessionsList = options.onSessionsList;
   }
 
   /**
@@ -779,6 +783,9 @@ export class WebSocketClient {
       case 'git_init_request':
         this.handleGitInitRequest(message as GitInitRequestMessage);
         break;
+      case 'sessions_list_request':
+        this.handleSessionsListRequest(message as import('../types.js').SessionsListRequestMessage);
+        break;
       case 'error':
         this.handleError(message);
         break;
@@ -1040,6 +1047,26 @@ export class WebSocketClient {
       type: 'git_init_response',
       timestamp: new Date().toISOString(),
       payload: { correlationId, ...result },
+    };
+    this.send(msg);
+  }
+
+  private handleSessionsListRequest(message: import('../types.js').SessionsListRequestMessage): void {
+    this.onSessionsList?.(message.payload.correlationId);
+  }
+
+  /**
+   * Send sessions list response
+   */
+  sendSessionsListResponse(
+    correlationId: string,
+    sessions: import('../types.js').ClaudeCodeSessionInfo[],
+    error?: string,
+  ): void {
+    const msg: import('../types.js').SessionsListResponseMessage = {
+      type: 'sessions_list_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, sessions, error },
     };
     this.send(msg);
   }
