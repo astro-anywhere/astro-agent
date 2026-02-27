@@ -9,7 +9,7 @@
 import { query, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { Task, TaskResult, TaskArtifact } from '../types.js';
+import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
@@ -59,6 +59,7 @@ interface ActiveQuery {
 /** How long to preserve completed session state for potential steering (ms) */
 const SESSION_PRESERVE_MS = 10 * 60 * 1000; // 10 minutes
 
+
 export class ClaudeSdkAdapter implements ProviderAdapter {
   readonly type = 'claude-sdk';
   readonly name = 'Claude Agent SDK';
@@ -75,8 +76,25 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
   /** Lazily-initialized HPC context (undefined = not checked, null = not available) */
   private hpcContext: HpcContext | null | undefined = undefined;
 
+  /** Pre-classified HPC capability from startup detection (avoids re-scanning) */
+  private hpcCapability: HpcCapability | null;
+
   /** Optional Slurm job monitor for tracking sbatch submissions */
   private jobMonitor?: SlurmJobMonitor;
+
+  /**
+   * @param hpcCapability Pre-classified HPC info from provider detection at startup.
+   *   null = machine is known to not have HPC. undefined = not provided (will auto-detect once).
+   */
+  constructor(hpcCapability?: HpcCapability | null) {
+    this.hpcCapability = hpcCapability ?? null;
+    // If we know at construction time there's no HPC, mark context as resolved
+    if (hpcCapability === null || hpcCapability === undefined) {
+      // No HPC capability declared — skip lazy detection entirely
+      this.hpcContext = null;
+    }
+    // else: hpcCapability is truthy → will build context lazily using pre-classified info
+  }
 
   /**
    * Set a SlurmJobMonitor for tracking batch job submissions.
@@ -98,7 +116,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           maxTurns: 1,
           permissionMode: 'plan',
           tools: [],
-          persistSession: false,
+          persistSession: true,
         },
       });
 
@@ -137,6 +155,28 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
       const result = await this.runQuery(task, stream, abortController);
 
+      // Generate structured summary for execution tasks via a follow-up turn.
+      // This resumes the same session, so the agent has full context of what it just did.
+      // The summary uses structured output (json_schema) for guaranteed valid JSON.
+      let summary: ExecutionSummary | undefined;
+      const isExecutionTask = !task.type || task.type === 'execution';
+      if (isExecutionTask && result.success) {
+        try {
+          stream.status('running', 95, 'Generating summary');
+          summary = await this.generateSummary(task.id, task.workingDirectory);
+          if (summary) {
+            console.log(`[claude-sdk] Task ${task.id}: summary generated — status=${summary.status}, executiveSummary=${summary.executiveSummary ? `${summary.executiveSummary.length} chars` : 'MISSING'}, keyFindings=${summary.keyFindings?.length ?? 0}`);
+          } else {
+            console.warn(`[claude-sdk] Task ${task.id}: summary generation returned undefined`);
+          }
+        } catch (summaryError) {
+          // Non-fatal — task result is still valid without summary
+          console.warn(`[claude-sdk] Task ${task.id}: summary generation failed:`, summaryError);
+        }
+      } else {
+        console.log(`[claude-sdk] Task ${task.id}: skipping summary — isExecutionTask=${isExecutionTask}, success=${result.success}, type=${task.type ?? 'undefined'}`);
+      }
+
       return {
         taskId: task.id,
         status: result.success ? 'completed' : 'failed',
@@ -147,6 +187,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         completedAt: new Date().toISOString(),
         artifacts: result.artifacts,
         metrics: result.metrics,
+        summary,
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -290,7 +331,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
         ...getSandboxOption(undefined),
         settingSources: ['user', 'project', 'local'],
-        persistSession: false,
+        persistSession: true,
         ...(hasWorkdir ? { cwd: workingDirectory, additionalDirectories: [workingDirectory] } : {}),
         env: {
           ...process.env,
@@ -426,6 +467,208 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     };
   }
 
+  /**
+   * Generate a structured execution summary by resuming the task session.
+   * Resumes the session so the model has full context of what it did,
+   * then parses JSON from the text response.
+   *
+   * Note: We intentionally avoid using `outputFormat` (structured output) here
+   * because the `resume` + `outputFormat` combination is unreliable in the SDK —
+   * it returns errors with no structured_output. Instead, we embed the JSON format
+   * in the prompt and parse the text response.
+   */
+  private async generateSummary(
+    taskId: string,
+    workingDirectory: string | undefined,
+  ): Promise<ExecutionSummary | undefined> {
+    const sessionContext = this.activeQueries.get(taskId);
+    if (!sessionContext?.sessionId) {
+      console.log(`[claude-sdk] No session to resume for summary (task ${taskId})`);
+      return undefined;
+    }
+
+    const summaryAbort = new AbortController();
+    const summaryTimeout = setTimeout(() => summaryAbort.abort(), 30_000);
+
+    try {
+      // Ensure CLAUDE_CONFIG_DIR is set
+      if (!process.env.CLAUDE_CONFIG_DIR) {
+        process.env.CLAUDE_CONFIG_DIR = join(homedir(), '.claude');
+      }
+
+      const options: Parameters<typeof query>[0]['options'] = {
+        abortController: summaryAbort,
+        maxTurns: 1,
+        permissionMode: 'plan',
+        persistSession: true,
+        ...(workingDirectory ? { cwd: workingDirectory } : {}),
+      };
+
+      // Resume the execution session so the model has full context
+      (options as Record<string, unknown>).resume = sessionContext.sessionId;
+
+      const summaryPrompt = `Produce a structured JSON summary of the work you just completed. Respond with ONLY a JSON object (no markdown fences, no extra text) matching this exact schema:
+
+{
+  "status": "success" | "partial" | "failure",
+  "workCompleted": "1-2 sentence summary of what was accomplished",
+  "executiveSummary": "1-2 paragraph executive summary for the PR description: what was done, the approach taken, key design decisions, and any trade-offs. Write in a professional tone suitable for code reviewers.",
+  "keyFindings": ["2-5 concise bullet points (under 100 chars each)"],
+  "filesChanged": ["list of file paths that were created, modified, or deleted"],
+  "followUps": ["suggested follow-up actions if any, or empty array"],
+  "prUrl": "full URL of the pull request if you created one, or null",
+  "prNumber": 123 or null,
+  "branchName": "git branch name you worked on, or null"
+}`;
+
+      const gen = query({
+        prompt: summaryPrompt,
+        options,
+      });
+
+      let textOutput = '';
+
+      for await (const msg of gen) {
+        if (msg.type === 'result') {
+          const msgAny = msg as Record<string, unknown>;
+          console.log(`[claude-sdk] Task ${taskId}: summary result — subtype=${msg.subtype}, is_error=${msgAny.is_error}`);
+          if (msg.subtype !== 'success') {
+            console.warn(`[claude-sdk] Task ${taskId}: summary query failed with subtype=${msg.subtype}`);
+            if (msgAny.errors) {
+              console.error(`[claude-sdk] Task ${taskId}: summary errors: ${JSON.stringify(msgAny.errors)}`);
+            }
+          }
+          break;
+        } else if (msg.type === 'assistant') {
+          for (const block of msg.message.content) {
+            if (typeof block !== 'string' && block.type === 'text') {
+              textOutput += block.text;
+            }
+          }
+        }
+      }
+
+      if (!textOutput) {
+        console.warn(`[claude-sdk] Task ${taskId}: no text output from summary generation`);
+        return undefined;
+      }
+
+      // Strip markdown code fences if present
+      let jsonText = textOutput.trim();
+      if (jsonText.startsWith('```')) {
+        jsonText = jsonText.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+      }
+
+      try {
+        const parsed = JSON.parse(jsonText) as ExecutionSummary;
+        if (!parsed.executiveSummary) {
+          console.warn(`[claude-sdk] Task ${taskId}: summary generated but executiveSummary is missing. Keys: ${Object.keys(parsed).join(', ')}`);
+        }
+        return parsed;
+      } catch {
+        console.warn(`[claude-sdk] Task ${taskId}: summary text was not valid JSON. Text: ${jsonText.slice(0, 300)}`);
+        return undefined;
+      }
+    } finally {
+      clearTimeout(summaryTimeout);
+    }
+  }
+
+  /**
+   * Fast path for text-only tasks (chat, summarize).
+   * Skips HPC context, MCP servers, tool infrastructure, canUseTool handler,
+   * sandbox, settingSources, and image handling to minimize time-to-first-token.
+   */
+  private async runTextOnlyQuery(
+    task: Task,
+    stream: TaskOutputStream,
+    abortController: AbortController,
+    hasWorkdir: boolean,
+  ): Promise<{
+    success: boolean;
+    output: string;
+    error?: string;
+    artifacts?: TaskArtifact[];
+    metrics?: TaskResult['metrics'];
+  }> {
+    const options: Parameters<typeof query>[0]['options'] = {
+      abortController,
+      maxTurns: task.maxTurns ?? 10,
+      permissionMode: 'plan',  // No tool execution — text generation only
+      tools: [],               // No built-in tools
+      persistSession: true,
+      ...(hasWorkdir ? { cwd: task.workingDirectory } : {}),
+      env: { ...process.env, ...task.environment },
+    };
+
+    if (task.systemPrompt) {
+      (options as Record<string, unknown>).systemPrompt = task.systemPrompt;
+    }
+    if (task.model) {
+      (options as Record<string, unknown>).model = task.model;
+    }
+
+    // Build prompt with conversation history
+    let effectivePrompt = task.prompt;
+    if (task.messages && task.messages.length > 0) {
+      const conversationContext = task.messages
+        .map(m => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
+        .join('\n\n');
+      effectivePrompt = effectivePrompt
+        ? `${effectivePrompt}\n\n---\n\nConversation history:\n${conversationContext}`
+        : conversationContext;
+    }
+
+    console.log(`[claude-sdk] Fast path: text-only task (type=${task.type}, model=${task.model ?? 'default'})`);
+
+    const gen = query({ prompt: effectivePrompt, options });
+
+    let output = '';
+    let success = true;
+    let errorMessage: string | undefined;
+    let resultMetrics: TaskResult['metrics'] | undefined;
+
+    for await (const msg of gen) {
+      if (msg.type === 'system' && msg.subtype === 'init') {
+        this.model = msg.model;
+        const sessionId = (msg as unknown as Record<string, unknown>).session_id as string ?? '';
+        stream.status('running', 5, `Model: ${msg.model}`);
+        stream.sessionInit(sessionId, msg.model);
+        this.activeQueries.set(task.id, { query: gen, sessionId });
+      } else if (msg.type === 'assistant') {
+        for (const block of msg.message.content) {
+          if (typeof block === 'string') continue;
+          if (block.type === 'text') {
+            output += block.text;
+            stream.text(block.text);
+          }
+        }
+      } else if (msg.type === 'result') {
+        const msgAny = msg as Record<string, unknown>;
+        const usage = msgAny.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+        resultMetrics = {
+          inputTokens: usage?.input_tokens,
+          outputTokens: usage?.output_tokens,
+          totalCost: (msgAny.total_cost_usd ?? msgAny.cost_usd) as number | undefined,
+          numTurns: msgAny.num_turns as number | undefined,
+          durationMs: (msgAny.duration_ms ?? msgAny.duration_api_ms) as number | undefined,
+          model: this.model,
+        };
+        if (msg.subtype === 'success') {
+          success = true;
+          stream.status('completed', 100, 'Task completed successfully');
+        } else {
+          success = false;
+          errorMessage = `Task failed: ${msg.subtype}`;
+          stream.status('failed', 0, errorMessage);
+        }
+        break;
+      }
+    }
+
+    return { success, output, error: errorMessage, metrics: resultMetrics };
+  }
+
   private async runQuery(
     task: Task,
     stream: TaskOutputStream,
@@ -463,10 +706,21 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     delete process.env.CLAUDECODE;
 
     // Determine appropriate maxTurns based on task type
-    const defaultMaxTurns = (task.type === 'chat' || task.type === 'summarize') ? 10 : 150;
+    const isTextOnlyTask = task.type === 'chat' || task.type === 'summarize';
+    const defaultMaxTurns = isTextOnlyTask ? 10 : 150;
 
     // Plan/chat/summarize tasks without a working directory run without cwd context
     const hasWorkdir = !!task.workingDirectory;
+
+    // ── Fast path for text-only tasks (chat, summarize) ──
+    // These tasks use structured text blocks (not tools/MCP) for plan mutations.
+    // Skip HPC context, MCP servers, tool infrastructure, and CLAUDE.md loading
+    // to minimize time-to-first-token.
+    if (isTextOnlyTask) {
+      return this.runTextOnlyQuery(task, stream, abortController, hasWorkdir);
+    }
+
+    // ── Standard path for execution tasks ──
 
     // Build options for the query
     const options: Parameters<typeof query>[0]['options'] = {
@@ -476,7 +730,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
       ...getSandboxOption(task.model),
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
-      persistSession: false,
+      persistSession: true, // Keep session on disk so generateSummary() can resume it
       ...(hasWorkdir ? { cwd: task.workingDirectory, additionalDirectories: [task.workingDirectory] } : {}),
       env: {
         ...process.env,
@@ -549,10 +803,21 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       },
     };
 
-    // Lazily initialize HPC context on first query
-    if (this.hpcContext === undefined) {
+    // Lazily initialize HPC context on first query.
+    // Uses pre-classified HpcCapability from startup detection to avoid
+    // re-running SLURM detection commands on every first task.
+    if (this.hpcContext === undefined && this.hpcCapability) {
       try {
-        this.hpcContext = await buildHpcContext();
+        const cap = this.hpcCapability;
+        const preclassifiedSlurm = {
+          available: true,
+          clusterName: cap.clusterName,
+          partitions: cap.partitions,
+          defaultPartition: cap.defaultPartition,
+          accounts: cap.accounts,
+          qosLevels: [],
+        };
+        this.hpcContext = await buildHpcContext(preclassifiedSlurm);
         if (this.hpcContext.available) {
           console.log(`[claude-sdk] HPC context loaded (cluster: ${this.hpcContext.slurmInfo?.clusterName ?? 'unknown'})`);
         }
@@ -606,11 +871,12 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // Load MCP servers from config if available
     const agentConfig = config.getConfig();
     const mcpAllowedTools: string[] = [];
+    const mcpServers: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};
+
     if (agentConfig.mcpServers && Object.keys(agentConfig.mcpServers).length > 0) {
       console.log(`[claude-sdk] Loading ${Object.keys(agentConfig.mcpServers).length} MCP server(s): ${Object.keys(agentConfig.mcpServers).join(', ')}`);
 
       // Inject execution ID into MCP server environment variables
-      const mcpServers: Record<string, { command: string; args: string[]; env?: Record<string, string> }> = {};
       for (const [name, serverConfig] of Object.entries(agentConfig.mcpServers)) {
         const server = serverConfig as { command: string; args: string[]; env?: Record<string, string> };
         mcpServers[name] = {
@@ -621,7 +887,9 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           },
         };
       }
+    }
 
+    if (Object.keys(mcpServers).length > 0) {
       (options as Record<string, unknown>).mcpServers = mcpServers;
 
       // Collect MCP tool patterns

@@ -51,11 +51,13 @@ async function loadHpcConfig(): Promise<HpcConfig | undefined> {
 
 /**
  * Build the HPC context prompt prefix.
- * Auto-detects Slurm availability and merges with user config.
+ * If pre-classified SlurmInfo is provided (from startup detection), uses it
+ * directly instead of re-running detectSlurm(). Otherwise falls back to
+ * auto-detection.
  */
-export async function buildHpcContext(): Promise<HpcContext> {
+export async function buildHpcContext(preclassifiedSlurm?: SlurmInfo): Promise<HpcContext> {
   const [slurmInfo, config] = await Promise.all([
-    detectSlurm(),
+    preclassifiedSlurm ?? detectSlurm(),
     loadHpcConfig(),
   ]);
 

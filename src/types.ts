@@ -156,6 +156,9 @@ export interface Task {
   /** Agent directory name (default '.astro') */
   agentDir?: string;
 
+  /** Target branch for worktree creation and PR base (e.g., 'main', 'develop') */
+  baseBranch?: string;
+
   /** Worktree strategy for non-git or copy-based execution */
   worktreeStrategy?: 'copy' | 'reference' | 'direct';
 
@@ -202,6 +205,23 @@ export interface Task {
   };
 }
 
+/** Structured execution summary produced by the agent after task completion */
+export interface ExecutionSummary {
+  status: 'success' | 'partial' | 'failure';
+  workCompleted: string;
+  /** 1-2 paragraph executive summary: what was done, why, approach taken, and key decisions */
+  executiveSummary: string;
+  keyFindings: string[];
+  filesChanged: string[];
+  followUps: string[];
+  /** PR URL if the agent created a pull request during execution */
+  prUrl?: string;
+  /** PR number if the agent created a pull request during execution */
+  prNumber?: number;
+  /** Branch name the agent worked on or created */
+  branchName?: string;
+}
+
 export interface TaskResult {
   taskId: string;
   status: TaskStatus;
@@ -214,6 +234,12 @@ export interface TaskResult {
   branchName?: string;
   prUrl?: string;
   prNumber?: number;
+  /** Delivery outcome — separate from execution status */
+  deliveryStatus?: 'success' | 'failed' | 'skipped';
+  /** Error message when deliveryStatus is 'failed' */
+  deliveryError?: string;
+  /** Structured execution summary (generated via follow-up structured output turn) */
+  summary?: ExecutionSummary;
   metrics?: {
     durationMs?: number;
     inputTokens?: number;
@@ -725,6 +751,8 @@ export interface SessionsListRequestMessage extends WSMessage {
   type: 'sessions_list_request';
   payload: {
     correlationId: string;
+    /** Only return sessions modified within this many ms. Omit for all sessions. */
+    maxAgeMs?: number;
   };
 }
 

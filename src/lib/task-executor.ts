@@ -6,7 +6,7 @@
  */
 
 import { homedir } from 'node:os';
-import type { Task, TaskStatus, ProviderType } from '../types.js';
+import type { Task, TaskStatus, ProviderType, HpcCapability } from '../types.js';
 import type { WebSocketClient } from './websocket-client.js';
 import { createProviderAdapter, type ProviderAdapter } from '../providers/index.js';
 import { ClaudeSdkAdapter } from '../providers/claude-sdk-adapter.js';
@@ -47,6 +47,7 @@ export interface TaskExecutorOptions {
   allowNonGit?: boolean; // Allow execution in non-git directories without prompting
   useSandbox?: boolean; // Always use sandbox mode
   maxSandboxSize?: number; // Max sandbox size in bytes
+  hpcCapability?: HpcCapability | null; // Pre-classified HPC info from startup detection
 }
 
 export class TaskExecutor {
@@ -64,6 +65,7 @@ export class TaskExecutor {
   private useSandbox: boolean;
   private maxSandboxSize: number;
   private gitAvailable: boolean = false;
+  private hpcCapability: HpcCapability | null;
 
   // Safety tracking
   private tasksByDirectory: Map<string, Set<string>> = new Map(); // workdir -> taskIds
@@ -79,6 +81,7 @@ export class TaskExecutor {
     this.allowNonGit = options.allowNonGit ?? false;
     this.useSandbox = options.useSandbox ?? false;
     this.maxSandboxSize = options.maxSandboxSize ?? 100 * 1024 * 1024; // 100MB
+    this.hpcCapability = options.hpcCapability ?? null;
     this.jobMonitor = new SlurmJobMonitor(options.wsClient);
 
     // Check git availability on startup
@@ -209,6 +212,75 @@ export class TaskExecutor {
     }
 
     return false;
+  }
+
+  /**
+   * Clean up a completed task's worktree and branch.
+   * Called when the server sends a reset/re-execute command.
+   */
+  async cleanupTask(taskId: string, branchName?: string): Promise<void> {
+    console.log(`[executor] Task ${taskId}: cleanup requested${branchName ? ` (branch: ${branchName})` : ''}`);
+
+    // If the task is still running, cancel it first
+    const running = this.runningTasks.get(taskId);
+    if (running) {
+      console.log(`[executor] Task ${taskId}: cancelling running task before cleanup`);
+      running.abortController.abort();
+    }
+
+    // Find and clean up worktree for this branch
+    if (branchName) {
+      try {
+        const { execSync } = await import('node:child_process');
+        // Find worktrees that use this branch
+        const worktreeList = execSync('git worktree list --porcelain', {
+          encoding: 'utf-8',
+          timeout: 10_000,
+        });
+
+        let worktreePath: string | undefined;
+        let currentPath: string | undefined;
+        for (const line of worktreeList.split('\n')) {
+          if (line.startsWith('worktree ')) {
+            currentPath = line.slice('worktree '.length).trim();
+          } else if (line.startsWith('branch ') && line.includes(branchName)) {
+            worktreePath = currentPath;
+            break;
+          }
+        }
+
+        if (worktreePath) {
+          console.log(`[executor] Task ${taskId}: removing worktree at ${worktreePath}`);
+          try {
+            execSync(`git worktree remove --force "${worktreePath}"`, { encoding: 'utf-8', timeout: 30_000 });
+          } catch {
+            // Force remove directory if git worktree remove fails
+            execSync(`rm -rf "${worktreePath}"`, { encoding: 'utf-8', timeout: 10_000 });
+            execSync('git worktree prune', { encoding: 'utf-8', timeout: 10_000 });
+          }
+          console.log(`[executor] Task ${taskId}: worktree removed`);
+        }
+
+        // Delete local branch
+        try {
+          execSync(`git branch -D "${branchName}"`, { encoding: 'utf-8', timeout: 10_000 });
+          console.log(`[executor] Task ${taskId}: local branch ${branchName} deleted`);
+        } catch {
+          console.log(`[executor] Task ${taskId}: local branch ${branchName} not found or already deleted`);
+        }
+
+        // Delete remote branch
+        try {
+          execSync(`git push origin --delete "${branchName}"`, { encoding: 'utf-8', timeout: 30_000 });
+          console.log(`[executor] Task ${taskId}: remote branch ${branchName} deleted`);
+        } catch {
+          console.log(`[executor] Task ${taskId}: remote branch ${branchName} not found or already deleted`);
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`[executor] Task ${taskId}: cleanup failed: ${msg}`);
+      }
+    }
   }
 
   /**
@@ -691,15 +763,34 @@ export class TaskExecutor {
 
       // Delivery-mode-aware result handling
       const deliveryMode = task.deliveryMode ?? 'pr';
-      // Build PR title with short hex prefix for linking back to Astro app
-      const rawTitle = task.title || task.prompt.slice(0, 100);
+      // Build PR title: prefer summary.workCompleted (agent knows what it did),
+      // fall back to static task title
+      const summary = result.summary;
+      if (summary) {
+        console.log(`[executor] Task ${task.id}: summary available — status=${summary.status}, workCompleted=${!!summary.workCompleted}, executiveSummary=${!!summary.executiveSummary}, keyFindings=${summary.keyFindings?.length ?? 0}, filesChanged=${summary.filesChanged?.length ?? 0}`);
+      } else {
+        console.warn(`[executor] Task ${task.id}: no summary available for PR body`);
+      }
+      const rawTitle = summary?.workCompleted || task.title || task.prompt.slice(0, 100);
       const prTitle = task.shortProjectId && task.shortNodeId
         ? `[${task.shortProjectId}/${task.shortNodeId}] ${rawTitle}`
         : rawTitle;
       if (prepared.branchName && result.status === 'completed') {
-        // Build PR body with Astro link and issue reference
+        // Build PR body: enrich with summary data when available
         const prBodyParts: string[] = [];
-        if (task.description || task.prompt) {
+        if (summary) {
+          // Use structured summary for a richer PR description
+          prBodyParts.push(`## Summary\n\n${summary.workCompleted}`);
+          if (summary.executiveSummary) {
+            prBodyParts.push(`## Overview\n\n${summary.executiveSummary}`);
+          }
+          if (summary.keyFindings.length > 0) {
+            prBodyParts.push(`## Changes\n\n${summary.keyFindings.map(f => `- ${f}`).join('\n')}`);
+          }
+          if (summary.filesChanged.length > 0) {
+            prBodyParts.push(`## Files Changed\n\n${summary.filesChanged.map(f => `- \`${f}\``).join('\n')}`);
+          }
+        } else if (task.description || task.prompt) {
           prBodyParts.push(`## Task\n\n${task.description || task.prompt.slice(0, 500)}`);
         }
         if (task.astroBaseUrl && task.projectId && task.planNodeId) {
@@ -733,17 +824,20 @@ export class TaskExecutor {
               taskTitle: prTitle,
               taskDescription: task.description || task.prompt.slice(0, 500),
               skipPR: true,
+              baseBranch: prepared.baseBranch,
             });
             result.branchName = prResult.branchName;
             if (prResult.error) {
-              // Push failure is a task failure for 'push' mode
-              result.status = 'failed';
-              result.error = `Push delivery failed: ${prResult.error}`;
+              // Delivery failure — don't override execution status
+              result.deliveryStatus = 'failed';
+              result.deliveryError = `Push delivery failed: ${prResult.error}`;
               console.error(`[executor] Task ${task.id}: push delivery failed: ${prResult.error}`);
             } else if (prResult.pushed) {
+              result.deliveryStatus = 'success';
               keepBranch = true;
               console.log(`[executor] Task ${task.id}: branch pushed (${prepared.branchName})`);
             } else {
+              result.deliveryStatus = 'skipped';
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           } else {
@@ -754,17 +848,19 @@ export class TaskExecutor {
               taskTitle: prTitle,
               taskDescription: task.description || task.prompt.slice(0, 500),
               body: prBody,
+              baseBranch: prepared.baseBranch,
             });
             result.branchName = prResult.branchName;
             if (prResult.prUrl) {
               result.prUrl = prResult.prUrl;
               result.prNumber = prResult.prNumber;
+              result.deliveryStatus = 'success';
               keepBranch = true;
               console.log(`[executor] Task ${task.id}: PR created at ${prResult.prUrl}`);
             } else if (prResult.error) {
-              // PR delivery failure is a task failure for 'pr' mode
-              result.status = 'failed';
-              result.error = `PR delivery failed: ${prResult.error}`;
+              // Delivery failure — don't override execution status
+              result.deliveryStatus = 'failed';
+              result.deliveryError = `PR delivery failed: ${prResult.error}`;
               keepBranch = prResult.pushed ?? false; // Keep branch if it was pushed
               console.error(`[executor] Task ${task.id}: PR delivery failed: ${prResult.error}`);
             } else {
@@ -774,15 +870,34 @@ export class TaskExecutor {
         } catch (prError) {
           const prMsg = prError instanceof Error ? prError.message : String(prError);
           console.error(`[executor] Task ${task.id}: delivery (${deliveryMode}) failed: ${prMsg}`);
-          // For pr/push modes, delivery failures are task failures
-          if (deliveryMode === 'pr' || deliveryMode === 'push') {
-            result.status = 'failed';
-            result.error = `Delivery failed: ${prMsg}`;
-          }
+          // Delivery failure — don't override execution status
+          result.deliveryStatus = 'failed';
+          result.deliveryError = `Delivery failed: ${prMsg}`;
         }
       }
 
-      console.log(`[executor] Task ${task.id}: completed with status=${result.status}${result.error ? ` error=${result.error}` : ''}`);
+      // PR data extraction: prefer structured summary (agent reports via follow-up turn),
+      // fall back to regex scanning output for backward compatibility.
+      if (!result.prUrl) {
+        if (summary?.prUrl && summary?.prNumber) {
+          result.prUrl = summary.prUrl;
+          result.prNumber = summary.prNumber;
+          console.log(`[executor] Task ${task.id}: PR extracted from summary: ${summary.prUrl}`);
+        } else if (result.output) {
+          const prMatch = result.output.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/);
+          if (prMatch) {
+            result.prUrl = prMatch[0];
+            result.prNumber = parseInt(prMatch[1], 10);
+            console.log(`[executor] Task ${task.id}: PR extracted from output via regex: ${result.prUrl}`);
+          }
+        }
+      }
+      // Branch name from summary (if agent worked on a branch but delivery didn't capture it)
+      if (!result.branchName && summary?.branchName) {
+        result.branchName = summary.branchName;
+      }
+
+      console.log(`[executor] Task ${task.id}: completed with status=${result.status}${result.deliveryStatus ? ` delivery=${result.deliveryStatus}` : ''}${result.error ? ` error=${result.error}` : ''}`);
 
       // Check if there are tracked Slurm jobs still running for this task.
       // If so, don't send the final result yet — let the job monitor handle it.
@@ -845,6 +960,7 @@ export class TaskExecutor {
   ): Promise<{
     workingDirectory: string;
     branchName?: string;
+    baseBranch?: string;
     cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
   }> {
     // Per-task explicit opt-out: user consciously chose to skip worktree
@@ -915,6 +1031,7 @@ export class TaskExecutor {
         shortProjectId: task.shortProjectId,
         shortNodeId: task.shortNodeId,
         agentDir: task.agentDir,
+        baseBranch: task.baseBranch,
         stdout: stream.stdout,
         stderr: stream.stderr,
       });
@@ -938,8 +1055,8 @@ export class TaskExecutor {
       return cached;
     }
 
-    // Create new adapter
-    const adapter = createProviderAdapter(type);
+    // Create new adapter — pass pre-classified HPC capability to avoid runtime detection
+    const adapter = createProviderAdapter(type, this.hpcCapability);
     if (!adapter) {
       return null;
     }

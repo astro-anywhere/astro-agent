@@ -273,6 +273,8 @@ export async function pushAndCreatePR(
     autoCommit?: boolean;
     /** Override the default PR body */
     body?: string;
+    /** Target branch for PR base — avoids re-detecting (should match what worktree was created from) */
+    baseBranch?: string;
   },
 ): Promise<PRResult> {
   const result: PRResult = { branchName: options.branchName };
@@ -292,8 +294,8 @@ export async function pushAndCreatePR(
     return result;
   }
 
-  // Get default branch: prefer config, fall back to auto-detection
-  const baseBranch = await readBaseBranchFromConfig(gitRoot) ?? await getDefaultBranch(gitRoot);
+  // Priority: caller-provided baseBranch > config file > auto-detection
+  const baseBranch = options.baseBranch ?? await readBaseBranchFromConfig(gitRoot) ?? await getDefaultBranch(gitRoot);
 
   // Auto-commit any uncommitted changes the agent left behind (opt-in, default true)
   if (options.autoCommit !== false) {

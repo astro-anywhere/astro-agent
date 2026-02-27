@@ -20,6 +20,8 @@ export interface WorktreeOptions {
   /** Short hex ID from nodeId (6 chars) — used for readable branch/worktree names */
   shortNodeId?: string;
   agentDir?: string;
+  /** Target branch from dispatch — takes priority over .astro/config.json and auto-detection */
+  baseBranch?: string;
   stdout?: (data: string) => void;
   stderr?: (data: string) => void;
 }
@@ -27,6 +29,8 @@ export interface WorktreeOptions {
 export interface WorktreeSetup {
   workingDirectory: string;
   branchName: string;
+  /** The base branch the worktree was created from (e.g., 'main') */
+  baseBranch: string;
   cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
 }
 
@@ -42,6 +46,7 @@ export async function createWorktree(
     shortProjectId,
     shortNodeId,
     agentDir,
+    baseBranch: dispatchBaseBranch,
     stdout,
     stderr,
   } = options;
@@ -100,8 +105,8 @@ export async function createWorktree(
     // Non-fatal: proceed with potentially stale refs
   }
 
-  // Use baseBranch from config (set during repo setup), fall back to auto-detection
-  const defaultBranch = await readBaseBranch(gitRoot, agentDirName) ?? await getDefaultBranch(gitRoot);
+  // Priority: dispatch-provided baseBranch > config file > auto-detection
+  const defaultBranch = dispatchBaseBranch ?? await readBaseBranch(gitRoot, agentDirName) ?? await getDefaultBranch(gitRoot);
 
   // Create worktree from origin/<defaultBranch> — NOT from HEAD.
   // Using HEAD is dangerous because it could be on a stale task branch
@@ -170,6 +175,7 @@ export async function createWorktree(
   return {
     workingDirectory: worktreeWorkingDirectory,
     branchName,
+    baseBranch: defaultBranch,
     cleanup: async (options?: { keepBranch?: boolean }) => {
       await cleanupWorktree(gitRoot, worktreePath, branchName, options?.keepBranch);
     },

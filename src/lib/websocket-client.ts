@@ -78,6 +78,7 @@ export interface WebSocketClientOptions {
   onTaskCancel?: (taskId: string) => void;
   onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean) => void;
   onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
+  onTaskCleanup?: (taskId: string, branchName?: string) => void;
   onFileList?: (path: string, correlationId: string) => void;
   onDirectoryList?: (path: string, correlationId: string) => void;
   onCreateDirectory?: (parentPath: string, name: string, correlationId: string) => void;
@@ -86,9 +87,16 @@ export interface WebSocketClientOptions {
   onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
   onBranchList?: (payload: BranchListRequestMessage['payload']) => void;
   onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
-  onSessionsList?: (correlationId: string) => void;
+  onSessionsList?: (correlationId: string, maxAgeMs?: number) => void;
   version?: string;
   wsToken?: string;
+}
+
+/** Cleanup message: remove worktree + branch for a previously executed task */
+interface TaskCleanupMessage {
+  type: 'task_cleanup';
+  timestamp: string;
+  payload: { taskId: string; branchName?: string };
 }
 
 type IncomingMessage =
@@ -96,6 +104,7 @@ type IncomingMessage =
   | HeartbeatAckMessage
   | TaskDispatchMessage
   | TaskCancelMessage
+  | TaskCleanupMessage
   | TaskSteerIncomingMessage
   | TaskApprovalResponseMessage
   | TaskSafetyDecisionMessage
@@ -134,6 +143,7 @@ export class WebSocketClient {
   private onTaskCancel?: (taskId: string) => void;
   private onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean) => void;
   private onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
+  private onTaskCleanup?: (taskId: string, branchName?: string) => void;
   private onFileList?: (path: string, correlationId: string) => void;
   private onDirectoryList?: (path: string, correlationId: string) => void;
   private onCreateDirectory?: (parentPath: string, name: string, correlationId: string) => void;
@@ -142,7 +152,7 @@ export class WebSocketClient {
   private onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
   private onBranchList?: (payload: BranchListRequestMessage['payload']) => void;
   private onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
-  private onSessionsList?: (correlationId: string) => void;
+  private onSessionsList?: (correlationId: string, maxAgeMs?: number) => void;
 
   constructor(options: WebSocketClientOptions) {
     this.runnerId = options.runnerId;
@@ -157,6 +167,7 @@ export class WebSocketClient {
     this.onTaskCancel = options.onTaskCancel;
     this.onTaskSteer = options.onTaskSteer;
     this.onTaskSafetyDecision = options.onTaskSafetyDecision;
+    this.onTaskCleanup = options.onTaskCleanup;
     this.onFileList = options.onFileList;
     this.onDirectoryList = options.onDirectoryList;
     this.onCreateDirectory = options.onCreateDirectory;
@@ -747,6 +758,9 @@ export class WebSocketClient {
       case 'task_cancel':
         this.handleTaskCancel(message);
         break;
+      case 'task_cleanup':
+        this.handleTaskCleanup(message);
+        break;
       case 'task_steer':
         this.handleTaskSteer(message as unknown as TaskSteerIncomingMessage);
         break;
@@ -853,6 +867,12 @@ export class WebSocketClient {
     this.activeTasks.delete(taskId);
     this.emitEvent({ type: 'task_cancelled', taskId });
     this.onTaskCancel?.(taskId);
+  }
+
+  private handleTaskCleanup(message: { type: 'task_cleanup'; timestamp: string; payload: { taskId: string; branchName?: string } }): void {
+    const { taskId, branchName } = message.payload;
+    console.log(`[ws-client] Received cleanup request for task ${taskId}${branchName ? ` branch=${branchName}` : ''}`);
+    this.onTaskCleanup?.(taskId, branchName);
   }
 
   private handleTaskSteer(message: TaskSteerIncomingMessage): void {
@@ -1052,7 +1072,7 @@ export class WebSocketClient {
   }
 
   private handleSessionsListRequest(message: import('../types.js').SessionsListRequestMessage): void {
-    this.onSessionsList?.(message.payload.correlationId);
+    this.onSessionsList?.(message.payload.correlationId, message.payload.maxAgeMs);
   }
 
   /**

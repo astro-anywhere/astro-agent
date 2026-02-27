@@ -5,10 +5,28 @@
  */
 
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { promisify } from 'node:util';
 import type { SlurmInfo, SlurmPartitionDetail } from '../types.js';
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Fast synchronous check: is this plausibly a SLURM machine?
+ * Checks for common SLURM env vars or sinfo on PATH without spawning a process.
+ */
+function isLikelySlurmMachine(): boolean {
+  // SLURM sets these env vars on login nodes and compute nodes
+  if (process.env.SLURM_CONF || process.env.SLURM_CLUSTER_NAME || process.env.SLURM_ROOT) {
+    return true;
+  }
+  // Check common sinfo locations without spawning `which`
+  const pathDirs = (process.env.PATH || '').split(':');
+  for (const dir of pathDirs) {
+    if (dir && existsSync(`${dir}/sinfo`)) return true;
+  }
+  return false;
+}
 
 /**
  * Detect Slurm and gather cluster information
@@ -21,23 +39,21 @@ export async function detectSlurm(): Promise<SlurmInfo> {
     qosLevels: [],
   };
 
-  // Check if sinfo is available
-  try {
-    await execFileAsync('which', ['sinfo'], { timeout: 5000 });
-    info.available = true;
-  } catch {
+  // Fast bail-out: skip child process spawning on non-SLURM machines
+  if (!isLikelySlurmMachine()) {
     return info;
   }
 
-  // Get Slurm version
+  // Verify sinfo actually works and get version in one call
   try {
     const { stdout } = await execFileAsync('sinfo', ['--version'], { timeout: 5000 });
+    info.available = true;
     const match = stdout.match(/slurm\s+(\d+\.\d+\.\d+)/);
     if (match) {
       info.version = match[1];
     }
   } catch {
-    // Version detection failed
+    return info;
   }
 
   // Get cluster name

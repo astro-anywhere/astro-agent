@@ -355,6 +355,11 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     onTaskCancel: (taskId: string) => {
       taskExecutor.cancelTask(taskId);
     },
+    onTaskCleanup: (taskId: string, branchName?: string) => {
+      taskExecutor.cleanupTask(taskId, branchName).catch((error) => {
+        log('error', `Failed to cleanup task ${taskId}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+      });
+    },
     onTaskSafetyDecision: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => {
       log('info', `Safety decision for task ${taskId}: ${decision}`, logLevel);
       taskExecutor.handleSafetyDecision(taskId, decision).catch((error) => {
@@ -833,8 +838,8 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         });
       }
     },
-    onSessionsList: (correlationId: string) => {
-      log('debug', 'Sessions list request received', logLevel);
+    onSessionsList: (correlationId: string, maxAgeMs?: number) => {
+      log('debug', `Sessions list request received (maxAge=${maxAgeMs ?? 'all'})`, logLevel);
       try {
         const claudeDir = join(homedir(), '.claude', 'projects');
         if (!existsSync(claudeDir)) {
@@ -842,14 +847,15 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           return;
         }
 
+        // Cutoff timestamp: only include files modified after this time
+        const cutoff = maxAgeMs ? Date.now() - maxAgeMs : 0;
+
         const sessions: import('../types.js').ClaudeCodeSessionInfo[] = [];
         const projectDirs = readdirSync(claudeDir, { withFileTypes: true })
           .filter(d => d.isDirectory());
 
         for (const projDir of projectDirs) {
           const projPath = join(claudeDir, projDir.name);
-          // Decode cwd from directory name: dashes replace path separators
-          // e.g. "-home-user-myproject" → "/home/user/myproject"
           const cwd = projDir.name.replace(/^-/, '/').replace(/-/g, '/');
 
           let jsonlFiles: string[];
@@ -864,33 +870,66 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
               const stat = statSync(filePath);
               // Skip tiny files (likely empty sessions)
               if (stat.size < 100) continue;
+              // Skip files older than cutoff (fast mtime check, no content read)
+              if (cutoff && stat.mtimeMs < cutoff) continue;
 
-              // Read first few lines to extract metadata
+              // Extract metadata from head + last user messages from tail
               const content = readFileSync(filePath, 'utf-8');
-              const firstNewline = content.indexOf('\n');
-              const secondNewline = firstNewline > -1 ? content.indexOf('\n', firstNewline + 1) : -1;
-              // Parse first user message for summary
-              let summary = '';
               let firstPrompt = '';
+              let lastUserMsg = '';
+              let secondLastUserMsg = '';
               let gitBranch = '';
               let customTitle = '';
 
-              // Check first few lines for metadata
-              const linesToCheck = secondNewline > -1 ? content.slice(0, secondNewline) : content.slice(0, 2000);
-              for (const line of linesToCheck.split('\n')) {
-                if (!line.trim()) continue;
+              // Helper: extract user text from entry (any text, no filtering)
+              const getUserText = (entry: Record<string, unknown>): string | null => {
+                if (entry.type !== 'user' || !(entry.message as Record<string, unknown>)?.content) return null;
+                const msg = entry.message as Record<string, unknown>;
+                const textContent = Array.isArray(msg.content)
+                  ? (msg.content as Array<{ type: string; text?: string }>).find((c) => c.type === 'text')?.text || ''
+                  : String(msg.content);
+                return textContent.trim() || null;
+              };
+
+              // Read first ~10 lines for metadata + first prompt
+              const lines = content.split('\n');
+              for (let li = 0; li < Math.min(lines.length, 10); li++) {
+                if (!lines[li].trim()) continue;
                 try {
-                  const entry = JSON.parse(line);
-                  if (entry.type === 'user' && entry.message?.content) {
-                    const textContent = Array.isArray(entry.message.content)
-                      ? entry.message.content.find((c: { type: string }) => c.type === 'text')?.text || ''
-                      : String(entry.message.content);
-                    if (!firstPrompt) firstPrompt = textContent.slice(0, 200);
-                    if (!summary) summary = textContent.slice(0, 100);
-                  }
+                  const entry = JSON.parse(lines[li]);
                   if (entry.gitBranch && !gitBranch) gitBranch = entry.gitBranch;
                   if (entry.customTitle) customTitle = entry.customTitle;
-                } catch { /* skip unparseable lines */ }
+                  if (!firstPrompt) {
+                    const text = getUserText(entry);
+                    if (text) firstPrompt = text.slice(0, 200);
+                  }
+                } catch { /* skip */ }
+              }
+
+              // Read last ~16KB to find last two user messages
+              const tailStart = Math.max(0, content.length - 16384);
+              const tailLines = content.slice(tailStart).split('\n');
+              for (let li = tailLines.length - 1; li >= 0; li--) {
+                if (!tailLines[li].trim()) continue;
+                try {
+                  const entry = JSON.parse(tailLines[li]);
+                  const text = getUserText(entry);
+                  if (text) {
+                    if (!lastUserMsg) { lastUserMsg = text.slice(0, 200); }
+                    else if (!secondLastUserMsg) { secondLastUserMsg = text.slice(0, 200); break; }
+                  }
+                } catch { /* skip */ }
+              }
+
+              // Summary: use second-to-last user msg if last is noisy, else last, else first
+              const isNoisy = (t: string) => /^\s*\[/.test(t) || /^\s*</.test(t) || t.trim().length < 5;
+              let summary = '';
+              if (lastUserMsg && !isNoisy(lastUserMsg)) {
+                summary = lastUserMsg.slice(0, 100);
+              } else if (secondLastUserMsg && !isNoisy(secondLastUserMsg)) {
+                summary = secondLastUserMsg.slice(0, 100);
+              } else {
+                summary = (lastUserMsg || firstPrompt).slice(0, 100);
               }
 
               sessions.push({
@@ -899,7 +938,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
                 lastModified: stat.mtimeMs,
                 fileSize: stat.size,
                 customTitle,
-                firstPrompt,
+                firstPrompt: firstPrompt || lastUserMsg,
                 gitBranch,
                 cwd,
               });
@@ -912,13 +951,16 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         const result = sessions.slice(0, 50);
 
         wsClient.sendSessionsListResponse(correlationId, result);
-        log('debug', `Sent ${result.length} sessions`, logLevel);
+        log('debug', `Sent ${result.length} sessions (scanned with cutoff)`, logLevel);
       } catch (error) {
         log('warn', `Failed to list sessions: ${error instanceof Error ? error.message : String(error)}`, logLevel);
         wsClient.sendSessionsListResponse(correlationId, [], error instanceof Error ? error.message : String(error));
       }
     },
   });
+
+  // Extract HPC capability from detected providers (avoids re-detecting at query time)
+  const hpcCapability = providers.find(p => p.hpcCapability)?.hpcCapability ?? null;
 
   // Create task executor
   taskExecutor = new TaskExecutor({
@@ -928,6 +970,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     allowNonGit: options.allowNonGit,
     useSandbox: options.useSandbox,
     maxSandboxSize: options.maxSandboxSize,
+    hpcCapability,
   });
 
   // Handle graceful shutdown

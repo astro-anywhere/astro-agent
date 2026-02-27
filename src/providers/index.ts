@@ -9,7 +9,7 @@ export { CodexAdapter } from './codex-adapter.js';
 export { OpenClawAdapter } from './openclaw-adapter.js';
 export { OpenCodeAdapter } from './opencode-adapter.js';
 
-import type { ProviderType } from '../types.js';
+import type { ProviderType, HpcCapability } from '../types.js';
 import type { ProviderAdapter } from './base-adapter.js';
 import { ClaudeCodeAdapter } from './claude-code-adapter.js';
 import { ClaudeSdkAdapter } from './claude-sdk-adapter.js';
@@ -24,14 +24,17 @@ export type ExtendedProviderType = ProviderType | 'claude-sdk';
  * Create a provider adapter by type.
  * For 'claude-code', prefers the SDK adapter (in-process, supports steering)
  * and falls back to the CLI adapter.
+ *
+ * @param hpcCapability Pre-classified HPC info from startup detection.
+ *   Passed to ClaudeSdkAdapter to avoid re-running SLURM detection at query time.
  */
-export function createProviderAdapter(type: ProviderType | ExtendedProviderType): ProviderAdapter | null {
+export function createProviderAdapter(type: ProviderType | ExtendedProviderType, hpcCapability?: HpcCapability | null): ProviderAdapter | null {
   switch (type) {
     case 'claude-code':
       // Prefer SDK adapter over CLI adapter for claude-code type
-      return new ClaudeSdkAdapter();
+      return new ClaudeSdkAdapter(hpcCapability);
     case 'claude-sdk':
-      return new ClaudeSdkAdapter();
+      return new ClaudeSdkAdapter(hpcCapability);
     case 'codex':
       return new CodexAdapter();
     case 'openclaw':

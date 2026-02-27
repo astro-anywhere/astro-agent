@@ -164,8 +164,7 @@ describe('agent-runner worktree (real git)', { timeout: 30_000 }, () => {
       join(repoDir, '.gitignore'),
       'utf-8',
     );
-    expect(gitignoreContent).toContain('.myagent/worktrees/');
-    expect(gitignoreContent).toContain('.myagent/cache/');
+    expect(gitignoreContent).toContain('.myagent/');
 
     await setup.cleanup();
   });

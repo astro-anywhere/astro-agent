@@ -424,6 +424,7 @@ ${fileList}
 Respond with ONLY a JSON object in this exact format (no markdown fences, no extra text):
 {
   "workCompleted": "1-2 sentence summary of what was accomplished",
+  "executiveSummary": "1-2 paragraph executive summary for a PR description: what was done, the approach taken, key design decisions, and any trade-offs. Write in a professional tone suitable for code reviewers.",
   "filesChanged": ["list", "of", "changed", "file", "paths"],
   "status": "${context.status === 'success' ? 'success' : 'failure'}",
   "followUps": ["suggested follow-up task if any"]
