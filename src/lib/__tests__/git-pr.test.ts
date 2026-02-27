@@ -159,7 +159,7 @@ describe('pushBranch', () => {
 
     const result = await pushBranch('/repo/worktree', 'feature-branch');
 
-    expect(result).toBe(true);
+    expect(result).toEqual({ ok: true });
     expect(mockExecFileAsync).toHaveBeenCalledWith(
       'git',
       ['-C', '/repo/worktree', 'push', '-u', 'origin', 'feature-branch'],
@@ -174,7 +174,8 @@ describe('pushBranch', () => {
 
     const result = await pushBranch('/repo/worktree', 'feature-branch');
 
-    expect(result).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.error).toBeDefined();
   });
 });
 

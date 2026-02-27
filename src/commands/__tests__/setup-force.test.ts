@@ -32,8 +32,8 @@ describe('setup remote agent relaunch', () => {
     const setupKillCmd = 'pkill -f "[a]stro-agent start" 2>/dev/null || true';
     const launchKillCmd = 'pkill -f "astro-agent start" 2>/dev/null || true';
 
-    // Both commands target the same process pattern
-    expect(setupKillCmd).toContain('astro-agent start');
+    // Both commands target the same process pattern (setup uses bracket trick)
+    expect(setupKillCmd).toContain('[a]stro-agent start');
     expect(launchKillCmd).toContain('astro-agent start');
   });
 });
