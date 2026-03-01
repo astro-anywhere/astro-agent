@@ -756,10 +756,33 @@ export class TaskExecutor {
     try {
       // Notify task started
       this.wsClient.sendTaskStatus(task.id, 'running', 0, 'Starting');
-      console.log(`[executor] Task ${task.id}: executing with ${adapter.name}...`);
 
-      // Execute the task
-      const result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
+      // Resume existing Claude session if resumeSessionId is provided
+      const canResume = taskWithWorkspace.resumeSessionId
+        && adapter instanceof ClaudeSdkAdapter
+        && isTextOnly;
+
+      let result: Awaited<ReturnType<typeof adapter.execute>>;
+      if (canResume) {
+        console.log(`[executor] Task ${task.id}: resuming session ${taskWithWorkspace.resumeSessionId} with ${adapter.name}...`);
+        const resumeResult = await adapter.resumeTask(
+          taskWithWorkspace.id,
+          taskWithWorkspace.prompt,
+          taskWithWorkspace.workingDirectory || process.cwd(),
+          taskWithWorkspace.resumeSessionId!,
+          stream,
+          abortController.signal,
+        );
+        result = {
+          taskId: taskWithWorkspace.id,
+          status: resumeResult.success ? 'completed' : 'failed',
+          output: resumeResult.output,
+          error: resumeResult.error,
+        };
+      } else {
+        console.log(`[executor] Task ${task.id}: executing with ${adapter.name}...`);
+        result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
+      }
 
       // Delivery-mode-aware result handling
       const deliveryMode = task.deliveryMode ?? 'pr';
@@ -776,6 +799,7 @@ export class TaskExecutor {
         ? `[${task.shortProjectId}/${task.shortNodeId}] ${rawTitle}`
         : rawTitle;
       if (prepared.branchName && result.status === 'completed') {
+        this.wsClient.sendTaskStatus(task.id, 'running', 90, 'Delivering changes...');
         // Build PR body: enrich with summary data when available
         const prBodyParts: string[] = [];
         if (summary) {
@@ -818,6 +842,7 @@ export class TaskExecutor {
             keepBranch = true;
           } else if (deliveryMode === 'push') {
             // Push branch to remote, but don't create a PR — user creates PR manually
+            this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Pushing branch...');
             console.log(`[executor] Task ${task.id}: push mode, pushing branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
               branchName: prepared.branchName,
@@ -842,6 +867,7 @@ export class TaskExecutor {
             }
           } else {
             // 'pr' — push + create PR (existing behavior)
+            this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Creating pull request...');
             console.log(`[executor] Task ${task.id}: pr mode, attempting PR creation for branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
               branchName: prepared.branchName,
@@ -907,7 +933,8 @@ export class TaskExecutor {
         this.wsClient.sendTaskStatus(task.id, 'running', 80, `Waiting for ${pendingJobs.length} Slurm job(s): ${pendingJobs.join(', ')}`);
         // Don't send final result — the SlurmJobMonitor will send it when jobs finish
       } else {
-        // Send final result
+        // Send final status + result
+        this.wsClient.sendTaskStatus(task.id, 'completed', 100, 'Task complete');
         this.wsClient.sendTaskResult(result);
       }
     } catch (error) {

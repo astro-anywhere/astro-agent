@@ -162,7 +162,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       const isExecutionTask = !task.type || task.type === 'execution';
       if (isExecutionTask && result.success) {
         try {
-          stream.status('running', 95, 'Generating summary');
+          stream.status('running', 80, 'Generating summary');
           summary = await this.generateSummary(task.id, task.workingDirectory);
           if (summary) {
             console.log(`[claude-sdk] Task ${task.id}: summary generated — status=${summary.status}, executiveSummary=${summary.executiveSummary ? `${summary.executiveSummary.length} chars` : 'MISSING'}, keyFindings=${summary.keyFindings?.length ?? 0}`);
@@ -374,7 +374,18 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         ];
       }
 
-      const gen = query({ prompt: message, options });
+      // Wrap prompt in async iterable so isSingleUserTurn=false and stdin stays open for steering
+      const promptIterable = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: 'user' as const,
+            message: { role: 'user' as const, content: message },
+            parent_tool_use_id: null,
+            session_id: '',
+          };
+        },
+      };
+      const gen = query({ prompt: promptIterable, options });
 
       let output = '';
       let success = true;
@@ -591,15 +602,25 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     artifacts?: TaskArtifact[];
     metrics?: TaskResult['metrics'];
   }> {
+    // Chat tasks get read-only tools; summarize tasks stay text-only
+    const isChatTask = task.type === 'chat';
+    const chatAllowedTools = hasWorkdir
+      ? ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch']
+      : ['WebSearch', 'WebFetch'];
+
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
       maxTurns: task.maxTurns ?? 10,
-      permissionMode: 'plan',  // No tool execution — text generation only
-      tools: [],               // No built-in tools
+      permissionMode: isChatTask ? 'bypassPermissions' : 'plan',
+      ...(isChatTask ? {} : { tools: [] }),
       persistSession: true,
       ...(hasWorkdir ? { cwd: task.workingDirectory } : {}),
       env: { ...process.env, ...task.environment },
     };
+
+    if (isChatTask) {
+      (options as Record<string, unknown>).allowedTools = chatAllowedTools;
+    }
 
     if (task.systemPrompt) {
       (options as Record<string, unknown>).systemPrompt = task.systemPrompt;
@@ -621,7 +642,18 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     console.log(`[claude-sdk] Fast path: text-only task (type=${task.type}, model=${task.model ?? 'default'})`);
 
-    const gen = query({ prompt: effectivePrompt, options });
+    // Wrap prompt in async iterable so isSingleUserTurn=false and stdin stays open for steering
+    const promptIterable = {
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: 'user' as const,
+          message: { role: 'user' as const, content: effectivePrompt },
+          parent_tool_use_id: null,
+          session_id: '',
+        };
+      },
+    };
+    const gen = query({ prompt: promptIterable, options });
 
     let output = '';
     let success = true;
@@ -931,8 +963,19 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       queryPrompt = effectivePrompt;
     }
 
+    // Wrap prompt in async iterable so isSingleUserTurn=false and stdin stays open for steering
+    const promptIterable = {
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: 'user' as const,
+          message: { role: 'user' as const, content: queryPrompt },
+          parent_tool_use_id: null,
+          session_id: '',
+        };
+      },
+    };
     const gen = query({
-      prompt: queryPrompt,
+      prompt: promptIterable,
       options,
     });
 
@@ -941,6 +984,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     let errorMessage: string | undefined;
     const artifacts: TaskArtifact[] = [];
     let progress = 0;
+    let toolUseCount = 0;
     let resultMetrics: TaskResult['metrics'] | undefined;
 
     for await (const msg of gen) {
@@ -960,8 +1004,9 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
             output += block.text;
             stream.text(block.text);
           } else if (block.type === 'tool_use') {
-            // Emit structured tool use
-            progress = Math.min(progress + 10, 90);
+            // Emit structured tool use — logarithmic curve caps at 75% to reserve space for delivery phases
+            toolUseCount++;
+            progress = Math.min(Math.round(75 * Math.log10(toolUseCount + 1) / Math.log10(150)), 75);
             stream.status('running', progress, `Using tool: ${block.name}`);
             stream.toolUse(block.name, block.input);
 
@@ -1039,7 +1084,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
         if (msg.subtype === 'success') {
           success = true;
-          stream.status('completed', 100, 'Task completed successfully');
+          stream.status('running', 85, 'Agent work complete');
 
           // Capture structured output (produced when outputFormat is set)
           if (msgAny.structured_output) {

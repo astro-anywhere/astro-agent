@@ -133,6 +133,7 @@ export class WebSocketClient {
   private reconnectAttempts = 0;
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private heartbeatInterval: NodeJS.Timeout | null = null;
+  private tokenRefreshTimeout: NodeJS.Timeout | null = null;
   private isConnecting = false;
   private shouldReconnect = true;
   private activeTasks: Set<string> = new Set();
@@ -272,6 +273,57 @@ export class WebSocketClient {
     }
 
     return token;
+  }
+
+  /**
+   * Schedule a proactive token refresh before the current token expires.
+   * Refreshes at 80% of the token's lifetime so we never hit expiry while connected.
+   */
+  private scheduleTokenRefresh(): void {
+    this.cancelTokenRefresh();
+
+    const token = this.wsToken || configManager.getWsToken();
+    if (!token) return; // Dev mode, no token needed
+
+    try {
+      const decoded = jwt.decode(token) as { exp?: number } | null;
+      if (!decoded?.exp) return;
+
+      const now = Math.floor(Date.now() / 1000);
+      const expiresInSec = decoded.exp - now;
+      if (expiresInSec <= 0) return; // Already expired
+
+      // Refresh at 80% of lifetime (e.g., 48 min for a 60-min token), minimum 60s
+      const refreshInMs = Math.max(expiresInSec * 0.8, 60) * 1000;
+
+      console.log(`[ws-client] Token refresh scheduled in ${Math.round(refreshInMs / 1000 / 60)}min`);
+
+      this.tokenRefreshTimeout = setTimeout(async () => {
+        try {
+          console.log('[ws-client] Proactively refreshing token before expiry...');
+          const newToken = await this.refreshAccessToken();
+          this.wsToken = newToken;
+          console.log('[ws-client] ✅ Token refreshed, reconnecting with new token');
+          // Close gracefully — handleClose will trigger reconnect with the new token
+          if (this.ws?.readyState === WebSocket.OPEN) {
+            this.ws.close(1000, 'Token refresh');
+          }
+        } catch (error) {
+          console.error('[ws-client] ❌ Proactive token refresh failed:', error instanceof Error ? error.message : String(error));
+          // Retry in 5 minutes
+          this.tokenRefreshTimeout = setTimeout(() => this.scheduleTokenRefresh(), 5 * 60 * 1000);
+        }
+      }, refreshInMs);
+    } catch {
+      // Can't decode token, skip scheduling
+    }
+  }
+
+  private cancelTokenRefresh(): void {
+    if (this.tokenRefreshTimeout) {
+      clearTimeout(this.tokenRefreshTimeout);
+      this.tokenRefreshTimeout = null;
+    }
   }
 
   /**
@@ -610,6 +662,9 @@ export class WebSocketClient {
 
     // Start heartbeat
     this.startHeartbeat();
+
+    // Schedule proactive token refresh before expiry
+    this.scheduleTokenRefresh();
 
     this.emitEvent({ type: 'connected' });
   }
@@ -1173,6 +1228,7 @@ export class WebSocketClient {
 
   private cleanup(): void {
     this.stopHeartbeat();
+    this.cancelTokenRefresh();
 
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);

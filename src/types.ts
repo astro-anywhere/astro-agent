@@ -203,6 +203,9 @@ export interface Task {
     timestamp: string;
     nonce: string;
   };
+
+  /** Resume an existing Claude Code session by ID (provider session ID from session_init) */
+  resumeSessionId?: string;
 }
 
 /** Structured execution summary produced by the agent after task completion */
