@@ -264,8 +264,10 @@ export async function removeLingeringWorktrees(gitRoot: string, branchName: stri
  * If it doesn't exist, create it from origin/{defaultBranch} and push.
  * Idempotent — safe to call on every task dispatch.
  *
- * Note: Safe to race — if multiple tasks call this concurrently, only the
- * first push succeeds; others fail non-fatally on push (branch already exists).
+ * Note: In practice, concurrent calls for the same project are prevented by
+ * the per-project branch lock in task-executor.ts. The function is still
+ * internally idempotent as a secondary safety net — if called concurrently,
+ * only the first push succeeds; others fail non-fatally (branch already exists).
  */
 async function ensureProjectBranch(
   gitRoot: string,

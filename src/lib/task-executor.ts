@@ -794,27 +794,18 @@ export class TaskExecutor {
         : await this.prepareTaskWorkspace(normalizedTask, stream);
     } catch (prepErr) {
       // Release branch lock on workspace preparation failure to avoid deadlocking
-      // subsequent tasks in the same project (fix from PR #26)
+      // subsequent tasks in the same project (fix from PR #26).
+      // Note: processQueue() is NOT called here — the finally block in the outer
+      // try-catch handles queue draining for all exit paths, avoiding double-dequeue.
       if (branchLock) branchLock.release();
       this.runningTasks.delete(normalizedTask.id);
       this.wsClient.removeActiveTask(normalizedTask.id);
       this.untrackTaskDirectory(task);
-      this.processQueue();
       throw prepErr;
     }
     const taskWithWorkspace = { ...normalizedTask, workingDirectory: prepared.workingDirectory };
     runningTask.task = taskWithWorkspace;
     console.log(`[executor] Task ${task.id}: workspace prepared, cwd=${prepared.workingDirectory}`);
-
-    // Release the branch lock now that the worktree is created.
-    // The lock only needs to be held during worktree creation (branching from the
-    // project branch tip). Once each task has its own worktree, they can execute
-    // in parallel. The merge step (PR creation) has its own serialization.
-    if (branchLock) {
-      branchLock.release();
-      branchLock = undefined;
-      console.log(`[executor] Task ${task.id}: branch lock released after workspace prep`);
-    }
 
     // Execute with timeout
     const timeout = task.timeout ?? this.defaultTimeout;
@@ -1055,6 +1046,14 @@ export class TaskExecutor {
         }
         console.log(`[executor] Task ${task.id}: cleaning up sandbox`);
         await sandbox.cleanup();
+      }
+
+      // Release branch lock after execution + delivery (auto-merge) completes.
+      // The accumulative model requires the lock to be held through auto-merge
+      // so the next task branches from the updated project branch tip.
+      if (branchLock) {
+        branchLock.release();
+        console.log(`[executor] Task ${task.id}: branch lock released after delivery`);
       }
 
       // Untrack task from directory
