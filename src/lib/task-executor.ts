@@ -787,9 +787,21 @@ export class TaskExecutor {
 
     // Text-only tasks (plan/chat/summarize) without a working directory skip workspace prep
     const isTextOnly = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan';
-    const prepared = isTextOnly && !normalizedTask.workingDirectory
-      ? { workingDirectory: '', cleanup: async () => {} }
-      : await this.prepareTaskWorkspace(normalizedTask, stream);
+    let prepared: Awaited<ReturnType<typeof this.prepareTaskWorkspace>>;
+    try {
+      prepared = isTextOnly && !normalizedTask.workingDirectory
+        ? { workingDirectory: '', cleanup: async () => {} }
+        : await this.prepareTaskWorkspace(normalizedTask, stream);
+    } catch (prepErr) {
+      // Release branch lock on workspace preparation failure to avoid deadlocking
+      // subsequent tasks in the same project (fix from PR #26)
+      if (branchLock) branchLock.release();
+      this.runningTasks.delete(normalizedTask.id);
+      this.wsClient.removeActiveTask(normalizedTask.id);
+      this.untrackTaskDirectory(task);
+      this.processQueue();
+      throw prepErr;
+    }
     const taskWithWorkspace = { ...normalizedTask, workingDirectory: prepared.workingDirectory };
     runningTask.task = taskWithWorkspace;
     console.log(`[executor] Task ${task.id}: workspace prepared, cwd=${prepared.workingDirectory}`);
