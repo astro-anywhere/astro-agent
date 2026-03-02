@@ -987,7 +987,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     let toolUseCount = 0;
     let resultMetrics: TaskResult['metrics'] | undefined;
 
+    let turnIndex = 0;
+
     for await (const msg of gen) {
+      try {
       if (msg.type === 'system' && msg.subtype === 'init') {
         this.model = msg.model;
         const sessionId = (msg as unknown as Record<string, unknown>).session_id as string ?? '';
@@ -997,18 +1000,30 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         // Store the query instance for steering
         this.activeQueries.set(task.id, { query: gen, sessionId });
       } else if (msg.type === 'assistant') {
+        turnIndex++;
+        let textLength = 0;
+        let turnToolCount = 0;
+        const turnToolNames: string[] = [];
+
         // Stream assistant content blocks
         for (const block of msg.message.content) {
+          try {
           if (typeof block === 'string') continue;
           if (block.type === 'text') {
             output += block.text;
+            textLength += block.text.length;
             stream.text(block.text);
           } else if (block.type === 'tool_use') {
             // Emit structured tool use — logarithmic curve caps at 75% to reserve space for delivery phases
             toolUseCount++;
+            turnToolCount++;
+            turnToolNames.push(block.name);
             progress = Math.min(Math.round(75 * Math.log10(toolUseCount + 1) / Math.log10(150)), 75);
             stream.status('running', progress, `Using tool: ${block.name}`);
             stream.toolUse(block.name, block.input);
+
+            const inputSummary = JSON.stringify(block.input).slice(0, 200);
+            console.log(`[claude-sdk] Task ${task.id} tool: ${block.name} (input: ${inputSummary})`);
 
             // Record file operations as artifacts
             if (block.name === 'Write' || block.name === 'Edit') {
@@ -1026,21 +1041,30 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
               }
             }
           }
+          } catch (blockErr) {
+            console.error(`[claude-sdk] Task ${task.id} event processing error (continuing):`, blockErr);
+          }
         }
+
+        console.log(`[claude-sdk] Task ${task.id} turn ${turnIndex}: ${textLength} chars text, ${turnToolCount} tool calls [${turnToolNames.join(', ')}]`);
       } else if (msg.type === 'user') {
         // Tool results from the SDK
         for (const block of msg.message.content) {
+          try {
           if (typeof block === 'string') continue;
           if (block.type === 'tool_result') {
             const resultContent = typeof block.content === 'string'
               ? block.content
               : JSON.stringify(block.content);
             const isError = block.is_error ?? false;
+            const toolName = block.tool_use_id ?? 'unknown';
             stream.toolResult(
-              block.tool_use_id ?? 'unknown',
+              toolName,
               resultContent,
               !isError,
             );
+
+            console.log(`[claude-sdk] Task ${task.id} tool_result: ${toolName} success=${!isError} (${resultContent.length} chars)`);
 
             // Detect sbatch submissions for job tracking
             if (this.jobMonitor && typeof resultContent === 'string') {
@@ -1054,6 +1078,9 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
                 console.log(`[claude-sdk] Detected sbatch submission: job ${jobId}`);
               }
             }
+          }
+          } catch (blockErr) {
+            console.error(`[claude-sdk] Task ${task.id} event processing error (continuing):`, blockErr);
           }
         }
       } else if (msg.type === 'result') {
@@ -1109,7 +1136,14 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           errorMessage = `Task failed: ${msg.subtype}`;
           stream.status('failed', progress, errorMessage);
         }
+
+        const tokenSummary = usage ? `${usage.input_tokens ?? 0}+${usage.output_tokens ?? 0}` : 'N/A';
+        const costStr = totalCostUsd != null ? `$${totalCostUsd.toFixed(4)}` : 'N/A';
+        console.log(`[claude-sdk] Task ${task.id} completed: status=${success ? 'success' : 'failure'} turns=${numTurns ?? turnIndex} tokens=${tokenSummary} cost=${costStr}`);
         break;
+      }
+      } catch (err) {
+        console.error(`[claude-sdk] Task ${task.id} event processing error (continuing):`, err);
       }
     }
 
