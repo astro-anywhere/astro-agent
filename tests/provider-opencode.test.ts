@@ -1026,3 +1026,934 @@ describe('OpenCode native event parsing: provider-opencode', () => {
     })
   })
 })
+
+// ===========================================================================
+// Lifecycle tests — process spawning, abort, timeout, exit codes
+// ===========================================================================
+
+import { spawn as realSpawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
+import type { Readable, Writable } from 'node:stream'
+
+// Mock child_process.spawn
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal() as typeof import('node:child_process')
+  return {
+    ...actual,
+    spawn: vi.fn(),
+  }
+})
+
+// Import spawn after mocking
+import { spawn as mockedSpawn } from 'node:child_process'
+
+// ---------------------------------------------------------------------------
+// Mock ChildProcess factory
+// ---------------------------------------------------------------------------
+
+interface MockChildProcess extends EventEmitter {
+  stdin: MockWritable
+  stdout: MockReadable
+  stderr: MockReadable
+  pid: number
+  killed: boolean
+  kill: ReturnType<typeof vi.fn>
+}
+
+interface MockReadable extends EventEmitter {
+  setEncoding: ReturnType<typeof vi.fn>
+}
+
+interface MockWritable extends EventEmitter {
+  write: ReturnType<typeof vi.fn>
+  end: ReturnType<typeof vi.fn>
+}
+
+function createMockChildProcess(): MockChildProcess {
+  const stdin = Object.assign(new EventEmitter(), {
+    write: vi.fn(),
+    end: vi.fn(),
+  }) as MockWritable
+
+  const stdout = Object.assign(new EventEmitter(), {
+    setEncoding: vi.fn(),
+  }) as MockReadable
+
+  const stderr = Object.assign(new EventEmitter(), {
+    setEncoding: vi.fn(),
+  }) as MockReadable
+
+  const proc = Object.assign(new EventEmitter(), {
+    stdin,
+    stdout,
+    stderr,
+    pid: 12345,
+    killed: false,
+    kill: vi.fn((signal?: string) => {
+      proc.killed = true
+      return true
+    }),
+  }) as MockChildProcess
+
+  return proc
+}
+
+describe('OpenCode adapter lifecycle', () => {
+  let adapter: OpenCodeAdapter
+  let stream: TaskOutputStream
+  let mockProc: MockChildProcess
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    adapter = new OpenCodeAdapter()
+    stream = createMockStream()
+    mockProc = createMockChildProcess()
+
+    // Set up mock spawn to return our mock process
+    ;(mockedSpawn as ReturnType<typeof vi.fn>).mockReturnValue(mockProc)
+
+    // Mock isAvailable to bypass actual opencode detection
+    vi.spyOn(adapter, 'isAvailable').mockResolvedValue(true)
+    // Set the opencodePath directly via reflection
+    ;(adapter as unknown as { opencodePath: string }).opencodePath = '/usr/local/bin/opencode'
+  })
+
+  // =========================================================================
+  // 1. Process spawning with correct args
+  // =========================================================================
+
+  describe('process spawning with correct args', () => {
+    it('spawns opencode with run --print --output-format json', async () => {
+      const task = {
+        id: 'task-1',
+        prompt: 'Hello world',
+      }
+
+      const controller = new AbortController()
+
+      // Schedule process close
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(mockedSpawn).toHaveBeenCalledWith(
+        '/usr/local/bin/opencode',
+        ['run', '--print', '--output-format', 'json', 'Hello world'],
+        expect.objectContaining({
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }),
+      )
+    })
+
+    it('includes --model flag when task has model', async () => {
+      const task = {
+        id: 'task-2',
+        prompt: 'Test prompt',
+        model: 'claude-sonnet-4-20250514',
+      }
+
+      const controller = new AbortController()
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(mockedSpawn).toHaveBeenCalledWith(
+        '/usr/local/bin/opencode',
+        ['run', '--print', '--output-format', 'json', '--model', 'claude-sonnet-4-20250514', 'Test prompt'],
+        expect.anything(),
+      )
+    })
+
+    it('combines systemPrompt with prompt', async () => {
+      const task = {
+        id: 'task-3',
+        prompt: 'User question',
+        systemPrompt: 'You are a helpful assistant',
+      }
+
+      const controller = new AbortController()
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      const expectedPrompt = 'You are a helpful assistant\n\n---\n\nUser question'
+      expect(mockedSpawn).toHaveBeenCalledWith(
+        '/usr/local/bin/opencode',
+        expect.arrayContaining([expectedPrompt]),
+        expect.anything(),
+      )
+    })
+
+    it('uses task workingDirectory as cwd', async () => {
+      // Use a directory that actually exists
+      const task = {
+        id: 'task-4',
+        prompt: 'Test',
+        workingDirectory: process.cwd(),
+      }
+
+      const controller = new AbortController()
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(mockedSpawn).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          cwd: process.cwd(),
+        }),
+      )
+    })
+
+    it('rejects when workingDirectory does not exist', async () => {
+      // Use a path that definitely doesn't exist
+      const nonexistentPath = `/nonexistent-${Date.now()}-${Math.random()}/directory`
+      const task = {
+        id: 'task-5',
+        prompt: 'Test',
+        workingDirectory: nonexistentPath,
+      }
+
+      const controller = new AbortController()
+
+      const result = await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(result.status).toBe('failed')
+      expect(result.error).toContain('Working directory does not exist')
+    })
+  })
+
+  // =========================================================================
+  // 2. Environment variable passthrough
+  // =========================================================================
+
+  describe('environment variable passthrough', () => {
+    it('passes task.environment to spawn', async () => {
+      const task = {
+        id: 'task-env-1',
+        prompt: 'Test',
+        environment: {
+          CUSTOM_VAR: 'custom_value',
+          API_KEY: 'secret123',
+        },
+      }
+
+      const controller = new AbortController()
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(mockedSpawn).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({
+          env: expect.objectContaining({
+            CUSTOM_VAR: 'custom_value',
+            API_KEY: 'secret123',
+          }),
+        }),
+      )
+    })
+
+    it('merges task environment with process.env', async () => {
+      const task = {
+        id: 'task-env-2',
+        prompt: 'Test',
+        environment: {
+          NEW_VAR: 'new_value',
+        },
+      }
+
+      const controller = new AbortController()
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      const spawnCall = (mockedSpawn as ReturnType<typeof vi.fn>).mock.calls[0]
+      const passedEnv = spawnCall[2].env
+
+      // Should have process.env vars plus task vars
+      expect(passedEnv.NEW_VAR).toBe('new_value')
+      expect(passedEnv.PATH).toBeDefined() // From process.env
+    })
+
+    it('task environment overrides process.env', async () => {
+      // Temporarily set a process.env var
+      const originalPath = process.env.PATH
+      process.env.TEST_OVERRIDE = 'original'
+
+      const task = {
+        id: 'task-env-3',
+        prompt: 'Test',
+        environment: {
+          TEST_OVERRIDE: 'overridden',
+        },
+      }
+
+      const controller = new AbortController()
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      const spawnCall = (mockedSpawn as ReturnType<typeof vi.fn>).mock.calls[0]
+      const passedEnv = spawnCall[2].env
+
+      expect(passedEnv.TEST_OVERRIDE).toBe('overridden')
+
+      // Cleanup
+      delete process.env.TEST_OVERRIDE
+    })
+
+    it('works without task.environment', async () => {
+      const task = {
+        id: 'task-env-4',
+        prompt: 'Test',
+      }
+
+      const controller = new AbortController()
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      const spawnCall = (mockedSpawn as ReturnType<typeof vi.fn>).mock.calls[0]
+      const passedEnv = spawnCall[2].env
+
+      // Should still have process.env
+      expect(passedEnv.PATH).toBeDefined()
+    })
+  })
+
+  // =========================================================================
+  // 3. Abort/cancellation (SIGTERM then SIGKILL after 5s)
+  // =========================================================================
+
+  describe('abort/cancellation', () => {
+    it('sends SIGTERM on abort', async () => {
+      const task = { id: 'task-abort-1', prompt: 'Test' }
+      const controller = new AbortController()
+
+      // Don't emit 'close' immediately — we want to test abort
+      const executePromise = adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      // Wait for process to start
+      await new Promise((r) => setTimeout(r, 20))
+
+      // Abort
+      controller.abort()
+
+      // Verify SIGTERM was called
+      expect(mockProc.kill).toHaveBeenCalledWith('SIGTERM')
+
+      // Emit close to resolve the promise
+      mockProc.emit('close', null)
+      await executePromise
+    })
+
+    it('sends SIGKILL after 5s if not killed', async () => {
+      vi.useFakeTimers()
+
+      const task = { id: 'task-abort-2', prompt: 'Test' }
+      const controller = new AbortController()
+
+      // Reset killed flag to simulate process not dying from SIGTERM
+      mockProc.kill.mockImplementation((signal?: string) => {
+        // Don't set killed=true to simulate stubborn process
+        return true
+      })
+
+      const executePromise = adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      // Wait for event handlers to be set up
+      await vi.advanceTimersByTimeAsync(10)
+
+      // Abort
+      controller.abort()
+
+      // SIGTERM should be called immediately
+      expect(mockProc.kill).toHaveBeenCalledWith('SIGTERM')
+
+      // Advance 4.9 seconds — SIGKILL should NOT be called yet
+      await vi.advanceTimersByTimeAsync(4900)
+      expect(mockProc.kill).not.toHaveBeenCalledWith('SIGKILL')
+
+      // Advance past 5 seconds — SIGKILL should be called
+      await vi.advanceTimersByTimeAsync(200)
+      expect(mockProc.kill).toHaveBeenCalledWith('SIGKILL')
+
+      // Clean up
+      mockProc.emit('close', null)
+      await executePromise
+
+      vi.useRealTimers()
+    })
+
+    it('does not send SIGKILL if process killed by SIGTERM', async () => {
+      vi.useFakeTimers()
+
+      const task = { id: 'task-abort-3', prompt: 'Test' }
+      const controller = new AbortController()
+
+      // Set killed=true when SIGTERM received (normal behavior)
+      mockProc.kill.mockImplementation((signal?: string) => {
+        mockProc.killed = true
+        return true
+      })
+
+      const executePromise = adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      await vi.advanceTimersByTimeAsync(10)
+
+      // Abort
+      controller.abort()
+
+      expect(mockProc.kill).toHaveBeenCalledWith('SIGTERM')
+      expect(mockProc.killed).toBe(true)
+
+      // Advance 6 seconds
+      await vi.advanceTimersByTimeAsync(6000)
+
+      // SIGKILL should NOT be called because killed=true
+      expect(mockProc.kill).not.toHaveBeenCalledWith('SIGKILL')
+
+      // Clean up
+      mockProc.emit('close', null)
+      await executePromise
+
+      vi.useRealTimers()
+    })
+
+    it('returns failed status with exit code when aborted (process killed)', async () => {
+      // When a process is killed via SIGTERM, it exits with 128+15=143
+      // The adapter returns status based on exit code, not abort signal
+      const task = { id: 'task-abort-4', prompt: 'Test' }
+      const controller = new AbortController()
+
+      const executePromise = adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      await new Promise((r) => setTimeout(r, 20))
+
+      controller.abort()
+      // Simulate process killed by SIGTERM (exit code 143 = 128 + 15)
+      mockProc.emit('close', 143)
+
+      const result = await executePromise
+      // Process was killed, so exitCode is non-zero → 'failed' status
+      expect(result.status).toBe('failed')
+      expect(result.exitCode).toBe(143)
+    })
+
+    it('returns cancelled status when error thrown after abort', async () => {
+      const task = { id: 'task-abort-4b', prompt: 'Test' }
+      const controller = new AbortController()
+
+      const executePromise = adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      await new Promise((r) => setTimeout(r, 20))
+
+      // Abort first
+      controller.abort()
+      // Then emit error (e.g., process couldn't be killed)
+      mockProc.emit('error', new Error('Process error during abort'))
+
+      const result = await executePromise
+      // Error + signal.aborted → 'cancelled' status
+      expect(result.status).toBe('cancelled')
+      expect(result.error).toBe('Task cancelled')
+    })
+
+    it('removes abort listener after process closes', async () => {
+      const task = { id: 'task-abort-5', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => mockProc.emit('close', 0), 20)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      // Aborting after close should not throw or cause issues
+      controller.abort()
+
+      // If abort listener wasn't removed, this might cause kill to be called
+      // But since we closed the process, kill should not be called
+      expect(mockProc.kill).not.toHaveBeenCalled()
+    })
+  })
+
+  // =========================================================================
+  // 4. Process exit code handling
+  // =========================================================================
+
+  describe('process exit code handling', () => {
+    it('returns completed for exit code 0', async () => {
+      const task = { id: 'task-exit-0', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      const result = await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(result.status).toBe('completed')
+      expect(result.exitCode).toBe(0)
+    })
+
+    it('returns failed for non-zero exit code', async () => {
+      const task = { id: 'task-exit-1', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => mockProc.emit('close', 1), 10)
+
+      const result = await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(result.status).toBe('failed')
+      expect(result.exitCode).toBe(1)
+    })
+
+    it('handles various exit codes', async () => {
+      const testCases = [
+        { code: 2, expectedStatus: 'failed' },
+        { code: 127, expectedStatus: 'failed' },
+        { code: 128 + 9, expectedStatus: 'failed' }, // SIGKILL
+        { code: 128 + 15, expectedStatus: 'failed' }, // SIGTERM
+        { code: 255, expectedStatus: 'failed' },
+      ]
+
+      for (const { code, expectedStatus } of testCases) {
+        vi.clearAllMocks()
+        mockProc = createMockChildProcess()
+        ;(mockedSpawn as ReturnType<typeof vi.fn>).mockReturnValue(mockProc)
+
+        const task = { id: `task-exit-${code}`, prompt: 'Test' }
+        const controller = new AbortController()
+
+        setTimeout(() => mockProc.emit('close', code), 10)
+
+        const result = await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+        expect(result.status).toBe(expectedStatus)
+        expect(result.exitCode).toBe(code)
+      }
+    })
+
+    it('treats null exit code as 1', async () => {
+      const task = { id: 'task-exit-null', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => mockProc.emit('close', null), 10)
+
+      const result = await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(result.status).toBe('failed')
+      expect(result.exitCode).toBe(1)
+    })
+
+    it('captures stderr in error field', async () => {
+      const task = { id: 'task-exit-stderr', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => {
+        mockProc.stderr.emit('data', Buffer.from('Error: something failed'))
+        mockProc.emit('close', 1)
+      }, 10)
+
+      const result = await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(result.error).toBe('Error: something failed')
+    })
+  })
+
+  // =========================================================================
+  // 5. Timeout handling
+  // =========================================================================
+
+  describe('timeout handling', () => {
+    it('sends SIGTERM when timeout expires', async () => {
+      vi.useFakeTimers()
+
+      const task = { id: 'task-timeout-1', prompt: 'Test', timeout: 5000 }
+      const controller = new AbortController()
+
+      const executePromise = adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      // Wait for process to start
+      await vi.advanceTimersByTimeAsync(10)
+
+      // Advance to just before timeout
+      await vi.advanceTimersByTimeAsync(4900)
+      expect(mockProc.kill).not.toHaveBeenCalled()
+
+      // Advance past timeout
+      await vi.advanceTimersByTimeAsync(200)
+      expect(mockProc.kill).toHaveBeenCalledWith('SIGTERM')
+
+      // Clean up
+      mockProc.emit('close', null)
+      await executePromise
+
+      vi.useRealTimers()
+    })
+
+    it('sends SIGKILL 5s after timeout SIGTERM', async () => {
+      vi.useFakeTimers()
+
+      const task = { id: 'task-timeout-2', prompt: 'Test', timeout: 1000 }
+      const controller = new AbortController()
+
+      // Process doesn't die from SIGTERM
+      mockProc.kill.mockImplementation(() => true)
+
+      const executePromise = adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      await vi.advanceTimersByTimeAsync(10)
+
+      // Trigger timeout
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(mockProc.kill).toHaveBeenCalledWith('SIGTERM')
+
+      // Wait 4.9s — SIGKILL not yet
+      await vi.advanceTimersByTimeAsync(4900)
+      expect(mockProc.kill).not.toHaveBeenCalledWith('SIGKILL')
+
+      // Wait past 5s — SIGKILL sent
+      await vi.advanceTimersByTimeAsync(200)
+      expect(mockProc.kill).toHaveBeenCalledWith('SIGKILL')
+
+      // Clean up
+      mockProc.emit('close', null)
+      await executePromise
+
+      vi.useRealTimers()
+    })
+
+    it('does not trigger timeout if no timeout set', async () => {
+      vi.useFakeTimers()
+
+      const task = { id: 'task-timeout-3', prompt: 'Test' } // No timeout
+      const controller = new AbortController()
+
+      const executePromise = adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      await vi.advanceTimersByTimeAsync(10)
+
+      // Advance a long time
+      await vi.advanceTimersByTimeAsync(60000)
+
+      // No kill should be called
+      expect(mockProc.kill).not.toHaveBeenCalled()
+
+      // Clean up
+      mockProc.emit('close', 0)
+      await executePromise
+
+      vi.useRealTimers()
+    })
+
+    it('does not send SIGKILL if process exits before escalation', async () => {
+      vi.useFakeTimers()
+
+      const task = { id: 'task-timeout-4', prompt: 'Test', timeout: 1000 }
+      const controller = new AbortController()
+
+      mockProc.kill.mockImplementation((signal?: string) => {
+        mockProc.killed = true
+        // Process exits after SIGTERM
+        setTimeout(() => mockProc.emit('close', 128 + 15), 100)
+        return true
+      })
+
+      const executePromise = adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      await vi.advanceTimersByTimeAsync(10)
+
+      // Trigger timeout
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(mockProc.kill).toHaveBeenCalledWith('SIGTERM')
+
+      // Let process exit
+      await vi.advanceTimersByTimeAsync(100)
+
+      // Wait past SIGKILL window
+      await vi.advanceTimersByTimeAsync(5000)
+
+      // SIGKILL should NOT be called because killed=true
+      expect(mockProc.kill).not.toHaveBeenCalledWith('SIGKILL')
+
+      await executePromise
+
+      vi.useRealTimers()
+    })
+  })
+
+  // =========================================================================
+  // 6. stdin close on spawn
+  // =========================================================================
+
+  describe('stdin close on spawn', () => {
+    it('calls stdin.end() immediately after spawn', async () => {
+      const task = { id: 'task-stdin-1', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(mockProc.stdin.end).toHaveBeenCalled()
+    })
+
+    it('stdin.end() is called before process closes', async () => {
+      const callOrder: string[] = []
+
+      mockProc.stdin.end.mockImplementation(() => {
+        callOrder.push('stdin.end')
+      })
+
+      const originalEmit = mockProc.emit.bind(mockProc)
+      mockProc.emit = ((event: string, ...args: unknown[]) => {
+        if (event === 'close') {
+          callOrder.push('close')
+        }
+        return originalEmit(event, ...args)
+      }) as typeof mockProc.emit
+
+      const task = { id: 'task-stdin-2', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => mockProc.emit('close', 0), 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(callOrder).toEqual(['stdin.end', 'close'])
+    })
+
+    it('handles null stdin gracefully', async () => {
+      // Create a mock process without stdin
+      const procNoStdin = Object.assign(new EventEmitter(), {
+        stdin: null,
+        stdout: mockProc.stdout,
+        stderr: mockProc.stderr,
+        pid: 12346,
+        killed: false,
+        kill: vi.fn(),
+      }) as unknown as MockChildProcess
+
+      ;(mockedSpawn as ReturnType<typeof vi.fn>).mockReturnValue(procNoStdin)
+
+      const task = { id: 'task-stdin-3', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => procNoStdin.emit('close', 0), 10)
+
+      // Should not throw
+      await expect(
+        adapter.execute(task as import('../src/types.js').Task, stream, controller.signal),
+      ).resolves.toBeDefined()
+    })
+  })
+
+  // =========================================================================
+  // 7. Process error handling
+  // =========================================================================
+
+  describe('process error handling', () => {
+    it('rejects on spawn error', async () => {
+      const task = { id: 'task-error-1', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => {
+        mockProc.emit('error', new Error('spawn ENOENT'))
+      }, 10)
+
+      const result = await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(result.status).toBe('failed')
+      expect(result.error).toContain('spawn ENOENT')
+    })
+
+    it('removes abort listener on error', async () => {
+      const task = { id: 'task-error-2', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => {
+        mockProc.emit('error', new Error('process error'))
+      }, 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      // Abort should not throw or cause issues
+      controller.abort()
+      expect(mockProc.kill).not.toHaveBeenCalled()
+    })
+
+    it('handles spawn throwing synchronously', async () => {
+      ;(mockedSpawn as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw new Error('spawn failed synchronously')
+      })
+
+      const task = { id: 'task-error-3', prompt: 'Test' }
+      const controller = new AbortController()
+
+      const result = await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(result.status).toBe('failed')
+      expect(result.error).toContain('spawn failed synchronously')
+    })
+  })
+
+  // =========================================================================
+  // 8. stdout/stderr streaming
+  // =========================================================================
+
+  describe('stdout/stderr streaming', () => {
+    it('processes stdout data through handleStreamLine', async () => {
+      const task = { id: 'task-stream-1', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => {
+        // Send valid JSONL event
+        mockProc.stdout.emit('data', Buffer.from('{"type":"text","sessionID":"s1","timestamp":"2025-01-01T00:00:00Z","part":{"text":"Hello"}}\n'))
+        mockProc.emit('close', 0)
+      }, 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(stream.text).toHaveBeenCalledWith('Hello\n')
+    })
+
+    it('streams stderr to stream.stderr', async () => {
+      const task = { id: 'task-stream-2', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => {
+        mockProc.stderr.emit('data', Buffer.from('Warning: something'))
+        mockProc.emit('close', 0)
+      }, 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(stream.stderr).toHaveBeenCalledWith('Warning: something')
+    })
+
+    it('buffers incomplete lines and flushes on close', async () => {
+      const task = { id: 'task-stream-3', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => {
+        // Send incomplete line
+        mockProc.stdout.emit('data', Buffer.from('{"type":"text","sessionID":"s1","timestamp":"2025-01-01T00:00:00Z","part":{"text":"Partial"}}'))
+        // No newline yet, so handleStreamLine shouldn't be called
+        mockProc.emit('close', 0)
+      }, 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      // The incomplete line should be flushed on close
+      expect(stream.text).toHaveBeenCalledWith('Partial\n')
+    })
+
+    it('handles multiple lines in single data chunk', async () => {
+      const task = { id: 'task-stream-4', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => {
+        mockProc.stdout.emit('data', Buffer.from(
+          '{"type":"text","sessionID":"s1","timestamp":"2025-01-01T00:00:00Z","part":{"text":"Line1"}}\n' +
+          '{"type":"text","sessionID":"s1","timestamp":"2025-01-01T00:00:00Z","part":{"text":"Line2"}}\n'
+        ))
+        mockProc.emit('close', 0)
+      }, 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(stream.text).toHaveBeenCalledWith('Line1\n')
+      expect(stream.text).toHaveBeenCalledWith('Line2\n')
+    })
+
+    it('handles lines split across data chunks', async () => {
+      const task = { id: 'task-stream-5', prompt: 'Test' }
+      const controller = new AbortController()
+
+      const line = '{"type":"text","sessionID":"s1","timestamp":"2025-01-01T00:00:00Z","part":{"text":"SplitLine"}}'
+
+      setTimeout(() => {
+        // Split the line across two chunks
+        mockProc.stdout.emit('data', Buffer.from(line.slice(0, 50)))
+        mockProc.stdout.emit('data', Buffer.from(line.slice(50) + '\n'))
+        mockProc.emit('close', 0)
+      }, 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      expect(stream.text).toHaveBeenCalledWith('SplitLine\n')
+    })
+  })
+
+  // =========================================================================
+  // 9. activeTasks counter
+  // =========================================================================
+
+  describe('activeTasks counter', () => {
+    it('increments activeTasks during execution', async () => {
+      const initialStatus = await adapter.getStatus()
+      expect(initialStatus.activeTasks).toBe(0)
+
+      const task = { id: 'task-active-1', prompt: 'Test' }
+      const controller = new AbortController()
+
+      let midExecutionTaskCount = -1
+      let closeProcess: () => void
+
+      // Set up a promise that resolves when we're ready to close
+      const readyToClose = new Promise<void>((resolve) => {
+        closeProcess = resolve
+      })
+
+      // Start execution but don't close immediately
+      const executePromise = adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      // Wait a tick for execution to start
+      await new Promise((r) => setTimeout(r, 10))
+
+      // Check task count during execution (synchronously capture)
+      const midStatus = await adapter.getStatus()
+      midExecutionTaskCount = midStatus.activeTasks
+
+      // Now close the process
+      mockProc.emit('close', 0)
+
+      await executePromise
+
+      expect(midExecutionTaskCount).toBe(1)
+
+      const finalStatus = await adapter.getStatus()
+      expect(finalStatus.activeTasks).toBe(0)
+    })
+
+    it('decrements activeTasks on error', async () => {
+      const task = { id: 'task-active-2', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => {
+        mockProc.emit('error', new Error('test error'))
+      }, 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      const status = await adapter.getStatus()
+      expect(status.activeTasks).toBe(0)
+    })
+
+    it('decrements activeTasks on abort', async () => {
+      const task = { id: 'task-active-3', prompt: 'Test' }
+      const controller = new AbortController()
+
+      setTimeout(() => {
+        controller.abort()
+        mockProc.emit('close', null)
+      }, 10)
+
+      await adapter.execute(task as import('../src/types.js').Task, stream, controller.signal)
+
+      const status = await adapter.getStatus()
+      expect(status.activeTasks).toBe(0)
+    })
+  })
+})
