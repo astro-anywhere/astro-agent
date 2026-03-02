@@ -91,6 +91,8 @@ export class TaskExecutor {
     }).catch(() => {
       this.gitAvailable = false;
     });
+
+    console.log('[executor] Tip: Filter logs for a specific task with: npx @astroanywhere/agent logs -f | grep "taskId"');
   }
 
   /**
