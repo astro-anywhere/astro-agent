@@ -7,6 +7,7 @@
  */
 
 import { resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
 
 export interface BranchLockHandle {
   /** Release the lock. Idempotent — safe to call multiple times. */
@@ -31,11 +32,12 @@ export class BranchLockManager {
    * This is required because each task's auto-merge into the project branch
    * must complete before the next task can branch from the updated tip.
    *
-   * Key format: `{resolvedWorkdir}::{shortProjectId}`
-   * Fallback:   `{resolvedWorkdir}::{taskId}`
+   * Key format: `{canonicalWorkdir}::{shortProjectId}`
+   * Fallback:   `{canonicalWorkdir}::{taskId}`
    *
-   * The workdir prefix scopes locks per repository so different repos
-   * never contend even if they share project IDs.
+   * Uses `realpathSync` to follow symlinks so that the same repo accessed
+   * via different paths (e.g., symlink vs real path) shares the same lock.
+   * Falls back to `resolve()` if the path doesn't exist yet.
    */
   static computeLockKey(
     workdir: string,
@@ -43,9 +45,15 @@ export class BranchLockManager {
     _shortNodeId?: string,
     taskId?: string,
   ): string {
-    const resolvedWorkdir = resolve(workdir);
+    let canonicalWorkdir: string;
+    try {
+      canonicalWorkdir = realpathSync(workdir);
+    } catch {
+      // Path doesn't exist yet (e.g., worktree not created) — fall back to resolve()
+      canonicalWorkdir = resolve(workdir);
+    }
     const suffix = shortProjectId ?? taskId ?? 'unknown';
-    return `${resolvedWorkdir}::${suffix}`;
+    return `${canonicalWorkdir}::${suffix}`;
   }
 
   /**
