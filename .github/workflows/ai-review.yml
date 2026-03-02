@@ -1,0 +1,188 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Gather PR context
+        id: context
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Get diff stats
+          DIFF_STAT=$(gh pr diff ${{ github.event.pull_request.number }} --name-only)
+          echo "files_changed<<ENDFILES" >> "$GITHUB_OUTPUT"
+          echo "$DIFF_STAT" >> "$GITHUB_OUTPUT"
+          echo "ENDFILES" >> "$GITHUB_OUTPUT"
+
+          # Get diff
+          DIFF=$(gh pr diff ${{ github.event.pull_request.number }})
+          # Truncate to ~80K chars to stay within context limits
+          echo "$DIFF" | head -c 80000 > /tmp/pr_diff.txt
+
+          # Get commit messages
+          COMMITS=$(gh pr view ${{ github.event.pull_request.number }} --json commits --jq '.commits[].messageHeadline')
+          echo "commits<<ENDCOMMITS" >> "$GITHUB_OUTPUT"
+          echo "$COMMITS" >> "$GITHUB_OUTPUT"
+          echo "ENDCOMMITS" >> "$GITHUB_OUTPUT"
+
+          # Get PR body
+          PR_BODY=$(gh pr view ${{ github.event.pull_request.number }} --json body --jq '.body')
+          echo "$PR_BODY" > /tmp/pr_body.txt
+
+      - name: AI Review
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          CLAUDE_CODE_USE_BEDROCK: "1"
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Build the review prompt
+          cat <<'PROMPT' > /tmp/review_prompt.txt
+          You are a senior code reviewer for **@astroanywhere/agent** — the CLI agent runner for the Astro platform. This package runs on user machines (local, SSH remote, HPC clusters) and executes tasks dispatched from the Astro server via WebSocket relay.
+
+          ## Your Review Process
+
+          1. **Read CLAUDE.md** at the repo root to understand the project architecture, conventions, and patterns.
+          2. **Read the changed files** listed below to understand what was modified and why.
+          3. **For each changed file**, also read the surrounding code (imports, callers, tests) to understand the broader context and whether the change is consistent with the codebase.
+          4. **Check the workflow logic**: If the PR touches task execution, providers, WebSocket relay, or worktree management, trace the full flow to ensure correctness:
+             - Task lifecycle: WebSocket receive → queue → safety check → worktree creation → provider execution → result streaming → PR/push delivery → cleanup
+             - Provider adapters: CLI spawning → JSONL/stream parsing → event mapping → usage metric extraction
+             - Worktree management: branch naming → lingering cleanup → worktree creation → execution → worktree removal
+             - WebSocket relay: connect → authenticate → message routing → reconnection → buffering
+          5. **Produce a structured review** with findings categorized by severity.
+
+          ## Agent-Runner-Specific Principles
+
+          Always apply these principles when reviewing agent-runner code:
+
+          1. **Provider parity**: Every feature must work equally well across all agent providers (Claude Code, Claude SDK, Codex, OpenClaw, OpenCode, SLURM). If the change touches task execution or streaming, verify it handles all provider adapters consistently — not just the one the author tested.
+          2. **Resilience under network blips**: WebSocket connections drop, tasks get cancelled mid-execution, processes crash. Check that the change handles disconnection, reconnection, abort signals, and process cleanup gracefully. Streaming handlers should tolerate partial data. The agent must recover cleanly from any failure state.
+          3. **Git safety and worktree isolation**: Worktree operations must be serialized per-branch to avoid race conditions. Check that branch naming follows the `astro/{shortProjectId}-{shortNodeId}` convention, that lingering worktrees are cleaned up before creation, and that worktree cleanup runs in `finally` blocks (not just happy paths).
+          4. **Security boundaries**: The agent runner handles API keys, JWT tokens, dispatch verification signatures, and SSH credentials. Check that secrets are never logged, that dispatch signatures are verified, and that command injection is prevented in all `execFile`/`spawn` calls (especially user-provided paths and task IDs).
+          5. **Remote agent management**: Both `setup` and `launch`/`start` commands must unconditionally stop existing agents before reinstalling or restarting. Never use `pgrep` to check if an agent is "already running" and skip — this detection is unreliable because `pgrep -f "astro-agent start"` self-matches the SSH command process.
+          6. **Safety warning formatting**: Safety warning messages in `src/lib/workdir-safety.ts` must NOT contain emoji characters. The Astro frontend renders warnings with CSS styling (icons, borders, layout). Embedded emoji duplicates the CSS icons.
+
+          ## What to Look For
+
+          **Critical (must fix):**
+          - Security vulnerabilities (command injection in `execFile`/`spawn`, credential exposure, path traversal)
+          - Race conditions in async code (especially concurrent worktree creation, WebSocket message handling)
+          - Breaking changes to the WebSocket relay protocol or task streaming format
+          - Data loss risks (missing cleanup in `finally` blocks, process leaks)
+          - Missing abort signal propagation (tasks must be cancellable at any point)
+
+          **Important (should fix):**
+          - Logic errors or incorrect control flow
+          - Missing error propagation (catch blocks that swallow errors)
+          - Type safety issues (unsafe casts, missing null checks)
+          - Missing validation at system boundaries (task payloads, WebSocket messages)
+          - Provider-specific code that should be provider-agnostic
+          - Missing reconnection/recovery handling for WebSocket flows
+          - Worktree or process cleanup that only runs on the happy path
+
+          **Suggestions (nice to have):**
+          - Code clarity improvements
+          - Performance considerations (especially for large repos or many concurrent tasks)
+          - Test coverage gaps
+          - Opportunities to improve resilience under network instability
+
+          ## What NOT to Flag
+
+          - Style preferences (formatting, naming conventions) — trust the linter
+          - Documentation gaps unless the change is a public API
+          - "Could be simplified" unless the complexity actively hurts readability
+          - Changes in test files unless they test the wrong thing
+
+          ## Output Format
+
+          Respond with a structured review. Start with a 1-2 sentence summary of the PR's purpose and approach. Then list findings grouped by severity. For each finding, include the file path, line range, and a concise explanation of the issue with a suggested fix. If the PR looks good with no issues, say so briefly.
+
+          Example:
+          ```
+          ## Summary
+          This PR adds per-branch locking to prevent concurrent worktree creation crashes.
+
+          ## Critical
+          - **src/lib/task-executor.ts:760-770**: The branch lock is acquired but not released if `prepareTaskWorkspace()` throws before the `try` block. → Move lock acquisition inside the `try` block or add a catch that releases it.
+
+          ## Important
+          - **src/lib/branch-lock.ts:45**: `computeLockKey()` uses `resolve()` which can produce different paths for symlinked directories, causing lock misses. → Consider using `fs.realpathSync()` instead.
+
+          ## Suggestions
+          - **src/lib/__tests__/branch-lock.test.ts**: Consider adding a test for lock behavior when the process exits unexpectedly (simulating crash recovery).
+
+          ## Verdict
+          🟡 Approve with changes — fix the lock release on workspace prep failure.
+          ```
+
+          Use one of these verdicts:
+          - 🟢 **Approve** — no issues found
+          - 🟡 **Approve with changes** — non-blocking issues to address
+          - 🔴 **Request changes** — critical issues that must be fixed
+          PROMPT
+
+          # Append PR context to prompt
+          cat >> /tmp/review_prompt.txt <<EOF
+
+          ## PR Information
+
+          **Title:** ${{ github.event.pull_request.title }}
+          **Author:** ${{ github.event.pull_request.user.login }}
+          **Base:** ${{ github.event.pull_request.base.ref }} ← **Head:** ${{ github.event.pull_request.head.ref }}
+
+          **PR Description:**
+          $(cat /tmp/pr_body.txt)
+
+          **Commits:**
+          ${{ steps.context.outputs.commits }}
+
+          **Files changed:**
+          ${{ steps.context.outputs.files_changed }}
+
+          **Diff:**
+          $(cat /tmp/pr_diff.txt)
+          EOF
+
+          # Run Claude review
+          REVIEW=$(claude -p "$(cat /tmp/review_prompt.txt)" --output-format text 2>&1) || true
+
+          # Post as PR comment
+          if [ -n "$REVIEW" ]; then
+            COMMENT=$(cat <<COMMENT_EOF
+          ## 🤖 AI Code Review
+
+          $REVIEW
+
+          ---
+          <sub>Reviewed via [Astro CI](https://github.com/astro-anywhere/astro-agent)</sub>
+          COMMENT_EOF
+          )
+
+            gh pr comment ${{ github.event.pull_request.number }} --body "$COMMENT"
+          else
+            echo "Warning: AI review produced no output"
+          fi
