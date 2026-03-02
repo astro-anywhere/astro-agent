@@ -21,6 +21,10 @@ export interface PRResult {
   pushed?: boolean;
   prUrl?: string;
   prNumber?: number;
+  /** Git SHA of the base branch before this PR was merged */
+  commitBeforeSha?: string;
+  /** Git SHA of the base branch after this PR was merged */
+  commitAfterSha?: string;
   /** Error message if any step of the delivery pipeline failed */
   error?: string;
 }
@@ -154,6 +158,67 @@ export async function createPullRequest(
 }
 
 /**
+ * Merge a pull request using the `gh` CLI.
+ * Used to auto-merge per-task PRs into the project branch.
+ */
+export async function mergePullRequest(
+  worktreePath: string,
+  prNumber: number,
+  options?: {
+    method?: 'squash' | 'merge' | 'rebase';
+    deleteBranch?: boolean;
+  },
+): Promise<{ ok: boolean; error?: string }> {
+  const method = options?.method ?? 'squash';
+  const args = [
+    'pr', 'merge', String(prNumber),
+    `--${method}`,
+  ];
+  if (options?.deleteBranch !== false) {
+    args.push('--delete-branch');
+  }
+
+  try {
+    await execFileAsync('gh', args, {
+      cwd: worktreePath,
+      env: withGitEnv(),
+      timeout: 60_000,
+    });
+    console.log(`[git-pr] Merged PR #${prNumber} via ${method}`);
+    return { ok: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[git-pr] Failed to merge PR #${prNumber}: ${msg}`);
+    return { ok: false, error: `Failed to merge PR: ${msg}` };
+  }
+}
+
+/**
+ * Get the current SHA of a remote branch.
+ * Fetches first to ensure we have the latest.
+ */
+export async function getRemoteBranchSha(
+  repoDir: string,
+  branchName: string,
+): Promise<string | undefined> {
+  try {
+    await execFileAsync(
+      'git',
+      ['-C', repoDir, 'fetch', 'origin', branchName],
+      { env: withGitEnv(), timeout: 30_000 }
+    );
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', repoDir, 'rev-parse', `origin/${branchName}`],
+      { env: withGitEnv(), timeout: 5_000 }
+    );
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Check if `gh` CLI is available and authenticated
  */
 export async function isGhAvailable(): Promise<boolean> {
@@ -275,6 +340,12 @@ export async function pushAndCreatePR(
     body?: string;
     /** Target branch for PR base — avoids re-detecting (should match what worktree was created from) */
     baseBranch?: string;
+    /** If true, auto-merge the PR after creation (squash merge into base branch) */
+    autoMerge?: boolean;
+    /** Merge method for auto-merge (default: 'squash') */
+    mergeMethod?: 'squash' | 'merge' | 'rebase';
+    /** Git SHA of the base branch before this task — passed through to PRResult */
+    commitBeforeSha?: string;
   },
 ): Promise<PRResult> {
   const result: PRResult = { branchName: options.branchName };
@@ -347,6 +418,23 @@ export async function pushAndCreatePR(
   if (pr) {
     result.prUrl = pr.prUrl;
     result.prNumber = pr.prNumber;
+    result.commitBeforeSha = options.commitBeforeSha;
+
+    // Auto-merge: squash-merge the per-task PR into the project branch
+    if (options.autoMerge && pr.prNumber) {
+      const mergeResult = await mergePullRequest(worktreePath, pr.prNumber, {
+        method: options.mergeMethod ?? 'squash',
+        deleteBranch: true,
+      });
+      if (mergeResult.ok) {
+        // Capture the project branch SHA after merge
+        result.commitAfterSha = await getRemoteBranchSha(gitRoot, baseBranch);
+        console.log(`[git-pr] Auto-merged PR #${pr.prNumber}, commitAfterSha=${result.commitAfterSha}`);
+      } else {
+        console.warn(`[git-pr] Auto-merge failed for PR #${pr.prNumber}: ${mergeResult.error}`);
+        // PR still exists but isn't merged — not a fatal error
+      }
+    }
   } else {
     result.error = 'PR creation failed (gh pr create returned an error)';
   }

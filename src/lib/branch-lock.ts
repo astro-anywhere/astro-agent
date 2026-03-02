@@ -25,9 +25,13 @@ export class BranchLockManager {
   private locks: Map<string, LockEntry> = new Map();
 
   /**
-   * Derive a lock key that matches the worktree branch naming in worktree.ts.
+   * Derive a lock key scoped to the **project** level.
    *
-   * Key format: `{resolvedWorkdir}::{shortProjectId}-{shortNodeId}`
+   * All tasks in the same project share one lock so they serialize.
+   * This is required because each task's auto-merge into the project branch
+   * must complete before the next task can branch from the updated tip.
+   *
+   * Key format: `{resolvedWorkdir}::{shortProjectId}`
    * Fallback:   `{resolvedWorkdir}::{taskId}`
    *
    * The workdir prefix scopes locks per repository so different repos
@@ -36,14 +40,11 @@ export class BranchLockManager {
   static computeLockKey(
     workdir: string,
     shortProjectId?: string,
-    shortNodeId?: string,
+    _shortNodeId?: string,
     taskId?: string,
   ): string {
     const resolvedWorkdir = resolve(workdir);
-    const suffix =
-      shortProjectId && shortNodeId
-        ? `${shortProjectId}-${shortNodeId}`
-        : taskId ?? 'unknown';
+    const suffix = shortProjectId ?? taskId ?? 'unknown';
     return `${resolvedWorkdir}::${suffix}`;
   }
 

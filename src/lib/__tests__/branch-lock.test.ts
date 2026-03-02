@@ -13,9 +13,9 @@ describe('BranchLockManager', () => {
   });
 
   describe('computeLockKey', () => {
-    it('should use shortProjectId-shortNodeId when both are provided', () => {
+    it('should use shortProjectId (project-scoped) when both are provided', () => {
       const key = BranchLockManager.computeLockKey('/repo', 'abc123', 'def456');
-      expect(key).toBe('/repo::abc123-def456');
+      expect(key).toBe('/repo::abc123');
     });
 
     it('should fall back to taskId when short IDs are missing', () => {
@@ -30,7 +30,7 @@ describe('BranchLockManager', () => {
 
     it('should resolve relative paths', () => {
       const key = BranchLockManager.computeLockKey('./relative', 'abc', 'def');
-      expect(key).toContain('::abc-def');
+      expect(key).toContain('::abc');
       expect(key).not.toContain('./');
     });
 
@@ -38,6 +38,12 @@ describe('BranchLockManager', () => {
       const key1 = BranchLockManager.computeLockKey('/repo-a', 'abc', 'def');
       const key2 = BranchLockManager.computeLockKey('/repo-b', 'abc', 'def');
       expect(key1).not.toBe(key2);
+    });
+
+    it('should produce same key for different nodes in the same project', () => {
+      const key1 = BranchLockManager.computeLockKey('/repo', 'abc', 'node1');
+      const key2 = BranchLockManager.computeLockKey('/repo', 'abc', 'node2');
+      expect(key1).toBe(key2);
     });
   });
 
