@@ -22,6 +22,8 @@ export interface WorktreeOptions {
   agentDir?: string;
   /** Target branch from dispatch — takes priority over .astro/config.json and auto-detection */
   baseBranch?: string;
+  /** Project-level accumulation branch (e.g., 'astro/7b19a9'). Task branches from this instead of main. */
+  projectBranch?: string;
   stdout?: (data: string) => void;
   stderr?: (data: string) => void;
 }
@@ -29,8 +31,10 @@ export interface WorktreeOptions {
 export interface WorktreeSetup {
   workingDirectory: string;
   branchName: string;
-  /** The base branch the worktree was created from (e.g., 'main') */
+  /** The base branch the worktree was created from (project branch or default branch) */
   baseBranch: string;
+  /** Git SHA of the start point before this task's work */
+  commitBeforeSha?: string;
   cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
 }
 
@@ -47,6 +51,7 @@ export async function createWorktree(
     shortNodeId,
     agentDir,
     baseBranch: dispatchBaseBranch,
+    projectBranch: dispatchProjectBranch,
     stdout,
     stderr,
   } = options;
@@ -72,27 +77,28 @@ export async function createWorktree(
   const baseRoot = rootOverride ?? await resolveWorktreeRoot(gitRoot, agentDirName);
 
   const branchPrefix = await readBranchPrefix(gitRoot, agentDirName);
-  // Use short hex IDs for readable branch/worktree names when available,
-  // fall back to full taskId for backward compatibility.
-  // Format: astro/{shortProjectId}-{shortNodeId} (e.g., "astro/550e84-a3f2c1")
+
+  // Separate project branch (accumulative) from task branch (per-task).
+  // Project branch: `astro/{shortProjectId}` — accumulates all task work via auto-merged PRs
+  // Task branch: `astro/{shortProjectId}-{shortNodeId}` — per-task worktree branch
+  const projectBranchName = dispatchProjectBranch
+    ?? (shortProjectId ? `${branchPrefix}${sanitize(shortProjectId)}` : undefined);
   const branchSuffix = shortProjectId && shortNodeId
     ? `${sanitize(shortProjectId)}-${sanitize(shortNodeId)}`
     : sanitize(taskId);
-  const branchName = `${branchPrefix}${branchSuffix}`;
+  const taskBranchName = `${branchPrefix}${branchSuffix}`;
   const worktreePath = join(baseRoot, branchSuffix);
   await rm(worktreePath, { recursive: true, force: true });
   await pruneWorktrees(gitRoot);
 
-  // Find and remove any existing worktree that uses this branch (porcelain parsing).
-  // Without this, `git branch -D` fails because the branch is checked out
-  // by a lingering worktree from a previous execution.
-  await removeLingeringWorktrees(gitRoot, branchName);
+  // Clean up lingering worktrees and branches for the TASK branch only.
+  // Never delete the project branch — it accumulates work across tasks.
+  await removeLingeringWorktrees(gitRoot, taskBranchName);
+  await ensureBranchAvailable(gitRoot, taskBranchName);
 
-  await ensureBranchAvailable(gitRoot, branchName);
-
-  // Delete remote branch if it exists — prevents non-fast-forward push
+  // Delete remote task branch if it exists — prevents non-fast-forward push
   // failures when re-executing a task whose previous branch was already pushed
-  await deleteRemoteBranch(gitRoot, branchName);
+  await deleteRemoteBranch(gitRoot, taskBranchName);
 
   // Fetch latest so we branch from up-to-date origin
   try {
@@ -105,23 +111,39 @@ export async function createWorktree(
     // Non-fatal: proceed with potentially stale refs
   }
 
-  // Priority: dispatch-provided baseBranch > config file > auto-detection
+  // Detect the repo's default branch (main/master/develop) for fallback
   const defaultBranch = dispatchBaseBranch ?? await readBaseBranch(gitRoot, agentDirName) ?? await getDefaultBranch(gitRoot);
 
-  // Create worktree from origin/<defaultBranch> — NOT from HEAD.
-  // Using HEAD is dangerous because it could be on a stale task branch
-  // (from a previous execution that fell back to the repo directly),
-  // which would cause cross-task commit contamination.
-  //
-  // If origin/<branch> doesn't exist (purely local repo, no remote),
-  // fall back to the local branch ref.
-  const remoteRef = `origin/${defaultBranch}`;
+  // Ensure the project branch exists on origin. If this is the first task,
+  // create it from origin/{defaultBranch}. Idempotent.
+  if (projectBranchName) {
+    await ensureProjectBranch(gitRoot, projectBranchName, defaultBranch);
+  }
+
+  // Start point: prefer project branch tip (accumulates prior task work),
+  // fall back to default branch for non-project worktrees.
+  // Using origin/<branch> avoids stale local refs.
+  const effectiveBase = projectBranchName ?? defaultBranch;
+  const remoteRef = `origin/${effectiveBase}`;
   const hasRemoteRef = await refExists(gitRoot, remoteRef);
-  const startPoint = hasRemoteRef ? remoteRef : defaultBranch;
+  const startPoint = hasRemoteRef ? remoteRef : effectiveBase;
+
+  // Capture the commit SHA before this task's work begins
+  let commitBeforeSha: string | undefined;
+  try {
+    const { stdout: sha } = await execFileAsync(
+      'git',
+      ['-C', gitRoot, 'rev-parse', startPoint],
+      { env: withGitEnv(), timeout: 5_000 }
+    );
+    commitBeforeSha = sha.trim();
+  } catch {
+    console.warn('[worktree] Failed to capture commitBeforeSha for audit trail');
+  }
 
   await execFileAsync(
     'git',
-    ['-C', gitRoot, 'worktree', 'add', '-b', branchName, worktreePath, startPoint],
+    ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
     { env: withGitEnv(), timeout: 30_000 }
   );
 
@@ -174,10 +196,11 @@ export async function createWorktree(
 
   return {
     workingDirectory: worktreeWorkingDirectory,
-    branchName,
-    baseBranch: defaultBranch,
+    branchName: taskBranchName,
+    baseBranch: effectiveBase,
+    commitBeforeSha,
     cleanup: async (options?: { keepBranch?: boolean }) => {
-      await cleanupWorktree(gitRoot, worktreePath, branchName, options?.keepBranch);
+      await cleanupWorktree(gitRoot, worktreePath, taskBranchName, options?.keepBranch);
     },
   };
 }
@@ -233,6 +256,66 @@ export async function removeLingeringWorktrees(gitRoot: string, branchName: stri
     } else if (line.trim() === '') {
       currentWorktreePath = null;
     }
+  }
+}
+
+/**
+ * Ensure the project-level accumulation branch exists on origin.
+ * If it doesn't exist, create it from origin/{defaultBranch} and push.
+ * Idempotent — safe to call on every task dispatch.
+ *
+ * Note: Safe to race — if multiple tasks call this concurrently, only the
+ * first push succeeds; others fail non-fatally on push (branch already exists).
+ */
+async function ensureProjectBranch(
+  gitRoot: string,
+  projectBranch: string,
+  defaultBranch: string,
+): Promise<void> {
+  // Check if the project branch already exists on origin
+  const remoteRef = `origin/${projectBranch}`;
+  if (await refExists(gitRoot, remoteRef)) {
+    console.log(`[worktree] Project branch ${projectBranch} exists on origin`);
+    return;
+  }
+
+  // Check if it exists locally (e.g., created but not yet pushed)
+  if (await refExists(gitRoot, `refs/heads/${projectBranch}`)) {
+    console.log(`[worktree] Project branch ${projectBranch} exists locally, pushing...`);
+    try {
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, 'push', '-u', 'origin', projectBranch],
+        { env: withGitEnv(), timeout: 30_000 }
+      );
+    } catch {
+      // Non-fatal: the branch exists locally even if push fails
+    }
+    return;
+  }
+
+  // Create from origin/{defaultBranch} (or local defaultBranch as fallback)
+  const defaultRemoteRef = `origin/${defaultBranch}`;
+  const hasDefaultRemote = await refExists(gitRoot, defaultRemoteRef);
+  const startPoint = hasDefaultRemote ? defaultRemoteRef : defaultBranch;
+
+  console.log(`[worktree] Creating project branch ${projectBranch} from ${startPoint}`);
+  try {
+    await execFileAsync(
+      'git',
+      ['-C', gitRoot, 'branch', projectBranch, startPoint],
+      { env: withGitEnv(), timeout: 10_000 }
+    );
+    await execFileAsync(
+      'git',
+      ['-C', gitRoot, 'push', '-u', 'origin', projectBranch],
+      { env: withGitEnv(), timeout: 30_000 }
+    );
+    console.log(`[worktree] Created and pushed project branch ${projectBranch}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[worktree] Failed to create/push project branch: ${msg}`);
+    // Non-fatal: worktree creation will still work from whatever ref is available
   }
 }
 

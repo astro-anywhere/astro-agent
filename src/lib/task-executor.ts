@@ -914,23 +914,36 @@ export class TaskExecutor {
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           } else {
-            // 'pr' — push + create PR (existing behavior)
+            // 'pr' — push + create PR, auto-merge into project branch if applicable
             this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Creating pull request...');
             console.log(`[executor] Task ${task.id}: pr mode, attempting PR creation for branch ${prepared.branchName}`);
+            const hasProjectBranch = !!task.projectBranch;
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
               branchName: prepared.branchName,
               taskTitle: prTitle,
               taskDescription: task.description || task.prompt.slice(0, 500),
               body: prBody,
               baseBranch: prepared.baseBranch,
+              autoMerge: hasProjectBranch,
+              commitBeforeSha: prepared.commitBeforeSha,
             });
             result.branchName = prResult.branchName;
             if (prResult.prUrl) {
               result.prUrl = prResult.prUrl;
               result.prNumber = prResult.prNumber;
-              result.deliveryStatus = 'success';
+              result.commitBeforeSha = prResult.commitBeforeSha;
+              result.commitAfterSha = prResult.commitAfterSha;
               keepBranch = true;
-              console.log(`[executor] Task ${task.id}: PR created at ${prResult.prUrl}`);
+              if (prResult.autoMergeFailed) {
+                // PR was created but auto-merge into project branch failed —
+                // subsequent tasks won't see this task's changes
+                result.deliveryStatus = 'failed';
+                result.deliveryError = 'PR created but auto-merge into project branch failed';
+                console.error(`[executor] Task ${task.id}: PR created at ${prResult.prUrl} but auto-merge failed`);
+              } else {
+                result.deliveryStatus = 'success';
+                console.log(`[executor] Task ${task.id}: PR created at ${prResult.prUrl}`);
+              }
             } else if (prResult.error) {
               // Delivery failure — don't override execution status
               result.deliveryStatus = 'failed';
@@ -1043,6 +1056,7 @@ export class TaskExecutor {
     workingDirectory: string;
     branchName?: string;
     baseBranch?: string;
+    commitBeforeSha?: string;
     cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
   }> {
     // Per-task explicit opt-out: user consciously chose to skip worktree
@@ -1114,6 +1128,7 @@ export class TaskExecutor {
         shortNodeId: task.shortNodeId,
         agentDir: task.agentDir,
         baseBranch: task.baseBranch,
+        projectBranch: task.projectBranch,
         stdout: stream.stdout,
         stderr: stream.stderr,
       });
