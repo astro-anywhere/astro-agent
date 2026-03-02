@@ -952,13 +952,15 @@ export class TaskExecutor {
     } finally {
       clearTimeout(timeoutId);
 
-      // Cleanup worktree — but preserve it if a branch was pushed/PR created,
-      // so the worktree remains available for post-execution steering or inspection.
-      // The server will trigger explicit cleanup when the task is fully completed.
-      if (this.preserveWorktrees || keepBranch) {
-        console.log(`[executor] Task ${task.id}: worktree preserved (${this.preserveWorktrees ? 'debug mode' : 'branch pushed'})`);
+      // Always cleanup the local worktree directory to reclaim disk space
+      // (node_modules alone is ~680MB per worktree). When keepBranch is true
+      // (PR created or branch pushed), we preserve the git branch but still
+      // remove the working copy — the branch lives on remote/local refs,
+      // and re-execution will create a fresh worktree if needed.
+      if (this.preserveWorktrees) {
+        console.log(`[executor] Task ${task.id}: worktree preserved (debug mode)`);
       } else {
-        await prepared.cleanup({ keepBranch: false });
+        await prepared.cleanup({ keepBranch });
       }
 
       // Sandbox: copy back results then cleanup
