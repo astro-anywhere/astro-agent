@@ -787,24 +787,22 @@ export class TaskExecutor {
 
     // Text-only tasks (plan/chat/summarize) without a working directory skip workspace prep
     const isTextOnly = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan';
-    let prepared: Awaited<ReturnType<typeof this.prepareTaskWorkspace>>;
-    try {
-      prepared = isTextOnly && !normalizedTask.workingDirectory
-        ? { workingDirectory: '', cleanup: async () => {} }
-        : await this.prepareTaskWorkspace(normalizedTask, stream);
-    } catch (prepErr) {
-      // Release branch lock on workspace preparation failure to avoid deadlocking
-      // subsequent tasks in the same project
-      if (branchLock) branchLock.release();
-      this.runningTasks.delete(normalizedTask.id);
-      this.wsClient.removeActiveTask(normalizedTask.id);
-      this.untrackTaskDirectory(task);
-      this.processQueue();
-      throw prepErr;
-    }
+    const prepared = isTextOnly && !normalizedTask.workingDirectory
+      ? { workingDirectory: '', cleanup: async () => {} }
+      : await this.prepareTaskWorkspace(normalizedTask, stream);
     const taskWithWorkspace = { ...normalizedTask, workingDirectory: prepared.workingDirectory };
     runningTask.task = taskWithWorkspace;
     console.log(`[executor] Task ${task.id}: workspace prepared, cwd=${prepared.workingDirectory}`);
+
+    // Release the branch lock now that the worktree is created.
+    // The lock only needs to be held during worktree creation (branching from the
+    // project branch tip). Once each task has its own worktree, they can execute
+    // in parallel. The merge step (PR creation) has its own serialization.
+    if (branchLock) {
+      branchLock.release();
+      branchLock = undefined;
+      console.log(`[executor] Task ${task.id}: branch lock released after workspace prep`);
+    }
 
     // Execute with timeout
     const timeout = task.timeout ?? this.defaultTimeout;
@@ -1045,11 +1043,6 @@ export class TaskExecutor {
         }
         console.log(`[executor] Task ${task.id}: cleaning up sandbox`);
         await sandbox.cleanup();
-      }
-
-      // Release branch lock so the next queued task on this branch can proceed
-      if (branchLock) {
-        branchLock.release();
       }
 
       // Untrack task from directory
