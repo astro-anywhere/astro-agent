@@ -9,6 +9,35 @@
 import { query, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { execSync } from 'node:child_process';
+
+/**
+ * Resolve the path to the Claude Code executable.
+ *
+ * Prefers the globally installed `claude` binary (via `which claude`) over the
+ * SDK-bundled `cli.js`.  This is more robust on remote machines where the SDK's
+ * `cli.js` may be missing from `node_modules`, and it ensures we always use the
+ * same Claude Code version the operator installed.
+ *
+ * Returns `undefined` to let the SDK fall back to its built-in resolution if
+ * the global binary cannot be located.
+ */
+function resolveClaudeExecutable(): string | undefined {
+  try {
+    const which = execSync('which claude', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (which) {
+      console.log(`[claude-sdk] Using global Claude Code binary: ${which}`);
+      return which;
+    }
+  } catch {
+    // `which` failed — claude not on PATH
+  }
+  console.log('[claude-sdk] Global claude binary not found, falling back to SDK bundled cli.js');
+  return undefined;
+}
+
+/** Cached result of resolveClaudeExecutable() — computed once at module load. */
+const claudeExecutablePath = resolveClaudeExecutable();
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
@@ -615,6 +644,13 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       ...(isChatTask ? {} : { tools: [] }),
       persistSession: true,
       ...(hasWorkdir ? { cwd: task.workingDirectory } : {}),
+      ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
+      stderr: (data: string) => {
+        const trimmed = data.trim();
+        if (trimmed) {
+          console.error(`[claude-sdk][stderr][${task.id.slice(0, 8)}] ${trimmed}`);
+        }
+      },
       env: { ...process.env, ...task.environment },
     };
 
@@ -764,6 +800,15 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
       persistSession: true, // Keep session on disk so generateSummary() can resume it
       ...(hasWorkdir ? { cwd: task.workingDirectory, additionalDirectories: [task.workingDirectory] } : {}),
+      // Use globally installed claude binary if available (avoids missing cli.js on remote machines)
+      ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
+      // Capture subprocess stderr for debugging exit code 1 crashes
+      stderr: (data: string) => {
+        const trimmed = data.trim();
+        if (trimmed) {
+          console.error(`[claude-sdk][stderr][${task.id.slice(0, 8)}] ${trimmed}`);
+        }
+      },
       env: {
         ...process.env,
         ...task.environment,
