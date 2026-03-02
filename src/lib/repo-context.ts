@@ -10,7 +10,65 @@ import { join } from 'node:path'
 
 const FILE_CAP = 15_000 // 15KB cap for CLAUDE.md and README
 const PKG_CAP = 5_000   // 5KB cap for package metadata
-const FILE_TREE_CAP = 200 // max files to show in tree summary
+const FILE_TREE_CAP = 3000 // max files to show in tree summary
+
+/** File extensions to deprioritize (config, generated, non-source) */
+const LOW_PRIORITY_PATTERNS = [
+  /\.lock$/,
+  /-lock\./,  // package-lock.json, etc.
+  /\.min\.[jt]sx?$/,
+  /\.d\.ts$/,
+  /\.map$/,
+  /\.snap$/,
+  /\.svg$/,
+  /\.png$/,
+  /\.jpg$/,
+  /\.jpeg$/,
+  /\.gif$/,
+  /\.ico$/,
+  /\.woff2?$/,
+  /\.ttf$/,
+  /\.eot$/,
+  /\.pdf$/,
+  /^\./,  // dotfiles
+]
+
+/** Directories to deprioritize */
+const LOW_PRIORITY_DIRS = [
+  /^node_modules\//,
+  /^\.git\//,
+  /^dist\//,
+  /^build\//,
+  /^\.next\//,
+  /^coverage\//,
+  /^__pycache__\//,
+  /\.egg-info\//,
+  /^vendor\//,
+]
+
+function isLowPriority(filePath: string): boolean {
+  const basename = filePath.split('/').pop() ?? filePath
+  if (LOW_PRIORITY_DIRS.some(p => p.test(filePath))) return true
+  if (LOW_PRIORITY_PATTERNS.some(p => p.test(basename))) return true
+  return false
+}
+
+/**
+ * Sort files: source files first, config/generated last.
+ * Within each group, preserve original order (usually alphabetical from git ls-files).
+ */
+function smartSortFiles(files: string[]): string[] {
+  const high: string[] = []
+  const low: string[] = []
+  for (const f of files) {
+    if (isLowPriority(f)) {
+      low.push(f)
+    } else {
+      high.push(f)
+    }
+  }
+  return [...high, ...low]
+}
 
 export interface RepoContextResult {
   claudeMd?: string
@@ -60,10 +118,11 @@ export function readRepoContext(workingDirectory: string, fileTree?: string[]): 
     }
   }
 
-  // Format file tree summary
+  // Format file tree summary with smart filtering
   if (fileTree && fileTree.length > 0) {
-    const total = fileTree.length
-    const shown = fileTree.slice(0, FILE_TREE_CAP)
+    const sorted = smartSortFiles(fileTree)
+    const total = sorted.length
+    const shown = sorted.slice(0, FILE_TREE_CAP)
     const lines = shown.join('\n')
     result.fileTreeSummary = total > FILE_TREE_CAP
       ? `${lines}\n\n... and ${total - FILE_TREE_CAP} more files (${total} total)`

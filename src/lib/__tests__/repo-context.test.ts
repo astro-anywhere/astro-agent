@@ -181,16 +181,38 @@ describe('readRepoContext', () => {
     expect(result.fileTreeSummary).toBe('src/index.ts\nsrc/utils.ts\npackage.json');
   });
 
-  it('should truncate file tree when exceeding 200 files', () => {
+  it('should truncate file tree when exceeding 3000 files', () => {
     mockExistsSync.mockReturnValue(false);
 
-    const fileTree = Array.from({ length: 250 }, (_, i) => `file-${i}.ts`);
+    const fileTree = Array.from({ length: 3500 }, (_, i) => `src/file-${i}.ts`);
     const result = readRepoContext('', fileTree);
 
-    expect(result.fileTreeSummary).toContain('file-0.ts');
-    expect(result.fileTreeSummary).toContain('file-199.ts');
-    expect(result.fileTreeSummary).not.toContain('file-200.ts');
-    expect(result.fileTreeSummary).toContain('and 50 more files (250 total)');
+    expect(result.fileTreeSummary).toContain('src/file-0.ts');
+    expect(result.fileTreeSummary).toContain('src/file-2999.ts');
+    expect(result.fileTreeSummary).not.toContain('src/file-3000.ts');
+    expect(result.fileTreeSummary).toContain('and 500 more files (3500 total)');
+  });
+
+  it('should prioritize source files over config/generated files', () => {
+    mockExistsSync.mockReturnValue(false);
+
+    const fileTree = [
+      'package-lock.json',
+      'src/index.ts',
+      '.gitignore',
+      'src/utils.ts',
+      'dist/bundle.js',
+      'src/app.tsx',
+    ];
+    const result = readRepoContext('', fileTree);
+
+    // Source files should come before low-priority files
+    const lines = result.fileTreeSummary!.split('\n');
+    const srcIdx = lines.indexOf('src/index.ts');
+    const lockIdx = lines.indexOf('package-lock.json');
+    const distIdx = lines.indexOf('dist/bundle.js');
+    expect(srcIdx).toBeLessThan(lockIdx);
+    expect(srcIdx).toBeLessThan(distIdx);
   });
 
   it('should return undefined fileTreeSummary when no file tree provided', () => {

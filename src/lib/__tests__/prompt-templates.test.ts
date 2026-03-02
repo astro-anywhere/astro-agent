@@ -78,7 +78,7 @@ describe('buildPlanSystemPrompt', () => {
     expect(prompt).not.toContain('<user_vision>');
   });
 
-  it('should include repo context when provided', () => {
+  it('should include repo context when provided (without file tree)', () => {
     const prompt = buildPlanSystemPrompt(undefined, {
       claudeMd: '# My Project\nSome instructions',
       readmeMd: '# README\nProject readme',
@@ -92,8 +92,9 @@ describe('buildPlanSystemPrompt', () => {
     expect(prompt).toContain('Project readme');
     expect(prompt).toContain('## Package Metadata');
     expect(prompt).toContain('my-package');
-    expect(prompt).toContain('## File Tree');
-    expect(prompt).toContain('src/index.ts');
+    // File tree is intentionally excluded from prompt (used for autocompletion only)
+    expect(prompt).not.toContain('## File Tree');
+    expect(prompt).not.toContain('src/index.ts');
   });
 
   it('should use tool-based instructions when repo context is provided', () => {

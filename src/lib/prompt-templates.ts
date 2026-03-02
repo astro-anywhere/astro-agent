@@ -89,9 +89,9 @@ export function buildPlanSystemPrompt(visionDoc?: string, repoContext?: RepoCont
     if (repoContext.packageInfo) {
       parts.push(`## Package Metadata\n<user_content>\n${repoContext.packageInfo}\n</user_content>`)
     }
-    if (repoContext.fileTreeSummary) {
-      parts.push(`## File Tree\n<user_content>\n${repoContext.fileTreeSummary}\n</user_content>`)
-    }
+    // NOTE: fileTreeSummary is intentionally NOT included in the prompt.
+    // The file tree is used for file path autocompletion only, not injected
+    // into the context window to save tokens and reduce noise.
     if (parts.length > 0) {
       repoSection = '\n\n' + parts.join('\n\n') + '\n'
     }
