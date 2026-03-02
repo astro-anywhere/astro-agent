@@ -261,11 +261,21 @@ export class OpenCodeAdapter implements ProviderAdapter {
   /**
    * Handle a single JSONL line from OpenCode's streaming output.
    *
-   * OpenCode events follow a pattern similar to Claude Code's stream-json:
+   * Supports two event formats:
+   *
+   * Legacy format (Claude Code-like):
    * - system         → sessionInit (session_id, model)
    * - assistant      → text + tool_use content blocks
    * - tool_result    → tool results
    * - result         → final metrics (cost, tokens, turns)
+   *
+   * Native OpenCode format ({type, sessionID, timestamp, part}):
+   * - step_start     → sessionInit (sessionID, part.model) + status
+   * - text           → text output (part.text)
+   * - tool_use       → toolUse/toolResult based on part.state (running/completed/error)
+   * - reasoning      → reasoning text (part.text)
+   * - step_finish    → metrics (part.usage, part.cost, part.model, part.reason)
+   * - error          → error output (part.message, part.code)
    */
   /** Extract tool_result content blocks from an event and emit toolResult calls. */
   handleToolResultBlocks(
@@ -400,6 +410,101 @@ export class OpenCodeAdapter implements ProviderAdapter {
             stream.status('running', 100, `Completed (${numTurns ?? 0} turns, $${cost.toFixed(4)})`);
           } else {
             stream.status('running', 100, 'Completed');
+          }
+          break;
+        }
+
+        // ====================================================================
+        // Native OpenCode format: {type, sessionID, timestamp, part: {...}}
+        // ====================================================================
+
+        case 'step_start': {
+          // Native format: { type: 'step_start', sessionID, timestamp, part: { stepId, model, title } }
+          const sessionID = event.sessionID as string | undefined;
+          const part = event.part as { stepId?: string; model?: string; title?: string } | undefined;
+          if (sessionID) {
+            stream.sessionInit(sessionID, part?.model);
+          }
+          if (part?.title) {
+            stream.status('running', 0, part.title);
+          }
+          break;
+        }
+
+        case 'text': {
+          // Native format: { type: 'text', sessionID, timestamp, part: { text } }
+          const part = event.part as { text?: string } | undefined;
+          if (part?.text) {
+            stream.text(part.text + '\n');
+          }
+          break;
+        }
+
+        case 'tool_use': {
+          // Native format: { type: 'tool_use', sessionID, timestamp, part: { toolCallId, tool, state, input?, output?, error? } }
+          const part = event.part as {
+            toolCallId?: string;
+            tool?: string;
+            state?: string;
+            input?: unknown;
+            output?: unknown;
+            error?: string;
+          } | undefined;
+          if (part) {
+            const toolName = part.tool ?? 'unknown';
+            if (part.state === 'running') {
+              if (part.toolCallId && part.tool) {
+                this.toolIdToName.set(part.toolCallId, toolName);
+              }
+              stream.toolUse(toolName, part.input);
+            } else if (part.state === 'completed') {
+              stream.toolResult(toolName, part.output ?? '', true);
+            } else if (part.state === 'error') {
+              stream.toolResult(toolName, part.error ?? 'Unknown error', false);
+            }
+          }
+          break;
+        }
+
+        case 'reasoning': {
+          // Native format: { type: 'reasoning', sessionID, timestamp, part: { text } }
+          const part = event.part as { text?: string } | undefined;
+          if (part?.text) {
+            stream.text(part.text + '\n');
+          }
+          break;
+        }
+
+        case 'step_finish': {
+          // Native format: { type: 'step_finish', sessionID, timestamp, part: { usage, cost, model, reason } }
+          const part = event.part as {
+            usage?: { inputTokens?: number; outputTokens?: number };
+            cost?: number;
+            model?: string;
+            reason?: string;
+          } | undefined;
+          if (part) {
+            this.lastResultMetrics = {
+              inputTokens: part.usage?.inputTokens,
+              outputTokens: part.usage?.outputTokens,
+              totalCost: part.cost,
+              model: part.model,
+            };
+            if (part.cost !== undefined) {
+              const reason = part.reason ?? 'done';
+              stream.status('running', 100, `Step completed (${reason}, $${part.cost.toFixed(4)})`);
+            } else {
+              stream.status('running', 100, `Step completed${part.reason ? ` (${part.reason})` : ''}`);
+            }
+          }
+          break;
+        }
+
+        case 'error': {
+          // Native format: { type: 'error', sessionID, timestamp, part: { message, code } }
+          const part = event.part as { message?: string; code?: string } | undefined;
+          if (part?.message) {
+            stream.stderr(`[${part.code ?? 'ERROR'}] ${part.message}`);
           }
           break;
         }

@@ -1,0 +1,25 @@
+{"type":"step_start","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:00.000Z","part":{"stepId":"step-1","model":"anthropic/claude-sonnet-4-20250514","title":"Analyzing project structure"}}
+{"type":"text","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:01.000Z","part":{"text":"Let me analyze the project structure first."}}
+{"type":"reasoning","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:02.000Z","part":{"text":"The user wants me to understand the codebase. I should start by listing files."}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:03.000Z","part":{"toolCallId":"tc-001","tool":"bash","state":"running","input":{"command":"ls -la"}}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:04.000Z","part":{"toolCallId":"tc-001","tool":"bash","state":"completed","output":"total 48\ndrwxr-xr-x  8 user  staff   256 Jan 15 10:00 .\n-rw-r--r--  1 user  staff  1234 Jan 15 10:00 package.json\n-rw-r--r--  1 user  staff   567 Jan 15 10:00 tsconfig.json"}}
+{"type":"text","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:05.000Z","part":{"text":"I can see the project files. Let me read the main config."}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:06.000Z","part":{"toolCallId":"tc-002","tool":"read_file","state":"running","input":{"path":"package.json"}}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:07.000Z","part":{"toolCallId":"tc-002","tool":"read_file","state":"completed","output":"{\"name\":\"example\",\"version\":\"1.0.0\"}"}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:08.000Z","part":{"toolCallId":"tc-003","tool":"write_file","state":"running","input":{"path":"src/index.ts","content":"export const hello = 'world';"}}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:09.000Z","part":{"toolCallId":"tc-003","tool":"write_file","state":"completed","output":"File written: src/index.ts"}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:10.000Z","part":{"toolCallId":"tc-004","tool":"bash","state":"running","input":{"command":"npm run build"}}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:11.000Z","part":{"toolCallId":"tc-004","tool":"bash","state":"error","error":"Build failed: Cannot find module 'react'"}}
+{"type":"text","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:12.000Z","part":{"text":"The build failed. Let me install the missing dependency."}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:13.000Z","part":{"toolCallId":"tc-005","tool":"bash","state":"running","input":{"command":"npm install react"}}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:14.000Z","part":{"toolCallId":"tc-005","tool":"bash","state":"completed","output":"added 1 package in 2s"}}
+{"type":"reasoning","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:14.500Z","part":{"text":"Dependencies installed. Now I should retry the build."}}
+{"type":"step_finish","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:15.000Z","part":{"usage":{"inputTokens":2500,"outputTokens":800},"cost":0.0345,"model":"anthropic/claude-sonnet-4-20250514","reason":"end_turn"}}
+{"type":"step_start","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:16.000Z","part":{"stepId":"step-2","model":"anthropic/claude-sonnet-4-20250514","title":"Building the project"}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:17.000Z","part":{"toolCallId":"tc-006","tool":"bash","state":"running","input":{"command":"npm run build"}}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:18.000Z","part":{"toolCallId":"tc-006","tool":"bash","state":"completed","output":"Build successful"}}
+{"type":"text","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:19.000Z","part":{"text":"Build succeeded! The project is ready."}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:20.000Z","part":{"toolCallId":"tc-007","tool":"edit_file","state":"running","input":{"path":"README.md","content":"# Example Project"}}}
+{"type":"tool_use","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:21.000Z","part":{"toolCallId":"tc-007","tool":"edit_file","state":"completed","output":"File updated: README.md"}}
+{"type":"step_finish","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:22.000Z","part":{"usage":{"inputTokens":500,"outputTokens":200},"cost":0.0085,"model":"anthropic/claude-sonnet-4-20250514","reason":"end_turn"}}
+{"type":"error","sessionID":"oc-native-001","timestamp":"2025-01-15T10:00:23.000Z","part":{"message":"Rate limit exceeded","code":"rate_limit"}}
