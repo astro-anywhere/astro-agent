@@ -100,7 +100,7 @@ export function buildPlanSystemPrompt(visionDoc?: string, repoContext?: RepoCont
   const hasRepo = repoSection.length > 0
 
   const outputInstructions = hasRepo
-    ? `You are a project planning assistant with access to the repository. The key files and file tree are provided above.
+    ? `You are a project planning assistant with access to the repository. The key files are provided above.
 You may use tools (Read, Glob, Grep) to explore the codebase for additional context before generating the plan.
 When you are done exploring, output your final plan as a single JSON object.
 Your FINAL message must contain ONLY the JSON object — no prose before or after.

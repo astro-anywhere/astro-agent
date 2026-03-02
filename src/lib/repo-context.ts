@@ -33,22 +33,27 @@ const LOW_PRIORITY_PATTERNS = [
   /^\./,  // dotfiles
 ]
 
-/** Directories to deprioritize */
+/** Directories to deprioritize (matches anywhere in path, including nested) */
 const LOW_PRIORITY_DIRS = [
-  /^node_modules\//,
-  /^\.git\//,
-  /^dist\//,
-  /^build\//,
-  /^\.next\//,
-  /^coverage\//,
-  /^__pycache__\//,
+  /(?:^|\/)node_modules\//,
+  /(?:^|\/)\.git\//,
+  /(?:^|\/)dist\//,
+  /(?:^|\/)build\//,
+  /(?:^|\/)\.next\//,
+  /(?:^|\/)coverage\//,
+  /(?:^|\/)__pycache__\//,
   /\.egg-info\//,
-  /^vendor\//,
+  /(?:^|\/)vendor\//,
 ]
 
 function isLowPriority(filePath: string): boolean {
-  const basename = filePath.split('/').pop() ?? filePath
   if (LOW_PRIORITY_DIRS.some(p => p.test(filePath))) return true
+
+  // Treat any file inside a dot-directory (e.g. .github/, .vscode/) as low priority
+  const segments = filePath.split('/')
+  if (segments.some(seg => seg.length > 1 && seg[0] === '.' && seg !== '..')) return true
+
+  const basename = filePath.split('/').pop() ?? filePath
   if (LOW_PRIORITY_PATTERNS.some(p => p.test(basename))) return true
   return false
 }
@@ -56,6 +61,7 @@ function isLowPriority(filePath: string): boolean {
 /**
  * Sort files: source files first, config/generated last.
  * Within each group, preserve original order (usually alphabetical from git ls-files).
+ * Optimized to avoid unnecessary allocations when result will be truncated.
  */
 function smartSortFiles(files: string[]): string[] {
   const high: string[] = []
@@ -67,7 +73,14 @@ function smartSortFiles(files: string[]): string[] {
       high.push(f)
     }
   }
-  return [...high, ...low]
+
+  // If we have more high-priority files than the cap, return only those
+  if (high.length >= FILE_TREE_CAP) {
+    return high.slice(0, FILE_TREE_CAP)
+  }
+
+  // Otherwise, return all high-priority files + low-priority files up to cap
+  return [...high, ...low.slice(0, FILE_TREE_CAP - high.length)]
 }
 
 export interface RepoContextResult {
@@ -120,9 +133,8 @@ export function readRepoContext(workingDirectory: string, fileTree?: string[]): 
 
   // Format file tree summary with smart filtering
   if (fileTree && fileTree.length > 0) {
-    const sorted = smartSortFiles(fileTree)
-    const total = sorted.length
-    const shown = sorted.slice(0, FILE_TREE_CAP)
+    const total = fileTree.length
+    const shown = smartSortFiles(fileTree)
     const lines = shown.join('\n')
     result.fileTreeSummary = total > FILE_TREE_CAP
       ? `${lines}\n\n... and ${total - FILE_TREE_CAP} more files (${total} total)`
