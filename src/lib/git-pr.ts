@@ -27,6 +27,8 @@ export interface PRResult {
   commitAfterSha?: string;
   /** Error message if any step of the delivery pipeline failed */
   error?: string;
+  /** Whether auto-merge was attempted and failed (PR created but not merged) */
+  autoMergeFailed?: boolean;
 }
 
 /**
@@ -429,10 +431,13 @@ export async function pushAndCreatePR(
       if (mergeResult.ok) {
         // Capture the project branch SHA after merge
         result.commitAfterSha = await getRemoteBranchSha(gitRoot, baseBranch);
+        if (!result.commitAfterSha) {
+          console.warn(`[git-pr] Failed to capture commitAfterSha after merge of PR #${pr.prNumber}`);
+        }
         console.log(`[git-pr] Auto-merged PR #${pr.prNumber}, commitAfterSha=${result.commitAfterSha}`);
       } else {
         console.warn(`[git-pr] Auto-merge failed for PR #${pr.prNumber}: ${mergeResult.error}`);
-        // PR still exists but isn't merged — not a fatal error
+        result.autoMergeFailed = true;
       }
     }
   } else {

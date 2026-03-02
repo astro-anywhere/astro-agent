@@ -138,7 +138,7 @@ export async function createWorktree(
     );
     commitBeforeSha = sha.trim();
   } catch {
-    // Non-fatal: SHA capture is best-effort
+    console.warn('[worktree] Failed to capture commitBeforeSha for audit trail');
   }
 
   await execFileAsync(
@@ -263,6 +263,9 @@ export async function removeLingeringWorktrees(gitRoot: string, branchName: stri
  * Ensure the project-level accumulation branch exists on origin.
  * If it doesn't exist, create it from origin/{defaultBranch} and push.
  * Idempotent — safe to call on every task dispatch.
+ *
+ * Note: Safe to race — if multiple tasks call this concurrently, only the
+ * first push succeeds; others fail non-fatally on push (branch already exists).
  */
 async function ensureProjectBranch(
   gitRoot: string,

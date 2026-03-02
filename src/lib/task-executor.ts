@@ -933,9 +933,17 @@ export class TaskExecutor {
               result.prNumber = prResult.prNumber;
               result.commitBeforeSha = prResult.commitBeforeSha;
               result.commitAfterSha = prResult.commitAfterSha;
-              result.deliveryStatus = 'success';
               keepBranch = true;
-              console.log(`[executor] Task ${task.id}: PR created at ${prResult.prUrl}`);
+              if (prResult.autoMergeFailed) {
+                // PR was created but auto-merge into project branch failed —
+                // subsequent tasks won't see this task's changes
+                result.deliveryStatus = 'failed';
+                result.deliveryError = 'PR created but auto-merge into project branch failed';
+                console.error(`[executor] Task ${task.id}: PR created at ${prResult.prUrl} but auto-merge failed`);
+              } else {
+                result.deliveryStatus = 'success';
+                console.log(`[executor] Task ${task.id}: PR created at ${prResult.prUrl}`);
+              }
             } else if (prResult.error) {
               // Delivery failure — don't override execution status
               result.deliveryStatus = 'failed';
