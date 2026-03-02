@@ -12,6 +12,7 @@ import { createProviderAdapter, type ProviderAdapter } from '../providers/index.
 import { ClaudeSdkAdapter } from '../providers/claude-sdk-adapter.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree } from './worktree.js';
+import { BranchLockManager, type BranchLockHandle } from './branch-lock.js';
 import { pushAndCreatePR } from './git-pr.js';
 import {
   checkWorkdirSafety,
@@ -66,6 +67,7 @@ export class TaskExecutor {
   private maxSandboxSize: number;
   private gitAvailable: boolean = false;
   private hpcCapability: HpcCapability | null;
+  private branchLockManager = new BranchLockManager();
 
   // Safety tracking
   private tasksByDirectory: Map<string, Set<string>> = new Map(); // workdir -> taskIds
@@ -319,6 +321,9 @@ export class TaskExecutor {
       });
     }
     this.taskQueue = [];
+
+    // Release all branch locks to unblock any waiting tasks
+    this.branchLockManager.releaseAll();
 
     // Stop job monitor
     this.jobMonitor.stop();
@@ -639,6 +644,20 @@ export class TaskExecutor {
     return tasks ? tasks.size : 0;
   }
 
+  /**
+   * Determine whether a task will create a git worktree.
+   * Used to decide if the branch lock should be acquired.
+   */
+  private taskWillCreateWorktree(task: Task): boolean {
+    const isTextOnly = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan';
+    if (isTextOnly) return false;
+    if (task.useWorktree === false) return false;
+    if (!this.useWorktree) return false;
+    if (task.deliveryMode === 'direct') return false;
+    if (task.deliveryMode === 'copy') return false;
+    return true;
+  }
+
   private async executeTask(task: Task, useSandbox = false): Promise<void> {
     console.log(`[executor] Task ${task.id}: workingDirectory=${task.workingDirectory} sandbox=${useSandbox}`);
 
@@ -738,6 +757,33 @@ export class TaskExecutor {
 
     this.runningTasks.set(normalizedTask.id, runningTask);
     this.wsClient.addActiveTask(normalizedTask.id);
+
+    // Acquire per-branch lock to prevent concurrent worktree creation on the same branch.
+    // Tasks sharing a branch (same project) serialize; different branches run in parallel.
+    let branchLock: BranchLockHandle | undefined;
+    if (this.taskWillCreateWorktree(normalizedTask)) {
+      const lockKey = BranchLockManager.computeLockKey(
+        normalizedTask.workingDirectory,
+        normalizedTask.shortProjectId,
+        normalizedTask.shortNodeId,
+        normalizedTask.id,
+      );
+      const queueLength = this.branchLockManager.getQueueLength(lockKey);
+      if (queueLength > 0 || this.branchLockManager.isLocked(lockKey)) {
+        console.log(`[executor] Task ${task.id}: waiting for branch lock (${queueLength} ahead)`);
+        this.wsClient.sendTaskStatus(normalizedTask.id, 'running', 0, 'Waiting for branch lock...');
+      }
+      branchLock = await this.branchLockManager.acquire(lockKey, normalizedTask.id);
+      // If task was cancelled while waiting for the lock, bail out early
+      if (abortController.signal.aborted) {
+        branchLock.release();
+        this.runningTasks.delete(normalizedTask.id);
+        this.wsClient.removeActiveTask(normalizedTask.id);
+        this.untrackTaskDirectory(task);
+        this.processQueue();
+        return;
+      }
+    }
 
     // Text-only tasks (plan/chat/summarize) without a working directory skip workspace prep
     const isTextOnly = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan';
@@ -974,6 +1020,11 @@ export class TaskExecutor {
         }
         console.log(`[executor] Task ${task.id}: cleaning up sandbox`);
         await sandbox.cleanup();
+      }
+
+      // Release branch lock so the next queued task on this branch can proceed
+      if (branchLock) {
+        branchLock.release();
       }
 
       // Untrack task from directory
