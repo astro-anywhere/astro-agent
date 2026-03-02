@@ -137,6 +137,8 @@ export class WebSocketClient {
   private isConnecting = false;
   private shouldReconnect = true;
   private activeTasks: Set<string> = new Set();
+  private pendingMessages: WSMessage[] = [];
+  private static MAX_PENDING = 5000;
   private pendingApprovals: Map<string, { resolve: (result: { answered: boolean; answer?: string; message?: string }) => void; reject: (error: Error) => void }> = new Map();
 
   private onEvent?: RunnerEventHandler;
@@ -660,6 +662,9 @@ export class WebSocketClient {
     };
     this.send(registerMsg);
 
+    // Drain any messages buffered while disconnected
+    this.drainPendingMessages();
+
     // Start heartbeat
     this.startHeartbeat();
 
@@ -1166,6 +1171,23 @@ export class WebSocketClient {
   private send(message: WSMessage): void {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+    } else {
+      if (this.pendingMessages.length >= WebSocketClient.MAX_PENDING) {
+        this.pendingMessages.shift();
+        console.warn('[ws-client] Pending buffer full, dropping oldest message');
+      }
+      this.pendingMessages.push(message);
+      console.log(`[ws-client] Buffered ${message.type} message (${this.pendingMessages.length} pending, WS state: ${this.ws?.readyState ?? 'null'})`);
+    }
+  }
+
+  private drainPendingMessages(): void {
+    if (this.pendingMessages.length === 0) return;
+    const count = this.pendingMessages.length;
+    console.log(`[ws-client] Draining ${count} buffered messages after reconnect`);
+    const messages = this.pendingMessages.splice(0);
+    for (const msg of messages) {
+      this.send(msg);
     }
   }
 
