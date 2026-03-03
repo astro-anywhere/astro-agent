@@ -355,7 +355,6 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
       const options: Parameters<typeof query>[0]['options'] = {
         abortController,
-        maxTurns: 100,
         permissionMode: 'bypassPermissions',
         // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
         ...getSandboxOption(undefined),
@@ -775,7 +774,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     // Determine appropriate maxTurns based on task type
     const isTextOnlyTask = task.type === 'chat' || task.type === 'summarize';
-    const defaultMaxTurns = isTextOnlyTask ? 10 : 150;
+    const defaultMaxTurns = isTextOnlyTask ? 10 : undefined;
 
     // Plan/chat/summarize tasks without a working directory run without cwd context
     const hasWorkdir = !!task.workingDirectory;
@@ -793,7 +792,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // Build options for the query
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
-      maxTurns: task.maxTurns ?? defaultMaxTurns,
+      ...(task.maxTurns != null || defaultMaxTurns != null ? { maxTurns: task.maxTurns ?? defaultMaxTurns } : {}),
       permissionMode: 'bypassPermissions', // Auto-accept all tool calls
       // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
       ...getSandboxOption(task.model),
