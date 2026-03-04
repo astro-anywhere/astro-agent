@@ -974,9 +974,19 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       }
     }
 
-    // For tasks without a working directory, disable file system and shell tools
-    // but keep web search so the agent can research. MCP tools are also allowed.
-    if (!hasWorkdir) {
+    // Plan tasks are read-only: no file writes, edits, or shell access regardless
+    // of workdir/MCP configuration. Only allow codebase exploration + web search.
+    if (task.type === 'plan') {
+      const planTools = [
+        ...(hasWorkdir ? ['Read', 'Glob', 'Grep'] : []),
+        'WebSearch', 'WebFetch',
+        ...mcpAllowedTools,
+      ];
+      (options as Record<string, unknown>).allowedTools = planTools;
+      console.log(`[claude-sdk] Plan task — read-only tools: [${planTools.join(', ')}]`);
+    } else if (!hasWorkdir) {
+      // For tasks without a working directory, disable file system and shell tools
+      // but keep web search so the agent can research. MCP tools are also allowed.
       const noWorkdirTools = ['WebSearch', 'WebFetch', ...mcpAllowedTools];
       (options as Record<string, unknown>).allowedTools = noWorkdirTools;
       console.log(`[claude-sdk] No workdir — allowed tools: [${noWorkdirTools.join(', ')}]`);
