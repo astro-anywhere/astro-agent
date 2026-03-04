@@ -636,9 +636,12 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       ? ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch']
       : ['WebSearch', 'WebFetch'];
 
+    // Chat/summarize tasks cap at 10 turns; plan tasks run unlimited (like execution)
+    const textOnlyMaxTurns = (isChatTask || task.type === 'summarize') ? 10 : undefined;
+
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
-      maxTurns: task.maxTurns ?? 10,
+      ...(task.maxTurns != null || textOnlyMaxTurns != null ? { maxTurns: task.maxTurns ?? textOnlyMaxTurns } : {}),
       permissionMode: isChatTask ? 'bypassPermissions' : 'plan',
       ...(isChatTask ? {} : { tools: [] }),
       persistSession: true,
