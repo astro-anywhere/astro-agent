@@ -9,6 +9,35 @@
 import { query, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { execSync } from 'node:child_process';
+
+/**
+ * Resolve the path to the Claude Code executable.
+ *
+ * Prefers the globally installed `claude` binary (via `which claude`) over the
+ * SDK-bundled `cli.js`.  This is more robust on remote machines where the SDK's
+ * `cli.js` may be missing from `node_modules`, and it ensures we always use the
+ * same Claude Code version the operator installed.
+ *
+ * Returns `undefined` to let the SDK fall back to its built-in resolution if
+ * the global binary cannot be located.
+ */
+function resolveClaudeExecutable(): string | undefined {
+  try {
+    const which = execSync('which claude', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (which) {
+      console.log(`[claude-sdk] Using global Claude Code binary: ${which}`);
+      return which;
+    }
+  } catch {
+    // `which` failed — claude not on PATH
+  }
+  console.log('[claude-sdk] Global claude binary not found, falling back to SDK bundled cli.js');
+  return undefined;
+}
+
+/** Cached result of resolveClaudeExecutable() — computed once at module load. */
+const claudeExecutablePath = resolveClaudeExecutable();
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
@@ -326,7 +355,6 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
       const options: Parameters<typeof query>[0]['options'] = {
         abortController,
-        maxTurns: 100,
         permissionMode: 'bypassPermissions',
         // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
         ...getSandboxOption(undefined),
@@ -615,6 +643,13 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       ...(isChatTask ? {} : { tools: [] }),
       persistSession: true,
       ...(hasWorkdir ? { cwd: task.workingDirectory } : {}),
+      ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
+      stderr: (data: string) => {
+        const trimmed = data.trim();
+        if (trimmed) {
+          console.error(`[claude-sdk][stderr][${task.id.slice(0, 8)}] ${trimmed}`);
+        }
+      },
       env: { ...process.env, ...task.environment },
     };
 
@@ -739,7 +774,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     // Determine appropriate maxTurns based on task type
     const isTextOnlyTask = task.type === 'chat' || task.type === 'summarize';
-    const defaultMaxTurns = isTextOnlyTask ? 10 : 150;
+    const defaultMaxTurns = isTextOnlyTask ? 10 : undefined;
 
     // Plan/chat/summarize tasks without a working directory run without cwd context
     const hasWorkdir = !!task.workingDirectory;
@@ -757,13 +792,22 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // Build options for the query
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
-      maxTurns: task.maxTurns ?? defaultMaxTurns,
+      ...(task.maxTurns != null || defaultMaxTurns != null ? { maxTurns: task.maxTurns ?? defaultMaxTurns } : {}),
       permissionMode: 'bypassPermissions', // Auto-accept all tool calls
       // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
       ...getSandboxOption(task.model),
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
       persistSession: true, // Keep session on disk so generateSummary() can resume it
       ...(hasWorkdir ? { cwd: task.workingDirectory, additionalDirectories: [task.workingDirectory] } : {}),
+      // Use globally installed claude binary if available (avoids missing cli.js on remote machines)
+      ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
+      // Capture subprocess stderr for debugging exit code 1 crashes
+      stderr: (data: string) => {
+        const trimmed = data.trim();
+        if (trimmed) {
+          console.error(`[claude-sdk][stderr][${task.id.slice(0, 8)}] ${trimmed}`);
+        }
+      },
       env: {
         ...process.env,
         ...task.environment,
@@ -930,9 +974,19 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       }
     }
 
-    // For tasks without a working directory, disable file system and shell tools
-    // but keep web search so the agent can research. MCP tools are also allowed.
-    if (!hasWorkdir) {
+    // Plan tasks are read-only: no file writes, edits, or shell access regardless
+    // of workdir/MCP configuration. Only allow codebase exploration + web search.
+    if (task.type === 'plan') {
+      const planTools = [
+        ...(hasWorkdir ? ['Read', 'Glob', 'Grep'] : []),
+        'WebSearch', 'WebFetch',
+        ...mcpAllowedTools,
+      ];
+      (options as Record<string, unknown>).allowedTools = planTools;
+      console.log(`[claude-sdk] Plan task — read-only tools: [${planTools.join(', ')}]`);
+    } else if (!hasWorkdir) {
+      // For tasks without a working directory, disable file system and shell tools
+      // but keep web search so the agent can research. MCP tools are also allowed.
       const noWorkdirTools = ['WebSearch', 'WebFetch', ...mcpAllowedTools];
       (options as Record<string, unknown>).allowedTools = noWorkdirTools;
       console.log(`[claude-sdk] No workdir — allowed tools: [${noWorkdirTools.join(', ')}]`);
@@ -987,7 +1041,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     let toolUseCount = 0;
     let resultMetrics: TaskResult['metrics'] | undefined;
 
+    let turnIndex = 0;
+
     for await (const msg of gen) {
+      try {
       if (msg.type === 'system' && msg.subtype === 'init') {
         this.model = msg.model;
         const sessionId = (msg as unknown as Record<string, unknown>).session_id as string ?? '';
@@ -997,18 +1054,30 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         // Store the query instance for steering
         this.activeQueries.set(task.id, { query: gen, sessionId });
       } else if (msg.type === 'assistant') {
+        turnIndex++;
+        let textLength = 0;
+        let turnToolCount = 0;
+        const turnToolNames: string[] = [];
+
         // Stream assistant content blocks
         for (const block of msg.message.content) {
+          try {
           if (typeof block === 'string') continue;
           if (block.type === 'text') {
             output += block.text;
+            textLength += block.text.length;
             stream.text(block.text);
           } else if (block.type === 'tool_use') {
             // Emit structured tool use — logarithmic curve caps at 75% to reserve space for delivery phases
             toolUseCount++;
+            turnToolCount++;
+            turnToolNames.push(block.name);
             progress = Math.min(Math.round(75 * Math.log10(toolUseCount + 1) / Math.log10(150)), 75);
             stream.status('running', progress, `Using tool: ${block.name}`);
             stream.toolUse(block.name, block.input);
+
+            const inputSummary = JSON.stringify(block.input).slice(0, 200);
+            console.log(`[claude-sdk] Task ${task.id} tool: ${block.name} (input: ${inputSummary})`);
 
             // Record file operations as artifacts
             if (block.name === 'Write' || block.name === 'Edit') {
@@ -1026,21 +1095,30 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
               }
             }
           }
+          } catch (blockErr) {
+            console.error(`[claude-sdk] Task ${task.id} event processing error (continuing):`, blockErr);
+          }
         }
+
+        console.log(`[claude-sdk] Task ${task.id} turn ${turnIndex}: ${textLength} chars text, ${turnToolCount} tool calls [${turnToolNames.join(', ')}]`);
       } else if (msg.type === 'user') {
         // Tool results from the SDK
         for (const block of msg.message.content) {
+          try {
           if (typeof block === 'string') continue;
           if (block.type === 'tool_result') {
             const resultContent = typeof block.content === 'string'
               ? block.content
               : JSON.stringify(block.content);
             const isError = block.is_error ?? false;
+            const toolName = block.tool_use_id ?? 'unknown';
             stream.toolResult(
-              block.tool_use_id ?? 'unknown',
+              toolName,
               resultContent,
               !isError,
             );
+
+            console.log(`[claude-sdk] Task ${task.id} tool_result: ${toolName} success=${!isError} (${resultContent.length} chars)`);
 
             // Detect sbatch submissions for job tracking
             if (this.jobMonitor && typeof resultContent === 'string') {
@@ -1054,6 +1132,9 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
                 console.log(`[claude-sdk] Detected sbatch submission: job ${jobId}`);
               }
             }
+          }
+          } catch (blockErr) {
+            console.error(`[claude-sdk] Task ${task.id} event processing error (continuing):`, blockErr);
           }
         }
       } else if (msg.type === 'result') {
@@ -1109,7 +1190,14 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           errorMessage = `Task failed: ${msg.subtype}`;
           stream.status('failed', progress, errorMessage);
         }
+
+        const tokenSummary = usage ? `${usage.input_tokens ?? 0}+${usage.output_tokens ?? 0}` : 'N/A';
+        const costStr = totalCostUsd != null ? `$${totalCostUsd.toFixed(4)}` : 'N/A';
+        console.log(`[claude-sdk] Task ${task.id} completed: status=${success ? 'success' : 'failure'} turns=${numTurns ?? turnIndex} tokens=${tokenSummary} cost=${costStr}`);
         break;
+      }
+      } catch (err) {
+        console.error(`[claude-sdk] Task ${task.id} event processing error (continuing):`, err);
       }
     }
 

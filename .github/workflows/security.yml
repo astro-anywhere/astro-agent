@@ -1,0 +1,31 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  schedule:
+    # Run security scan every Monday at 00:00 UTC
+    - cron: '0 0 * * 1'
+
+jobs:
+  audit:
+    name: npm Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Run npm audit
+        run: npm audit --audit-level=high
+        continue-on-error: true

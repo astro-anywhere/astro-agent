@@ -159,6 +159,9 @@ export interface Task {
   /** Target branch for worktree creation and PR base (e.g., 'main', 'develop') */
   baseBranch?: string;
 
+  /** Project-level accumulation branch (e.g., 'astro/7b19a9'). Per-task PRs target this branch. */
+  projectBranch?: string;
+
   /** Worktree strategy for non-git or copy-based execution */
   worktreeStrategy?: 'copy' | 'reference' | 'direct';
 
@@ -237,6 +240,10 @@ export interface TaskResult {
   branchName?: string;
   prUrl?: string;
   prNumber?: number;
+  /** Git SHA of the project branch before this task's PR was merged */
+  commitBeforeSha?: string;
+  /** Git SHA of the project branch after this task's PR was merged */
+  commitAfterSha?: string;
   /** Delivery outcome — separate from execution status */
   deliveryStatus?: 'success' | 'failed' | 'skipped';
   /** Error message when deliveryStatus is 'failed' */
