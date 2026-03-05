@@ -1006,7 +1006,12 @@ export class WebSocketClient {
     const { correlationId, approvalId, projectId, taskId, question, options, to } = message.payload;
 
     if (!this.openclawBridge?.isConnected) {
-      // Can't send approval — no bridge. Server will need to handle the timeout.
+      console.warn(`[ws-client] Channel approval ${approvalId} skipped: OpenClaw bridge not connected`);
+      this.send({
+        type: 'channel_approval_response',
+        timestamp: new Date().toISOString(),
+        payload: { correlationId, approvalId, response: '', error: 'OpenClaw bridge not connected' },
+      });
       return;
     }
 

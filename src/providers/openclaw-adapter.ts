@@ -287,10 +287,13 @@ export class OpenClawAdapter implements ProviderAdapter {
       let lastMetrics: TaskResult['metrics'] | undefined;
       let runId: string | undefined;
       let finished = false;
+      let lifecycleEnded = false;
+      let chatFinalReceived = false;
 
       const finish = (error?: string) => {
         if (finished) return;
         finished = true;
+        if (taskTimeout) clearTimeout(taskTimeout);
         ws.close();
         resolve({
           output: outputText,
@@ -298,6 +301,17 @@ export class OpenClawAdapter implements ProviderAdapter {
           artifacts: artifacts.length > 0 ? artifacts : undefined,
           metrics: lastMetrics,
         });
+      };
+
+      /** Finish when both lifecycle.end and chat.final have been seen, or
+       *  after a short grace period if only lifecycle.end arrived. */
+      const tryFinishAfterLifecycle = () => {
+        if (chatFinalReceived) {
+          finish();
+        } else {
+          // Grace period: if chat.final doesn't arrive within 500ms, finish anyway
+          setTimeout(() => { if (!finished) finish(); }, 500);
+        }
       };
 
       // Handle abort
@@ -370,8 +384,8 @@ export class OpenClawAdapter implements ProviderAdapter {
                 undefined, // model comes from chat event
               );
             } else if (phase === 'end') {
-              // Session complete — wait briefly for final chat event, then finish
-              setTimeout(() => finish(), 500);
+              lifecycleEnded = true;
+              tryFinishAfterLifecycle();
             }
           } else if (streamType === 'assistant') {
             const delta = eventData?.delta as string || eventData?.text as string;
@@ -405,6 +419,7 @@ export class OpenClawAdapter implements ProviderAdapter {
           const state = p.state as string;
 
           if (state === 'final') {
+            chatFinalReceived = true;
             // Extract final message content
             const message = p.message as Record<string, unknown> | undefined;
             if (message) {
@@ -420,6 +435,8 @@ export class OpenClawAdapter implements ProviderAdapter {
                 }
               }
             }
+            // If lifecycle already ended, finish immediately
+            if (lifecycleEnded) finish();
           }
 
           return;
