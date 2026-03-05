@@ -241,23 +241,24 @@ export interface StartRemoteOptions {
   preserveWorktrees?: boolean;
 }
 
+export interface RemoteAgentStatus {
+  hostname?: string;
+  platform?: string;
+  arch?: string;
+  cpuCores?: number;
+  memoryGB?: number;
+  gpu?: Array<{ name: string; vendor: string; memoryGB: number }>;
+  providers?: Array<{ name: string; type: string; version?: string | null; model?: string }>;
+}
+
 export interface RemoteStartResult {
   host: DiscoveredHost;
   success: boolean;
   message: string;
   alreadyRunning?: boolean;
+  agentStatus?: RemoteAgentStatus;
 }
 
-/**
- * Start agent runners on remote hosts.
- *
- * For each host:
- *   1. Check if an agent is already running (pgrep)
- *   2. Start via nohup + disown
- *   3. Verify after 2s with pgrep
- *
- * One failure does not block others.
- */
 export async function startRemoteAgents(
   hosts: DiscoveredHost[],
   options: StartRemoteOptions = {},
@@ -301,8 +302,19 @@ export async function startRemoteAgents(
         'pgrep -f "[a]stro-agent start" 2>/dev/null || ps aux | grep "[a]stro-agent start"',
       );
       if (stdout.trim()) {
-        log(host.name, 'Agent started successfully');
-        results.push({ host, success: true, message: 'Started' });
+        log(host.name, 'Agent started — reading status...');
+        // Give the remote agent a moment to detect its environment and write status
+        await new Promise((r) => setTimeout(r, 3000));
+        let agentStatus: RemoteAgentStatus | undefined;
+        try {
+          const { stdout: statusJson } = await sshExec(host, 'cat $HOME/.astro/agent-status.json 2>/dev/null');
+          if (statusJson.trim()) {
+            agentStatus = JSON.parse(statusJson.trim()) as RemoteAgentStatus;
+          }
+        } catch {
+          // Non-fatal: status file may not exist yet
+        }
+        results.push({ host, success: true, message: 'Started', agentStatus });
       } else {
         // Fallback: check log tail for error details
         try {

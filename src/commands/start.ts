@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import os from 'node:os';
 import { homedir } from 'node:os';
 import { config } from '../lib/config.js';
 import { detectProviders } from '../lib/providers.js';
@@ -307,6 +308,26 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     spinner.succeed('Environment detected');
   } catch {
     spinner.fail('Failed to detect environment');
+  }
+
+  // Write status file so remote launchers can read our detection results
+  try {
+    const statusPath = join(homedir(), '.astro', 'agent-status.json');
+    const status = {
+      version,
+      runnerId,
+      hostname: resources?.hostname ?? os.hostname(),
+      platform: resources?.platform ?? os.platform(),
+      arch: resources?.arch ?? os.arch(),
+      cpuCores: resources?.cpu.cores,
+      memoryGB: resources ? Math.round(resources.memory.total / (1024 ** 3)) : undefined,
+      gpu: resources?.gpu.map(g => ({ name: g.name, vendor: g.vendor, memoryGB: Math.round(g.memoryTotal / (1024 ** 3)) })),
+      providers: providers.map(p => ({ name: p.name, type: p.type, version: p.version, model: p.capabilities.defaultModel })),
+      detectedAt: new Date().toISOString(),
+    };
+    writeFileSync(statusPath, JSON.stringify(status, null, 2));
+  } catch {
+    // Non-fatal
   }
 
   // Display structured machine box

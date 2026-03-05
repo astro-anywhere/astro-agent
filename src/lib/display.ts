@@ -7,6 +7,7 @@
 
 import chalk from 'chalk';
 import type { ProviderInfo, MachineResources, DiscoveredHost } from '../types.js';
+import type { RemoteAgentStatus } from './ssh-installer.js';
 import { formatBytes } from './resources.js';
 
 // ── Box-drawing helpers ──────────────────────────────────────────────
@@ -135,6 +136,7 @@ export function formatRemoteHostBox(
   host: DiscoveredHost,
   status: 'running' | 'failed' | 'pending',
   message?: string,
+  agentStatus?: RemoteAgentStatus,
 ): string {
   const lines: string[] = [];
 
@@ -153,12 +155,33 @@ export function formatRemoteHostBox(
   const port = host.port && host.port !== 22 ? `:${host.port}` : '';
   lines.push(chalk.dim(`  ${userHost}${port}`));
 
-  // Source
-  lines.push(chalk.dim(`  Source: ${host.source}`));
+  // Hardware summary from agent status
+  if (agentStatus) {
+    const hwParts: string[] = [];
+    if (agentStatus.platform) hwParts.push(`${agentStatus.platform}/${agentStatus.arch || 'unknown'}`);
+    if (agentStatus.cpuCores) hwParts.push(`${agentStatus.cpuCores} cores`);
+    if (agentStatus.memoryGB) hwParts.push(`${agentStatus.memoryGB} GB RAM`);
+    if (hwParts.length > 0) {
+      lines.push(chalk.dim(`  ${hwParts.join(' · ')}`));
+    }
 
-  // Agent status
-  if (host.agentInstalled) {
-    lines.push(`  ${chalk.green('✓')} Agent installed`);
+    // GPU
+    if (agentStatus.gpu && agentStatus.gpu.length > 0) {
+      for (const g of agentStatus.gpu) {
+        lines.push(`    ${chalk.white(g.name)} ${chalk.dim(`(${g.memoryGB} GB)`)}`);
+      }
+    }
+
+    // AI Providers
+    if (agentStatus.providers && agentStatus.providers.length > 0) {
+      lines.push('');
+      lines.push(chalk.white('  AI Providers'));
+      for (const p of agentStatus.providers) {
+        const ver = p.version ? chalk.dim(` v${p.version}`) : '';
+        const model = p.model ? chalk.dim(` · model: ${p.model}`) : '';
+        lines.push(`    ${chalk.green('✓')} ${chalk.white(p.name)}${ver}${model}`);
+      }
+    }
   }
 
   if (message && status === 'failed') {

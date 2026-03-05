@@ -462,7 +462,7 @@ program
         // Show structured box per remote host
         for (const r of results) {
           const status = r.success ? 'running' as const : 'failed' as const;
-          console.log(formatRemoteHostBox(r.host, status, r.message));
+          console.log(formatRemoteHostBox(r.host, status, r.message, r.agentStatus));
         }
 
         const ok = results.filter((r) => r.success).length;
