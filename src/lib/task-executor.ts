@@ -6,6 +6,8 @@
  */
 
 import { homedir } from 'node:os';
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
 import type { Task, TaskStatus, ProviderType, HpcCapability } from '../types.js';
 import type { WebSocketClient } from './websocket-client.js';
 import { createProviderAdapter, type ProviderAdapter } from '../providers/index.js';
@@ -24,6 +26,8 @@ import {
   type SafetyCheckResult,
   type SandboxSetup,
 } from './workdir-safety.js';
+
+const execFileAsync = promisify(execFileCb);
 
 interface RunningTask {
   task: Task;
@@ -932,6 +936,11 @@ export class TaskExecutor {
         result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
       }
 
+      // Emit accurate file change events via git diff (covers all change methods)
+      if (!isTextOnly && prepared.workingDirectory) {
+        await this.emitGitDiffFileChanges(task.id, prepared.workingDirectory, prepared.commitBeforeSha, stream);
+      }
+
       // Delivery-mode-aware result handling
       const deliveryMode = task.deliveryMode ?? 'pr';
       // Build PR title: prefer summary.workCompleted (agent knows what it did),
@@ -1245,6 +1254,94 @@ export class TaskExecutor {
       console.error(`[executor] Task ${task.id}: worktree creation FAILED: ${errorMsg}`);
       this.wsClient.sendTaskStatus(task.id, 'failed', 0, `Worktree setup failed: ${errorMsg}`);
       throw error;
+    }
+  }
+
+  /**
+   * Run `git diff --numstat` after task execution to emit accurate file_change
+   * events with real line counts. Covers all changes (Write, Edit, Bash sed/cat, etc.)
+   * and correctly handles binary files (skipped for line counts).
+   */
+  private async emitGitDiffFileChanges(
+    taskId: string,
+    workdir: string,
+    commitBeforeSha: string | undefined,
+    stream: { fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number) => void },
+  ): Promise<void> {
+    try {
+      // Collect diff output from both committed and uncommitted changes.
+      // commitBeforeSha..HEAD covers committed work; HEAD vs working tree covers uncommitted.
+      let output = '';
+
+      if (commitBeforeSha) {
+        // Diff committed changes since the task started
+        const { stdout } = await execFileAsync(
+          'git', ['-C', workdir, 'diff', '--numstat', commitBeforeSha, 'HEAD'],
+          { timeout: 30_000 },
+        );
+        output = stdout;
+
+        // Also include uncommitted changes (staged + unstaged) on top of HEAD
+        const { stdout: uncommitted } = await execFileAsync(
+          'git', ['-C', workdir, 'diff', '--numstat', 'HEAD'],
+          { timeout: 30_000 },
+        );
+        if (uncommitted.trim()) {
+          output = output ? output + '\n' + uncommitted : uncommitted;
+        }
+      } else {
+        // No commitBeforeSha — diff working tree against HEAD
+        const { stdout } = await execFileAsync(
+          'git', ['-C', workdir, 'diff', '--numstat', 'HEAD'],
+          { timeout: 30_000 },
+        );
+        output = stdout;
+      }
+
+      if (!output.trim()) return;
+
+      // Deduplicate: same file may appear in both committed and uncommitted diffs.
+      // Accumulate line counts per file.
+      const fileStats = new Map<string, { added: number; removed: number; binary: boolean }>();
+
+      for (const line of output.trim().split('\n')) {
+        // Format: "added\tremoved\tfilename" or "-\t-\tfilename" for binary
+        const parts = line.split('\t');
+        if (parts.length < 3) continue;
+
+        const [addedStr, removedStr, ...pathParts] = parts;
+        const filePath = pathParts.join('\t'); // Handle filenames with tabs
+
+        if (addedStr === '-' || removedStr === '-') {
+          // Binary file
+          if (!fileStats.has(filePath)) {
+            fileStats.set(filePath, { added: 0, removed: 0, binary: true });
+          }
+          continue;
+        }
+
+        const added = parseInt(addedStr, 10) || 0;
+        const removed = parseInt(removedStr, 10) || 0;
+        const existing = fileStats.get(filePath);
+        if (existing && !existing.binary) {
+          existing.added += added;
+          existing.removed += removed;
+        } else if (!existing) {
+          fileStats.set(filePath, { added, removed, binary: false });
+        }
+      }
+
+      for (const [filePath, stats] of fileStats) {
+        if (stats.binary) {
+          stream.fileChange(filePath, 'modified');
+        } else {
+          const action = stats.removed === 0 && stats.added > 0 ? 'created' : 'modified';
+          stream.fileChange(filePath, action, stats.added, stats.removed);
+        }
+      }
+    } catch (err) {
+      // Non-fatal — stats are best-effort
+      console.warn(`[executor] Task ${taskId}: git diff for file stats failed:`, err instanceof Error ? err.message : err);
     }
   }
 
