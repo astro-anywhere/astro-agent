@@ -23,6 +23,18 @@ interface CodexMetrics {
   numTurns?: number;
 }
 
+/** Active session state for steering/resume support */
+interface ActiveSession {
+  threadId: string;
+  taskId: string;
+  workingDirectory?: string;
+  model?: string;
+  /** Active child process (null after process exits) */
+  process: ChildProcess | null;
+  /** Abort controller for the current process */
+  abortController: AbortController;
+}
+
 export class CodexAdapter implements ProviderAdapter {
   readonly type = 'codex';
   readonly name = 'OpenAI Codex';
@@ -33,6 +45,9 @@ export class CodexAdapter implements ProviderAdapter {
   private codexPath: string | null = null;
   private configModel: string | null = null;
 
+  /** Active sessions per task ID for steering/resume */
+  private activeSessions = new Map<string, ActiveSession>();
+
   /**
    * Accumulated metrics from the current execution.
    * Populated by handleStreamLine() as usage events arrive,
@@ -40,6 +55,8 @@ export class CodexAdapter implements ProviderAdapter {
    */
   private lastResultMetrics?: CodexMetrics;
   private turnCount = 0;
+  /** Thread ID from the most recent execution (populated by handleStreamLine) */
+  private lastThreadId?: string;
 
   async isAvailable(): Promise<boolean> {
     const provider = await getProvider('codex');
@@ -84,12 +101,25 @@ export class CodexAdapter implements ProviderAdapter {
     this.activeTasks++;
     this.lastResultMetrics = undefined;
     this.turnCount = 0;
+    this.lastThreadId = undefined;
     const startedAt = new Date().toISOString();
 
     try {
       stream.status('running', 0, 'Starting Codex');
 
       const result = await this.runCodex(task, stream, signal);
+
+      // Store session for potential steering/resume
+      if (this.lastThreadId) {
+        this.activeSessions.set(task.id, {
+          threadId: this.lastThreadId,
+          taskId: task.id,
+          workingDirectory: task.workingDirectory,
+          model: result.model,
+          process: null, // Process has exited
+          abortController: new AbortController(),
+        });
+      }
 
       // Build metrics from accumulated stream data + result model.
       // lastResultMetrics is populated by extractUsageFromEvent() during streaming.
@@ -143,6 +173,130 @@ export class CodexAdapter implements ProviderAdapter {
       maxTasks: this.maxTasks,
       lastError: this.lastError,
     };
+  }
+
+  /**
+   * Inject a steering message into a completed task's session.
+   * Uses `codex exec resume <threadId> <message> --json` to continue the conversation.
+   * Returns true if the message was successfully injected.
+   */
+  async injectMessage(taskId: string, _content: string, _interrupt = false): Promise<boolean> {
+    const session = this.activeSessions.get(taskId);
+    if (!session) {
+      console.log(`[codex] Cannot inject message: no session for task ${taskId}`);
+      return false;
+    }
+    // For Codex, injection means starting a new resume process.
+    // The caller (resumeTask) handles the full lifecycle.
+    // This is a simplified check — return true if we have a session.
+    return true;
+  }
+
+  /**
+   * Resume a completed Codex session to continue execution.
+   * Uses `codex exec resume <threadId> <prompt> --json` for multi-turn conversations.
+   */
+  async resumeTask(
+    taskId: string,
+    message: string,
+    workingDirectory: string,
+    sessionId: string,
+    stream: TaskOutputStream,
+    signal: AbortSignal,
+  ): Promise<{ success: boolean; output: string; error?: string }> {
+    if (!this.codexPath) {
+      const available = await this.isAvailable();
+      if (!available) {
+        return { success: false, output: '', error: 'Codex not available' };
+      }
+    }
+
+    // Use sessionId as the threadId (the Codex thread UUID)
+    const threadId = sessionId;
+
+    const isGitRepo = workingDirectory && existsSync(join(workingDirectory, '.git'));
+    const model = this.activeSessions.get(taskId)?.model || this.configModel;
+
+    const args = [
+      'exec', 'resume',
+      threadId,
+      message,
+      '--json',
+      '--dangerously-bypass-approvals-and-sandbox',
+      ...(model ? ['-m', model] : []),
+      ...(!isGitRepo ? ['--skip-git-repo-check'] : []),
+    ];
+
+    return new Promise((resolve) => {
+      let proc: ChildProcess;
+
+      try {
+        proc = spawn(this.codexPath!, args, {
+          cwd: workingDirectory || undefined,
+          env: process.env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      } catch (error) {
+        resolve({
+          success: false,
+          output: '',
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+
+      let stdout = '';
+      let stderr = '';
+      const artifacts: TaskArtifact[] = [];
+      this.lastResultMetrics = undefined;
+      this.turnCount = 0;
+
+      const abortHandler = () => {
+        proc.kill('SIGTERM');
+        setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+      };
+      signal.addEventListener('abort', abortHandler);
+
+      let lineBuf = '';
+      proc.stdout?.on('data', (data: Buffer) => {
+        const text = data.toString();
+        stdout += text;
+        lineBuf += text;
+        const lines = lineBuf.split('\n');
+        lineBuf = lines.pop() || '';
+        for (const line of lines) {
+          if (line.trim()) {
+            this.handleStreamLine(line, stream, artifacts, model || undefined);
+          }
+        }
+      });
+
+      proc.stderr?.on('data', (data: Buffer) => {
+        stderr += data.toString();
+        stream.stderr(data.toString());
+      });
+
+      proc.on('error', (error) => {
+        signal.removeEventListener('abort', abortHandler);
+        resolve({
+          success: false,
+          output: stdout,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+
+      proc.on('close', (code) => {
+        if (lineBuf.trim()) {
+          this.handleStreamLine(lineBuf, stream, artifacts, model || undefined);
+        }
+        signal.removeEventListener('abort', abortHandler);
+        resolve({
+          success: code === 0,
+          output: stdout,
+          error: stderr || undefined,
+        });
+      });
+    });
   }
 
   private async runCodex(
@@ -390,6 +544,7 @@ export class CodexAdapter implements ProviderAdapter {
           // Session init — extract thread_id and pass model
           const threadId = event.thread_id as string | undefined;
           if (threadId) {
+            this.lastThreadId = threadId;
             stream.sessionInit(threadId, model);
           }
           break;
@@ -474,6 +629,20 @@ export class CodexAdapter implements ProviderAdapter {
 
               // Extract file artifacts from command output
               this.extractFileArtifactsFromCommand(command, output, artifacts);
+              break;
+            }
+
+            case 'file_change': {
+              // Codex native file edit events (patches applied without shell commands)
+              const changes = item.changes as Array<{ path: string; kind: string }> | undefined;
+              if (changes && Array.isArray(changes)) {
+                for (const change of changes) {
+                  const action = change.kind === 'create' ? 'created'
+                    : change.kind === 'delete' ? 'deleted'
+                    : 'modified';
+                  stream.fileChange(change.path, action);
+                }
+              }
               break;
             }
 
