@@ -254,12 +254,18 @@ export class OpenClawBridge extends EventEmitter {
 
       this.pendingRequests.set(id, { resolve, reject, timeoutId });
 
-      this.ws!.send(JSON.stringify({
-        type: 'req',
-        id,
-        method,
-        params,
-      }));
+      try {
+        this.ws!.send(JSON.stringify({
+          type: 'req',
+          id,
+          method,
+          params,
+        }));
+      } catch (err) {
+        clearTimeout(timeoutId);
+        this.pendingRequests.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 
@@ -289,8 +295,10 @@ export class OpenClawBridge extends EventEmitter {
     } else if (frame.event === 'message.inbound') {
       const text = (frame.payload?.text as string) || '';
 
-      // If there are pending approvals, treat inbound message as an approval response
-      // Resolve the oldest pending approval (FIFO)
+      // If there are pending approvals, treat inbound message as an approval response.
+      // NOTE: This FIFO approach assumes serialized approvals. Concurrent approvals
+      // using the fallback path (no bot token) may match responses to the wrong request.
+      // The Telegram polling path (requestApprovalViaTelegram) avoids this issue.
       if (this.pendingApprovals.size > 0 && text.trim()) {
         const [approvalId] = this.pendingApprovals.keys();
         this.resolveApproval(approvalId, text.trim());

@@ -289,11 +289,13 @@ export class OpenClawAdapter implements ProviderAdapter {
       let finished = false;
       let lifecycleEnded = false;
       let chatFinalReceived = false;
+      let gracePeriodTimeout: ReturnType<typeof setTimeout> | undefined;
 
       const finish = (error?: string) => {
         if (finished) return;
         finished = true;
         if (taskTimeout) clearTimeout(taskTimeout);
+        if (gracePeriodTimeout) clearTimeout(gracePeriodTimeout);
         ws.close();
         resolve({
           output: outputText,
@@ -310,7 +312,7 @@ export class OpenClawAdapter implements ProviderAdapter {
           finish();
         } else {
           // Grace period: if chat.final doesn't arrive within 500ms, finish anyway
-          setTimeout(() => { if (!finished) finish(); }, 500);
+          gracePeriodTimeout = setTimeout(() => { if (!finished) finish(); }, 500);
         }
       };
 
