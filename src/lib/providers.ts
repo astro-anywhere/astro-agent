@@ -310,6 +310,7 @@ function probeGatewayReachable(url: string): Promise<boolean> {
       } catch { /* ignore */ }
     });
     ws.on('error', () => { clearTimeout(timeout); resolve(false) });
+    ws.on('close', () => { clearTimeout(timeout); resolve(false) });
   });
 }
 

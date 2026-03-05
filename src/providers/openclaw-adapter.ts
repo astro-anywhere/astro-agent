@@ -200,6 +200,11 @@ export class OpenClawAdapter implements ProviderAdapter {
         clearTimeout(timeout);
         resolve(false);
       });
+
+      ws.on('close', () => {
+        clearTimeout(timeout);
+        resolve(false);
+      });
     });
   }
 
@@ -371,8 +376,7 @@ export class OpenClawAdapter implements ProviderAdapter {
 
           // Filter to our session
           if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) {
-            // Also check by runId
-            if (runId && p.runId !== runId) return;
+            return;
           }
 
           const streamType = p.stream as string;
@@ -383,9 +387,25 @@ export class OpenClawAdapter implements ProviderAdapter {
             if (phase === 'start') {
               stream.sessionInit(
                 (p.sessionKey as string) || sessionKey,
-                undefined, // model comes from chat event
+                (eventData?.model as string) || undefined,
               );
             } else if (phase === 'end') {
+              // Extract usage metrics from lifecycle.end if available
+              const usage = eventData?.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+              const cost = (eventData?.total_cost_usd ?? eventData?.cost_usd) as number | undefined;
+              const numTurns = eventData?.num_turns as number | undefined;
+              const durationMs = eventData?.duration_ms as number | undefined;
+              const model = eventData?.model as string | undefined;
+              if (usage || cost !== undefined) {
+                lastMetrics = {
+                  inputTokens: usage?.input_tokens,
+                  outputTokens: usage?.output_tokens,
+                  totalCost: cost,
+                  numTurns,
+                  durationMs,
+                  model,
+                };
+              }
               lifecycleEnded = true;
               tryFinishAfterLifecycle();
             }
@@ -404,6 +424,14 @@ export class OpenClawAdapter implements ProviderAdapter {
             const result = eventData?.result || eventData?.output || '';
             const success = eventData?.success !== false;
             stream.toolResult(toolName, result, success);
+          } else if (streamType === 'file_change') {
+            const filePath = eventData?.path as string || eventData?.file as string;
+            const rawAction = (eventData?.type as string) || (eventData?.action as string) || 'modified';
+            const action = (['created', 'modified', 'deleted'].includes(rawAction) ? rawAction : 'modified') as 'created' | 'modified' | 'deleted';
+            if (filePath) {
+              artifacts.push({ type: 'file', name: filePath, path: filePath, metadata: { action } });
+              stream.fileChange(filePath, action);
+            }
           }
 
           return;
@@ -415,7 +443,7 @@ export class OpenClawAdapter implements ProviderAdapter {
 
           // Filter to our session
           if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) {
-            if (runId && p.runId !== runId) return;
+            return;
           }
 
           const state = p.state as string;
@@ -435,6 +463,20 @@ export class OpenClawAdapter implements ProviderAdapter {
                     }
                   }
                 }
+              }
+            }
+            // Extract model/usage from chat.final if not yet captured
+            if (!lastMetrics) {
+              const usage = p.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+              const cost = (p.total_cost_usd ?? p.cost_usd) as number | undefined;
+              const model = (p.model ?? message?.model) as string | undefined;
+              if (usage || cost !== undefined || model) {
+                lastMetrics = {
+                  inputTokens: usage?.input_tokens,
+                  outputTokens: usage?.output_tokens,
+                  totalCost: cost,
+                  model,
+                };
               }
             }
             // If lifecycle already ended, finish immediately

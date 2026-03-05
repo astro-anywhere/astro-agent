@@ -806,7 +806,7 @@ export class WebSocketClient {
       }
 
       // Handle channel.* (dot notation from relay) — normalize to underscore
-      if (raw.type === 'channel.notification' || raw.type === 'channel.response' || raw.type === 'channel.approval_request') {
+      if (typeof raw.type === 'string' && raw.type.startsWith('channel.')) {
         const normalized = {
           ...raw,
           type: raw.type.replace('.', '_'),
@@ -1025,7 +1025,13 @@ export class WebSocketClient {
         payload: { correlationId, approvalId, response },
       });
     } catch (err) {
-      console.warn(`[ws-client] Channel approval ${approvalId} failed:`, err instanceof Error ? err.message : err);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.warn(`[ws-client] Channel approval ${approvalId} failed:`, errorMsg);
+      this.send({
+        type: 'channel_approval_response',
+        timestamp: new Date().toISOString(),
+        payload: { correlationId, approvalId, response: '', error: errorMsg },
+      });
     }
   }
 
@@ -1407,6 +1413,11 @@ export class WebSocketClient {
   private cleanup(): void {
     this.stopHeartbeat();
     this.cancelTokenRefresh();
+
+    if (this.openclawBridge) {
+      this.openclawBridge.stop();
+      this.openclawBridge = null;
+    }
 
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
