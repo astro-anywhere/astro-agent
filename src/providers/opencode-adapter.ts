@@ -353,6 +353,14 @@ export class OpenCodeAdapter implements ProviderAdapter {
                   this.toolIdToName.set(block.id, block.name);
                 }
                 stream.toolUse(block.name ?? 'unknown', block.input);
+                // Emit file change event (line counts computed post-execution via git diff)
+                if (block.name === 'Write' || block.name === 'Edit') {
+                  const input = block.input as Record<string, unknown>;
+                  if (input.file_path) {
+                    const action = block.name === 'Write' ? 'created' : 'modified';
+                    stream.fileChange(String(input.file_path), action as 'created' | 'modified' | 'deleted');
+                  }
+                }
               }
             }
           }

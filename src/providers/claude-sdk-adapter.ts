@@ -1089,7 +1089,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
                   path: String(input.file_path),
                   metadata: { tool: block.name },
                 });
-                // Emit file change event
+                // Emit file change event (line counts computed post-execution via git diff)
                 const action = block.name === 'Write' ? 'created' : 'modified';
                 stream.fileChange(String(input.file_path), action as 'created' | 'modified' | 'deleted');
               }

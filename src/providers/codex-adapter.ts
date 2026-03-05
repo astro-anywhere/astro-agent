@@ -663,6 +663,7 @@ export class CodexAdapter implements ProviderAdapter {
 
             case 'file_change': {
               // Codex native file edit events (patches applied without shell commands)
+              // Line counts computed post-execution via git diff
               const changes = item.changes as Array<{ path: string; kind: string }> | undefined;
               if (changes && Array.isArray(changes)) {
                 for (const change of changes) {
