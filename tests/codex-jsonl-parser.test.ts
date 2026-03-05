@@ -40,6 +40,16 @@ function createMockStream(): TaskOutputStream {
 }
 
 /**
+ * Per-execution mutable state (mirrors ExecutionState from codex-adapter.ts).
+ * Tests use this to verify metrics and turn tracking without shared instance fields.
+ */
+interface TestExecutionState {
+  metrics?: { inputTokens?: number; outputTokens?: number; totalCost?: number; model?: string; numTurns?: number; durationMs?: number };
+  turnCount: number;
+  threadId?: string;
+}
+
+/**
  * Access the private handleStreamLine method for unit testing.
  * This is intentional — we're testing the parsing logic in isolation
  * without needing to spawn a real Codex process.
@@ -50,9 +60,12 @@ function callHandleStreamLine(
   stream: TaskOutputStream,
   artifacts: TaskArtifact[] = [],
   model?: string,
-): void {
+  execState?: TestExecutionState,
+): TestExecutionState {
+  const state = execState ?? { turnCount: 0 };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (adapter as any).handleStreamLine(line, stream, artifacts, model)
+  (adapter as any).handleStreamLine(line, stream, artifacts, model, state);
+  return state;
 }
 
 describe('Codex JSONL parser: handleStreamLine', () => {
@@ -309,6 +322,83 @@ describe('Codex JSONL parser: handleStreamLine', () => {
   })
 
   // ==========================================================================
+  // item.completed — file_change
+  // ==========================================================================
+
+  describe('item.completed: file_change', () => {
+    it('emits fileChange for created files', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'item_10',
+          type: 'file_change',
+          changes: [{ path: 'src/new-file.ts', kind: 'create' }],
+        },
+      }), stream, artifacts)
+
+      expect(stream.fileChange).toHaveBeenCalledWith('src/new-file.ts', 'created')
+    })
+
+    it('emits fileChange for deleted files', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'item_11',
+          type: 'file_change',
+          changes: [{ path: 'old-file.ts', kind: 'delete' }],
+        },
+      }), stream, artifacts)
+
+      expect(stream.fileChange).toHaveBeenCalledWith('old-file.ts', 'deleted')
+    })
+
+    it('maps unknown kind to modified', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'item_12',
+          type: 'file_change',
+          changes: [{ path: 'README.md', kind: 'modify' }],
+        },
+      }), stream, artifacts)
+
+      expect(stream.fileChange).toHaveBeenCalledWith('README.md', 'modified')
+    })
+
+    it('handles multiple changes in a single event', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'item_13',
+          type: 'file_change',
+          changes: [
+            { path: 'a.ts', kind: 'create' },
+            { path: 'b.ts', kind: 'modify' },
+            { path: 'c.ts', kind: 'delete' },
+          ],
+        },
+      }), stream, artifacts)
+
+      expect(stream.fileChange).toHaveBeenCalledTimes(3)
+      expect(stream.fileChange).toHaveBeenCalledWith('a.ts', 'created')
+      expect(stream.fileChange).toHaveBeenCalledWith('b.ts', 'modified')
+      expect(stream.fileChange).toHaveBeenCalledWith('c.ts', 'deleted')
+    })
+
+    it('handles missing changes array gracefully', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'item_14',
+          type: 'file_change',
+        },
+      }), stream, artifacts)
+
+      expect(stream.fileChange).not.toHaveBeenCalled()
+    })
+  })
+
+  // ==========================================================================
   // File artifact extraction from commands
   // ==========================================================================
 
@@ -509,7 +599,7 @@ describe('Codex JSONL parser: handleStreamLine', () => {
 
   describe('usage metrics extraction', () => {
     it('extracts usage from response.completed event', () => {
-      callHandleStreamLine(adapter, JSON.stringify({
+      const state = callHandleStreamLine(adapter, JSON.stringify({
         type: 'response.completed',
         response: {
           id: 'resp_001',
@@ -522,16 +612,13 @@ describe('Codex JSONL parser: handleStreamLine', () => {
         },
       }), stream, artifacts, 'o4-mini')
 
-      // Access private field via type assertion
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metrics = (adapter as any).lastResultMetrics
-      expect(metrics).toBeDefined()
-      expect(metrics.inputTokens).toBe(5000)
-      expect(metrics.outputTokens).toBe(1200)
+      expect(state.metrics).toBeDefined()
+      expect(state.metrics!.inputTokens).toBe(5000)
+      expect(state.metrics!.outputTokens).toBe(1200)
     })
 
     it('extracts usage from top-level usage field on any event', () => {
-      callHandleStreamLine(adapter, JSON.stringify({
+      const state = callHandleStreamLine(adapter, JSON.stringify({
         type: 'turn.completed',
         usage: {
           input_tokens: 3000,
@@ -540,14 +627,14 @@ describe('Codex JSONL parser: handleStreamLine', () => {
         },
       }), stream, artifacts)
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metrics = (adapter as any).lastResultMetrics
-      expect(metrics).toBeDefined()
-      expect(metrics.inputTokens).toBe(3000)
-      expect(metrics.outputTokens).toBe(800)
+      expect(state.metrics).toBeDefined()
+      expect(state.metrics!.inputTokens).toBe(3000)
+      expect(state.metrics!.outputTokens).toBe(800)
     })
 
     it('accumulates usage across multiple events (later events overwrite)', () => {
+      const state: TestExecutionState = { turnCount: 0 };
+
       // First turn
       callHandleStreamLine(adapter, JSON.stringify({
         type: 'turn.completed',
@@ -555,7 +642,7 @@ describe('Codex JSONL parser: handleStreamLine', () => {
           input_tokens: 1000,
           output_tokens: 500,
         },
-      }), stream, artifacts)
+      }), stream, artifacts, undefined, state)
 
       // Second turn (should overwrite)
       callHandleStreamLine(adapter, JSON.stringify({
@@ -564,17 +651,15 @@ describe('Codex JSONL parser: handleStreamLine', () => {
           input_tokens: 2000,
           output_tokens: 1000,
         },
-      }), stream, artifacts)
+      }), stream, artifacts, undefined, state)
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metrics = (adapter as any).lastResultMetrics
-      expect(metrics).toBeDefined()
-      expect(metrics.inputTokens).toBe(2000)
-      expect(metrics.outputTokens).toBe(1000)
+      expect(state.metrics).toBeDefined()
+      expect(state.metrics!.inputTokens).toBe(2000)
+      expect(state.metrics!.outputTokens).toBe(1000)
     })
 
     it('extracts total_cost from response.completed', () => {
-      callHandleStreamLine(adapter, JSON.stringify({
+      const state = callHandleStreamLine(adapter, JSON.stringify({
         type: 'response.completed',
         response: {
           id: 'resp_002',
@@ -586,51 +671,45 @@ describe('Codex JSONL parser: handleStreamLine', () => {
         },
       }), stream, artifacts)
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metrics = (adapter as any).lastResultMetrics
-      expect(metrics).toBeDefined()
-      expect(metrics.inputTokens).toBe(4000)
-      expect(metrics.outputTokens).toBe(900)
-      expect(metrics.totalCost).toBe(0.0325)
+      expect(state.metrics).toBeDefined()
+      expect(state.metrics!.inputTokens).toBe(4000)
+      expect(state.metrics!.outputTokens).toBe(900)
+      expect(state.metrics!.totalCost).toBe(0.0325)
     })
 
     it('extracts cost_usd as fallback', () => {
-      callHandleStreamLine(adapter, JSON.stringify({
+      const state = callHandleStreamLine(adapter, JSON.stringify({
         type: 'some.event',
         cost_usd: 0.05,
       }), stream, artifacts)
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metrics = (adapter as any).lastResultMetrics
-      expect(metrics).toBeDefined()
-      expect(metrics.totalCost).toBe(0.05)
+      expect(state.metrics).toBeDefined()
+      expect(state.metrics!.totalCost).toBe(0.05)
     })
 
     it('extracts model from events', () => {
-      callHandleStreamLine(adapter, JSON.stringify({
+      const state = callHandleStreamLine(adapter, JSON.stringify({
         type: 'response.completed',
         response: {
           model: 'gpt-5.3-codex',
         },
       }), stream, artifacts)
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metrics = (adapter as any).lastResultMetrics
-      expect(metrics).toBeDefined()
-      expect(metrics.model).toBe('gpt-5.3-codex')
+      expect(state.metrics).toBeDefined()
+      expect(state.metrics!.model).toBe('gpt-5.3-codex')
     })
 
     it('counts turns via turn.started events', () => {
-      callHandleStreamLine(adapter, JSON.stringify({ type: 'turn.started' }), stream, artifacts)
-      callHandleStreamLine(adapter, JSON.stringify({ type: 'turn.started' }), stream, artifacts)
-      callHandleStreamLine(adapter, JSON.stringify({ type: 'turn.started' }), stream, artifacts)
+      const state: TestExecutionState = { turnCount: 0 };
+      callHandleStreamLine(adapter, JSON.stringify({ type: 'turn.started' }), stream, artifacts, undefined, state)
+      callHandleStreamLine(adapter, JSON.stringify({ type: 'turn.started' }), stream, artifacts, undefined, state)
+      callHandleStreamLine(adapter, JSON.stringify({ type: 'turn.started' }), stream, artifacts, undefined, state)
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      expect((adapter as any).turnCount).toBe(3)
+      expect(state.turnCount).toBe(3)
     })
 
     it('does not create metrics object when no usage data is present', () => {
-      callHandleStreamLine(adapter, JSON.stringify({
+      const state = callHandleStreamLine(adapter, JSON.stringify({
         type: 'item.completed',
         item: {
           type: 'reasoning',
@@ -638,27 +717,24 @@ describe('Codex JSONL parser: handleStreamLine', () => {
         },
       }), stream, artifacts)
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metrics = (adapter as any).lastResultMetrics
-      expect(metrics).toBeUndefined()
+      expect(state.metrics).toBeUndefined()
     })
 
     it('handles partial usage (only input_tokens)', () => {
-      callHandleStreamLine(adapter, JSON.stringify({
+      const state = callHandleStreamLine(adapter, JSON.stringify({
         type: 'turn.completed',
         usage: {
           input_tokens: 7500,
         },
       }), stream, artifacts)
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metrics = (adapter as any).lastResultMetrics
-      expect(metrics).toBeDefined()
-      expect(metrics.inputTokens).toBe(7500)
-      expect(metrics.outputTokens).toBeUndefined()
+      expect(state.metrics).toBeDefined()
+      expect(state.metrics!.inputTokens).toBe(7500)
+      expect(state.metrics!.outputTokens).toBeUndefined()
     })
 
     it('handles full session with usage at response.completed', () => {
+      const state: TestExecutionState = { turnCount: 0 };
       const jsonlLines = [
         { type: 'thread.started', thread_id: 'thread-metrics-001' },
         { type: 'turn.started' },
@@ -679,19 +755,15 @@ describe('Codex JSONL parser: handleStreamLine', () => {
       ]
 
       for (const event of jsonlLines) {
-        callHandleStreamLine(adapter, JSON.stringify(event), stream, artifacts, 'o4-mini')
+        callHandleStreamLine(adapter, JSON.stringify(event), stream, artifacts, 'o4-mini', state)
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const metrics = (adapter as any).lastResultMetrics
-      expect(metrics).toBeDefined()
-      expect(metrics.inputTokens).toBe(12000)
-      expect(metrics.outputTokens).toBe(3500)
-      expect(metrics.totalCost).toBe(0.078)
-      expect(metrics.model).toBe('o4-mini')
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      expect((adapter as any).turnCount).toBe(2)
+      expect(state.metrics).toBeDefined()
+      expect(state.metrics!.inputTokens).toBe(12000)
+      expect(state.metrics!.outputTokens).toBe(3500)
+      expect(state.metrics!.totalCost).toBe(0.078)
+      expect(state.metrics!.model).toBe('o4-mini')
+      expect(state.turnCount).toBe(2)
     })
   })
 })
