@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { access, constants, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import WebSocket from 'ws';
 import type { ProviderInfo, ProviderType, ProviderCapabilities, HpcCapability } from '../types.js';
 import { detectSlurm } from './slurm-detect.js';
 
@@ -291,82 +292,65 @@ async function detectCodex(): Promise<ProviderInfo | null> {
 }
 
 /**
- * Common installation paths for OpenClaw
+ * Quick probe: connect to a WebSocket URL and check for connect.challenge.
+ * Does NOT perform a full handshake — just confirms the gateway is reachable.
  */
-function getOpenClawPaths(): string[] {
-  const home = homedir();
-  const platform = process.platform;
-
-  const paths: string[] = [];
-
-  // npm/pnpm global installs
-  paths.push(join(home, '.npm', 'bin', 'openclaw'));
-  paths.push(join(home, '.npm-global', 'bin', 'openclaw'));
-  paths.push(join(home, '.local', 'bin', 'openclaw'));
-  paths.push(join(home, '.yarn', 'bin', 'openclaw'));
-  paths.push(join(home, '.pnpm-global', 'bin', 'openclaw'));
-
-  if (platform === 'darwin') {
-    paths.push('/usr/local/bin/openclaw');
-    paths.push('/opt/homebrew/bin/openclaw');
-  } else if (platform === 'win32') {
-    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
-    paths.push(join(appData, 'npm', 'openclaw.cmd'));
-    paths.push(join(appData, 'npm', 'openclaw'));
-  } else {
-    paths.push('/usr/local/bin/openclaw');
-    paths.push('/usr/bin/openclaw');
-  }
-
-  return paths;
+function probeGatewayReachable(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => { ws.close(); resolve(false) }, 5000);
+    const ws = new WebSocket(url);
+    ws.on('message', (data) => {
+      try {
+        const frame = JSON.parse(String(data));
+        if (frame.type === 'event' && frame.event === 'connect.challenge') {
+          clearTimeout(timeout);
+          ws.close();
+          resolve(true);
+        }
+      } catch { /* ignore */ }
+    });
+    ws.on('error', () => { clearTimeout(timeout); resolve(false) });
+  });
 }
 
 /**
- * Detect OpenClaw CLI installation
+ * Detect OpenClaw gateway availability.
+ *
+ * Reads ~/.openclaw/openclaw.json for gateway port + auth token,
+ * then probes ws://127.0.0.1:{port} for a connect.challenge event.
+ * The adapter itself handles the full handshake at execution time.
  */
 async function detectOpenClaw(): Promise<ProviderInfo | null> {
-  const exists = await commandExists('openclaw');
-  if (exists) {
-    const path = await getCommandPath('openclaw');
-    const version = await getCommandVersion('openclaw', '--version');
+  try {
+    const configPath = join(homedir(), '.openclaw', 'openclaw.json');
+    const raw = JSON.parse(await readFile(configPath, 'utf-8'));
+    const port = raw?.gateway?.port as number | undefined;
+    if (!port) return null;
+
+    const bind = (raw?.gateway?.bind as string) || '127.0.0.1';
+    const host = bind === 'loopback' || bind === '127.0.0.1' ? '127.0.0.1' : bind;
+    const url = `ws://${host}:${port}`;
+
+    // Quick probe — just check for connect.challenge (no full handshake)
+    const reachable = await probeGatewayReachable(url);
+    if (!reachable) return null;
 
     return {
       type: 'openclaw' as ProviderType,
       name: 'OpenClaw',
-      version,
-      path: path ?? 'openclaw',
+      version: null,
+      path: url,
       available: true,
       capabilities: {
         streaming: true,
         tools: true,
         multiTurn: true,
-        maxConcurrentTasks: 1,
+        maxConcurrentTasks: 10,
       },
     };
+  } catch {
+    return null;
   }
-
-  const commonPaths = getOpenClawPaths();
-  for (const clawPath of commonPaths) {
-    const isExecutable = await fileExecutable(clawPath);
-    if (isExecutable) {
-      const version = await getCommandVersion(clawPath, '--version');
-      return {
-        type: 'openclaw' as ProviderType,
-        name: 'OpenClaw',
-        version,
-        path: clawPath,
-        available: true,
-        capabilities: {
-          streaming: true,
-          tools: true,
-          multiTurn: true,
-          maxConcurrentTasks: 1,
-        },
-      };
-    }
-  }
-
-  return null;
 }
 
 /**

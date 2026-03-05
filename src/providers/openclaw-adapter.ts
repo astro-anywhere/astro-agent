@@ -1,67 +1,92 @@
 /**
- * OpenClaw provider adapter
+ * OpenClaw provider adapter — Gateway WebSocket mode
  *
- * Executes tasks using the OpenClaw CLI in RPC/JSON streaming mode.
+ * Connects to the local OpenClaw gateway via WebSocket and dispatches tasks
+ * using `chat.send`. Each task gets its own session key for isolation.
  *
- * CLI invocation:
- *   openclaw agent --mode rpc --json --prompt "<task>"
+ * Gateway discovery:
+ *   1. Read ~/.openclaw/openclaw.json for gateway port + auth token
+ *   2. Probe ws://127.0.0.1:{port} for connect.challenge
+ *   3. Handshake with client.id='gateway-client', mode='backend'
  *
- * Output: JSONL streaming to stdout with event types:
- *   session.start, content.text, tool_use.start, tool_use.end,
- *   file.change, message.start, message.end, session.end
+ * Execution flow:
+ *   chat.send({ sessionKey, message, idempotencyKey })
+ *   → gateway streams `agent` + `chat` events over WebSocket
+ *   → adapter translates to TaskOutputStream calls
+ *   → returns TaskResult on session completion
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { randomUUID } from 'node:crypto';
+import WebSocket from 'ws';
 import type { Task, TaskResult, TaskArtifact } from '../types.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
-import { getProvider } from '../lib/providers.js';
+
+// ---------------------------------------------------------------------------
+// Types — OpenClaw Gateway Protocol v3
+// ---------------------------------------------------------------------------
+
+interface GatewayConfig {
+  port: number;
+  token: string;
+  url: string;
+}
+
+interface GatewayFrame {
+  type: 'event' | 'res';
+  id?: string;
+  event?: string;
+  ok?: boolean;
+  payload?: Record<string, unknown>;
+  error?: { code: string; message: string };
+  seq?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const PROTOCOL_VERSION = 3;
+const CONNECT_TIMEOUT_MS = 10_000;
+
+// ---------------------------------------------------------------------------
+// Adapter
+// ---------------------------------------------------------------------------
 
 export class OpenClawAdapter implements ProviderAdapter {
   readonly type = 'openclaw';
   readonly name = 'OpenClaw';
 
   private activeTasks = 0;
-  private maxTasks = 1;
+  private maxTasks = 10;
   private lastError?: string;
-  private openclawPath: string | null = null;
-  private configModel: string | null = null;
+  private gatewayConfig: GatewayConfig | null = null;
 
   async isAvailable(): Promise<boolean> {
-    const provider = await getProvider('openclaw');
-    if (provider?.available) {
-      this.openclawPath = provider.path;
-      this.configModel = this.readConfigModel();
-      return true;
-    }
-    return false;
-  }
+    const config = this.readGatewayConfig();
+    if (!config) return false;
 
-  /**
-   * Read the default model from ~/.openclaw/config.json
-   */
-  private readConfigModel(): string | null {
+    this.gatewayConfig = config;
+
+    // Probe the gateway with a quick connect
     try {
-      const configPath = join(homedir(), '.openclaw', 'config.json');
-      if (!existsSync(configPath)) return null;
-      const content = readFileSync(configPath, 'utf-8');
-      const config = JSON.parse(content) as { model?: string };
-      return config.model ?? null;
+      const ok = await this.probeGateway(config);
+      return ok;
     } catch {
-      return null;
+      return false;
     }
   }
 
   async execute(task: Task, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
-    if (!this.openclawPath) {
+    if (!this.gatewayConfig) {
       const available = await this.isAvailable();
       if (!available) {
         return {
           taskId: task.id,
           status: 'failed',
-          error: 'OpenClaw not available',
+          error: 'OpenClaw gateway not available',
           startedAt: new Date().toISOString(),
           completedAt: new Date().toISOString(),
         };
@@ -72,14 +97,12 @@ export class OpenClawAdapter implements ProviderAdapter {
     const startedAt = new Date().toISOString();
 
     try {
-      stream.status('running', 0, 'Starting OpenClaw');
-
-      const result = await this.runOpenClaw(task, stream, signal);
-
+      stream.status('running', 0, 'Connecting to OpenClaw gateway');
+      const result = await this.runViaGateway(task, stream, signal);
+      const isCancelled = signal.aborted || result.error === 'Task cancelled';
       return {
         taskId: task.id,
-        status: result.exitCode === 0 ? 'completed' : 'failed',
-        exitCode: result.exitCode,
+        status: isCancelled ? 'cancelled' : result.error ? 'failed' : 'completed',
         output: result.output,
         error: result.error,
         startedAt,
@@ -115,270 +138,334 @@ export class OpenClawAdapter implements ProviderAdapter {
 
   async getStatus(): Promise<ProviderStatus> {
     const available = await this.isAvailable();
-    const provider = await getProvider('openclaw');
-
     return {
       available,
-      version: provider?.version ?? null,
+      version: null,
       activeTasks: this.activeTasks,
       maxTasks: this.maxTasks,
       lastError: this.lastError,
     };
   }
 
-  private runOpenClaw(
+  // ─── Gateway Config Discovery ────────────────────────────────────
+
+  private readGatewayConfig(): GatewayConfig | null {
+    try {
+      const configPath = join(homedir(), '.openclaw', 'openclaw.json');
+      if (!existsSync(configPath)) return null;
+
+      const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
+      const port = raw?.gateway?.port as number | undefined;
+      if (!port) return null;
+
+      const token = (raw?.gateway?.auth?.token as string) || '';
+      const bind = (raw?.gateway?.bind as string) || '127.0.0.1';
+      const host = bind === 'loopback' || bind === '127.0.0.1' ? '127.0.0.1' : bind;
+
+      return {
+        port,
+        token,
+        url: `ws://${host}:${port}`,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // ─── Gateway Probe ───────────────────────────────────────────────
+
+  private probeGateway(config: GatewayConfig): Promise<boolean> {
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        ws.close();
+        resolve(false);
+      }, 5000);
+
+      const ws = new WebSocket(config.url);
+
+      ws.on('message', (data) => {
+        try {
+          const frame = JSON.parse(String(data)) as GatewayFrame;
+          if (frame.type === 'event' && frame.event === 'connect.challenge') {
+            clearTimeout(timeout);
+            ws.close();
+            resolve(true);
+          }
+        } catch {
+          // ignore
+        }
+      });
+
+      ws.on('error', () => {
+        clearTimeout(timeout);
+        resolve(false);
+      });
+    });
+  }
+
+  // ─── Gateway Connection ──────────────────────────────────────────
+
+  private connectToGateway(config: GatewayConfig): Promise<WebSocket> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ws.close();
+        reject(new Error('Gateway connection timeout'));
+      }, CONNECT_TIMEOUT_MS);
+
+      const ws = new WebSocket(config.url);
+
+      ws.on('message', (data) => {
+        try {
+          const frame = JSON.parse(String(data)) as GatewayFrame;
+
+          // Step 1: Receive challenge, send connect
+          if (frame.type === 'event' && frame.event === 'connect.challenge') {
+            ws.send(JSON.stringify({
+              type: 'req',
+              id: 'connect-1',
+              method: 'connect',
+              params: {
+                minProtocol: PROTOCOL_VERSION,
+                maxProtocol: PROTOCOL_VERSION,
+                client: {
+                  id: 'gateway-client',
+                  version: 'dev',
+                  platform: process.platform,
+                  mode: 'backend',
+                },
+                caps: ['tool-events'],
+                auth: { token: config.token },
+                role: 'operator',
+                scopes: ['operator.read', 'operator.write'],
+              },
+            }));
+          }
+
+          // Step 2: Receive connect response
+          if (frame.type === 'res' && frame.id === 'connect-1') {
+            clearTimeout(timeout);
+            if (frame.ok) {
+              resolve(ws);
+            } else {
+              ws.close();
+              reject(new Error(`Gateway handshake failed: ${frame.error?.message || 'unknown'}`));
+            }
+          }
+        } catch {
+          // ignore parse errors during handshake
+        }
+      });
+
+      ws.on('error', (err) => {
+        clearTimeout(timeout);
+        reject(err);
+      });
+    });
+  }
+
+  // ─── Task Execution via Gateway ──────────────────────────────────
+
+  private async runViaGateway(
     task: Task,
     stream: TaskOutputStream,
-    signal: AbortSignal
+    signal: AbortSignal,
   ): Promise<{
-    exitCode: number;
     output: string;
     error?: string;
     artifacts?: TaskArtifact[];
     metrics?: TaskResult['metrics'];
   }> {
-    return new Promise((resolve, reject) => {
-      // OpenClaw CLI: agent --mode rpc --json
-      // --mode rpc: Non-interactive RPC mode (no TUI)
-      // --json: JSONL streaming output to stdout
-      const model = task.model || this.configModel;
+    const ws = await this.connectToGateway(this.gatewayConfig!);
+    stream.status('running', 5, 'Connected to gateway');
 
-      // Combine systemPrompt with prompt when provided (e.g., interactive plan sessions)
+    return new Promise((resolve) => {
+
+      const sessionKey = `astro:task:${task.id}`;
+      const idempotencyKey = randomUUID();
+      const artifacts: TaskArtifact[] = [];
+      let outputText = '';
+      let lastMetrics: TaskResult['metrics'] | undefined;
+      let runId: string | undefined;
+      let finished = false;
+
+      const finish = (error?: string) => {
+        if (finished) return;
+        finished = true;
+        ws.close();
+        resolve({
+          output: outputText,
+          error,
+          artifacts: artifacts.length > 0 ? artifacts : undefined,
+          metrics: lastMetrics,
+        });
+      };
+
+      // Handle abort
+      const abortHandler = () => {
+        if (runId) {
+          // Try to abort the chat
+          try {
+            ws.send(JSON.stringify({
+              type: 'req',
+              id: 'abort-1',
+              method: 'chat.abort',
+              params: { sessionKey },
+            }));
+          } catch {
+            // ignore
+          }
+        }
+        finish('Task cancelled');
+      };
+      signal.addEventListener('abort', abortHandler);
+
+      // Handle timeout
+      let taskTimeout: ReturnType<typeof setTimeout> | undefined;
+      if (task.timeout) {
+        taskTimeout = setTimeout(() => {
+          finish('Task timed out');
+        }, task.timeout);
+      }
+
+      // Handle incoming events
+      ws.on('message', (data) => {
+        if (finished) return;
+
+        let frame: GatewayFrame;
+        try {
+          frame = JSON.parse(String(data));
+        } catch {
+          return;
+        }
+
+        // Handle chat.send response
+        if (frame.type === 'res' && frame.id === 'chat-send-1') {
+          if (frame.ok) {
+            runId = frame.payload?.runId as string;
+            stream.status('running', 10, 'Task dispatched to agent');
+          } else {
+            finish(`Gateway rejected task: ${frame.error?.message || 'unknown'}`);
+          }
+          return;
+        }
+
+        // Handle agent events
+        if (frame.type === 'event' && frame.event === 'agent') {
+          const p = frame.payload || {};
+
+          // Filter to our session
+          if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) {
+            // Also check by runId
+            if (runId && p.runId !== runId) return;
+          }
+
+          const streamType = p.stream as string;
+          const eventData = p.data as Record<string, unknown> | undefined;
+
+          if (streamType === 'lifecycle') {
+            const phase = eventData?.phase as string;
+            if (phase === 'start') {
+              stream.sessionInit(
+                (p.sessionKey as string) || sessionKey,
+                undefined, // model comes from chat event
+              );
+            } else if (phase === 'end') {
+              // Session complete — wait briefly for final chat event, then finish
+              setTimeout(() => finish(), 500);
+            }
+          } else if (streamType === 'assistant') {
+            const delta = eventData?.delta as string || eventData?.text as string;
+            if (delta) {
+              outputText += delta;
+              stream.text(delta);
+            }
+          } else if (streamType === 'tool_use') {
+            const toolName = (eventData?.name as string) || (eventData?.toolName as string) || 'unknown';
+            const toolInput = eventData?.input || eventData?.toolInput || {};
+            stream.toolUse(toolName, toolInput);
+          } else if (streamType === 'tool_result') {
+            const toolName = (eventData?.name as string) || (eventData?.toolName as string) || 'unknown';
+            const result = eventData?.result || eventData?.output || '';
+            const success = eventData?.success !== false;
+            stream.toolResult(toolName, result, success);
+          }
+
+          return;
+        }
+
+        // Handle chat events (for final state + model info)
+        if (frame.type === 'event' && frame.event === 'chat') {
+          const p = frame.payload || {};
+
+          // Filter to our session
+          if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) {
+            if (runId && p.runId !== runId) return;
+          }
+
+          const state = p.state as string;
+
+          if (state === 'final') {
+            // Extract final message content
+            const message = p.message as Record<string, unknown> | undefined;
+            if (message) {
+              const content = message.content as Array<{ type: string; text?: string }> | undefined;
+              if (content) {
+                for (const block of content) {
+                  if (block.type === 'text' && block.text) {
+                    // Only add if not already captured via agent delta events
+                    if (!outputText.includes(block.text)) {
+                      outputText += block.text;
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          return;
+        }
+
+        // Handle tick/health/presence (ignore)
+        if (frame.type === 'event') {
+          const ignoredEvents = ['tick', 'health', 'presence', 'heartbeat'];
+          if (frame.event && ignoredEvents.includes(frame.event)) return;
+        }
+      });
+
+      ws.on('close', () => {
+        if (!finished) {
+          finish('Gateway connection closed unexpectedly');
+        }
+      });
+
+      ws.on('error', (err) => {
+        if (!finished) {
+          finish(`Gateway WebSocket error: ${err.message}`);
+        }
+      });
+
+      // Build the prompt
       const effectivePrompt = task.systemPrompt
         ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
         : task.prompt;
 
-      const args = [
-        'agent',
-        '--mode', 'rpc',
-        '--json',
-        ...(model ? ['--model', model] : []),
-        '--prompt', effectivePrompt,
-      ];
+      // Send chat.send
+      ws.send(JSON.stringify({
+        type: 'req',
+        id: 'chat-send-1',
+        method: 'chat.send',
+        params: {
+          sessionKey,
+          message: effectivePrompt,
+          idempotencyKey,
+        },
+      }));
 
-      const env = {
-        ...process.env,
-        ...task.environment,
-      };
-
-      // Validate working directory exists before spawning
-      if (task.workingDirectory && !existsSync(task.workingDirectory)) {
-        reject(new Error(
-          `Working directory does not exist: ${task.workingDirectory}. ` +
-          `Ensure the directory exists on this machine before dispatching.`
-        ));
-        return;
-      }
-
-      let proc: ChildProcess;
-
-      try {
-        proc = spawn(this.openclawPath!, args, {
-          cwd: task.workingDirectory || undefined,
-          env,
-          stdio: ['pipe', 'pipe', 'pipe'],
-        });
-      } catch (error) {
-        reject(error);
-        return;
-      }
-
-      let stdout = '';
-      let stderr = '';
-      let lastMetrics: TaskResult['metrics'] | undefined;
-      const artifacts: TaskArtifact[] = [];
-
-      const abortHandler = () => {
-        proc.kill('SIGTERM');
-        setTimeout(() => {
-          if (!proc.killed) {
-            proc.kill('SIGKILL');
-          }
-        }, 5000);
-      };
-
-      signal.addEventListener('abort', abortHandler);
-
-      // Line buffer for incomplete JSONL lines
-      let lineBuf = '';
-
-      proc.stdout?.on('data', (data: Buffer) => {
-        const text = data.toString();
-        stdout += text;
-
-        lineBuf += text;
-        const lines = lineBuf.split('\n');
-        lineBuf = lines.pop() || '';
-        for (const line of lines) {
-          if (line.trim()) {
-            const metrics = this.handleStreamLine(line, stream, artifacts);
-            if (metrics) {
-              lastMetrics = metrics;
-            }
-          }
-        }
-      });
-
-      proc.stderr?.on('data', (data: Buffer) => {
-        const text = data.toString();
-        stderr += text;
-        stream.stderr(text);
-      });
-
-      proc.on('error', (error) => {
+      // Ensure signal listener and timeout are cleaned up when ws closes
+      ws.on('close', () => {
         signal.removeEventListener('abort', abortHandler);
-        reject(error);
+        if (taskTimeout) clearTimeout(taskTimeout);
       });
-
-      proc.on('close', (code) => {
-        // Flush remaining buffer
-        if (lineBuf.trim()) {
-          const metrics = this.handleStreamLine(lineBuf, stream, artifacts);
-          if (metrics) {
-            lastMetrics = metrics;
-          }
-        }
-
-        signal.removeEventListener('abort', abortHandler);
-
-        resolve({
-          exitCode: code ?? 1,
-          output: stdout,
-          error: stderr || undefined,
-          artifacts: artifacts.length > 0 ? artifacts : undefined,
-          metrics: lastMetrics,
-        });
-      });
-
-      if (task.timeout) {
-        setTimeout(() => {
-          if (!proc.killed) {
-            proc.kill('SIGTERM');
-            setTimeout(() => {
-              if (!proc.killed) {
-                proc.kill('SIGKILL');
-              }
-            }, 5000);
-          }
-        }, task.timeout);
-      }
     });
-  }
-
-  /**
-   * Handle a single JSONL line from OpenClaw's RPC output.
-   *
-   * OpenClaw JSONL event types:
-   * - session.start     → sessionInit
-   * - content.text      → text output
-   * - tool_use.start    → toolUse
-   * - tool_use.end      → toolResult
-   * - file.change       → fileChange
-   * - message.start     → status update (agent thinking)
-   * - message.end       → status update (turn complete)
-   * - session.end       → metrics extraction
-   *
-   * Returns metrics if a session.end event is processed.
-   */
-  handleStreamLine(
-    line: string,
-    stream: TaskOutputStream,
-    artifacts: TaskArtifact[],
-  ): TaskResult['metrics'] | undefined {
-    try {
-      const event = JSON.parse(line) as Record<string, unknown>;
-      const type = event.type as string;
-
-      switch (type) {
-        case 'session.start': {
-          const sessionId = event.session_id as string | undefined;
-          const model = event.model as string | undefined;
-          if (sessionId) {
-            stream.sessionInit(sessionId, model);
-          }
-          break;
-        }
-
-        case 'message.start': {
-          stream.status('running', undefined, 'Agent thinking...');
-          break;
-        }
-
-        case 'content.text': {
-          const text = event.text as string | undefined;
-          if (text) {
-            stream.text(text);
-          }
-          break;
-        }
-
-        case 'tool_use.start': {
-          const toolName = event.tool_name as string || 'unknown';
-          const toolInput = event.tool_input ?? {};
-          stream.toolUse(toolName, toolInput);
-          break;
-        }
-
-        case 'tool_use.end': {
-          const toolName = event.tool_name as string || 'unknown';
-          const result = event.result;
-          const success = event.success !== false;
-          stream.toolResult(toolName, result, success);
-          break;
-        }
-
-        case 'file.change': {
-          const path = event.path as string;
-          const action = (event.action as 'created' | 'modified' | 'deleted') || 'modified';
-          const linesAdded = event.lines_added as number | undefined;
-          const linesRemoved = event.lines_removed as number | undefined;
-          if (path) {
-            stream.fileChange(path, action, linesAdded, linesRemoved);
-            if (!artifacts.some((a) => a.path === path)) {
-              artifacts.push({ type: 'file', name: path, path });
-            }
-          }
-          break;
-        }
-
-        case 'message.end': {
-          stream.status('running', undefined, 'Turn complete');
-          break;
-        }
-
-        case 'session.end': {
-          const cost = event.cost as number | undefined;
-          const inputTokens = event.input_tokens as number | undefined;
-          const outputTokens = event.output_tokens as number | undefined;
-          const turns = event.turns as number | undefined;
-          const model = event.model as string | undefined;
-          const durationMs = event.duration_ms as number | undefined;
-
-          if (cost !== undefined) {
-            stream.status('running', 100, `Completed (${turns ?? 0} turns, $${cost.toFixed(4)})`);
-          } else {
-            stream.status('running', 100, 'Completed');
-          }
-
-          return {
-            totalCost: cost,
-            inputTokens,
-            outputTokens,
-            numTurns: turns,
-            model,
-            durationMs,
-          };
-        }
-
-        default:
-          // Unknown event type — skip silently
-          break;
-      }
-    } catch {
-      // Not valid JSON — send as raw stdout
-      stream.stdout(line + '\n');
-    }
-
-    return undefined;
   }
 }
