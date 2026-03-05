@@ -976,10 +976,14 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     // Plan tasks are read-only: no file writes, edits, or shell access regardless
     // of workdir/MCP configuration. Only allow codebase exploration + web search.
+    // AskUserQuestion is included so the model can request clarification from the
+    // user instead of guessing — the approval system routes the question to the
+    // frontend and pauses until the user responds.
     if (task.type === 'plan') {
       const planTools = [
         ...(hasWorkdir ? ['Read', 'Glob', 'Grep'] : []),
         'WebSearch', 'WebFetch',
+        'AskUserQuestion',
         ...mcpAllowedTools,
       ];
       (options as Record<string, unknown>).allowedTools = planTools;
