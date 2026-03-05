@@ -867,6 +867,7 @@ export interface ChannelApprovalResponseMessage extends WSMessage {
     correlationId: string;
     approvalId: string;
     response: string;
+    error?: string;
   };
 }
 
