@@ -29,10 +29,6 @@ interface ActiveSession {
   taskId: string;
   workingDirectory?: string;
   model?: string;
-  /** Active child process (null after process exits) */
-  process: ChildProcess | null;
-  /** Abort controller for the current process */
-  abortController: AbortController;
 }
 
 export class CodexAdapter implements ProviderAdapter {
@@ -116,8 +112,6 @@ export class CodexAdapter implements ProviderAdapter {
           taskId: task.id,
           workingDirectory: task.workingDirectory,
           model: result.model,
-          process: null, // Process has exited
-          abortController: new AbortController(),
         });
       }
 
