@@ -322,6 +322,83 @@ describe('Codex JSONL parser: handleStreamLine', () => {
   })
 
   // ==========================================================================
+  // item.completed — file_change
+  // ==========================================================================
+
+  describe('item.completed: file_change', () => {
+    it('emits fileChange for created files', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'item_10',
+          type: 'file_change',
+          changes: [{ path: 'src/new-file.ts', kind: 'create' }],
+        },
+      }), stream, artifacts)
+
+      expect(stream.fileChange).toHaveBeenCalledWith('src/new-file.ts', 'created')
+    })
+
+    it('emits fileChange for deleted files', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'item_11',
+          type: 'file_change',
+          changes: [{ path: 'old-file.ts', kind: 'delete' }],
+        },
+      }), stream, artifacts)
+
+      expect(stream.fileChange).toHaveBeenCalledWith('old-file.ts', 'deleted')
+    })
+
+    it('maps unknown kind to modified', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'item_12',
+          type: 'file_change',
+          changes: [{ path: 'README.md', kind: 'modify' }],
+        },
+      }), stream, artifacts)
+
+      expect(stream.fileChange).toHaveBeenCalledWith('README.md', 'modified')
+    })
+
+    it('handles multiple changes in a single event', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'item_13',
+          type: 'file_change',
+          changes: [
+            { path: 'a.ts', kind: 'create' },
+            { path: 'b.ts', kind: 'modify' },
+            { path: 'c.ts', kind: 'delete' },
+          ],
+        },
+      }), stream, artifacts)
+
+      expect(stream.fileChange).toHaveBeenCalledTimes(3)
+      expect(stream.fileChange).toHaveBeenCalledWith('a.ts', 'created')
+      expect(stream.fileChange).toHaveBeenCalledWith('b.ts', 'modified')
+      expect(stream.fileChange).toHaveBeenCalledWith('c.ts', 'deleted')
+    })
+
+    it('handles missing changes array gracefully', () => {
+      callHandleStreamLine(adapter, JSON.stringify({
+        type: 'item.completed',
+        item: {
+          id: 'item_14',
+          type: 'file_change',
+        },
+      }), stream, artifacts)
+
+      expect(stream.fileChange).not.toHaveBeenCalled()
+    })
+  })
+
+  // ==========================================================================
   // File artifact extraction from commands
   // ==========================================================================
 

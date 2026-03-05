@@ -290,9 +290,11 @@ export class CodexAdapter implements ProviderAdapter {
       });
 
       proc.on('close', (code) => {
-        if (lineBuf.trim()) {
-          this.handleStreamLine(lineBuf, stream, artifacts, model || undefined, execState);
-        }
+        try {
+          if (lineBuf.trim()) {
+            this.handleStreamLine(lineBuf, stream, artifacts, model || undefined, execState);
+          }
+        } catch { /* ignore parse errors in final buffer flush */ }
         if (killTimer) clearTimeout(killTimer);
         signal.removeEventListener('abort', abortHandler);
 
