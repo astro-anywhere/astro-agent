@@ -365,16 +365,17 @@ export class TaskExecutor {
     // Task is not running — check if we have a preserved session for resume
     const resumeAdapter = this.findAdapterWithSession(taskId);
     if (resumeAdapter) {
-      const context = resumeAdapter.adapter.getTaskContext(taskId);
+      const context = resumeAdapter.getTaskContext(taskId);
       if (context) {
-        if (resumeAdapter.adapter instanceof ClaudeSdkAdapter) {
-          this.resumeCompletedTask(taskId, message, resumeAdapter.adapter, context);
+        if (resumeAdapter instanceof ClaudeSdkAdapter) {
+          this.resumeCompletedTask(taskId, message, resumeAdapter, context);
           return { accepted: true };
         }
-        if (resumeAdapter.adapter instanceof CodexAdapter) {
-          this.resumeCompletedCodexTask(taskId, message, resumeAdapter.adapter, context);
+        if (resumeAdapter instanceof CodexAdapter) {
+          this.resumeCompletedCodexTask(taskId, message, resumeAdapter, context);
           return { accepted: true };
         }
+        console.warn(`[task-executor] Adapter has session for task ${taskId} but no resume implementation`);
       }
     }
 
@@ -385,11 +386,11 @@ export class TaskExecutor {
    * Find the adapter that has a preserved session for the given task.
    * Supports ClaudeSdkAdapter and CodexAdapter.
    */
-  private findAdapterWithSession(taskId: string): { adapter: ClaudeSdkAdapter | CodexAdapter } | null {
+  private findAdapterWithSession(taskId: string): ClaudeSdkAdapter | CodexAdapter | null {
     for (const adapter of this.adapters.values()) {
       if (adapter instanceof ClaudeSdkAdapter || adapter instanceof CodexAdapter) {
         const context = adapter.getTaskContext(taskId);
-        if (context) return { adapter };
+        if (context) return adapter;
       }
     }
     return null;
@@ -909,6 +910,7 @@ export class TaskExecutor {
       let result: Awaited<ReturnType<typeof adapter.execute>>;
       if (canResume) {
         console.log(`[executor] Task ${task.id}: resuming session ${taskWithWorkspace.resumeSessionId} with ${adapter.name}...`);
+        const resumeStartedAt = new Date().toISOString();
         const resumeResult = await adapter.resumeTask(
           taskWithWorkspace.id,
           taskWithWorkspace.prompt,
@@ -922,6 +924,8 @@ export class TaskExecutor {
           status: resumeResult.success ? 'completed' : 'failed',
           output: resumeResult.output,
           error: resumeResult.error,
+          startedAt: resumeStartedAt,
+          completedAt: new Date().toISOString(),
         };
       } else {
         console.log(`[executor] Task ${task.id}: executing with ${adapter.name}...`);

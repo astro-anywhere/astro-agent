@@ -213,6 +213,8 @@ export class CodexAdapter implements ProviderAdapter {
       }
     }
 
+    this.activeTasks++;
+
     // Use sessionId as the threadId (the Codex thread UUID)
     const threadId = sessionId;
 
@@ -241,6 +243,7 @@ export class CodexAdapter implements ProviderAdapter {
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (error) {
+        this.activeTasks--;
         resolve({
           success: false,
           output: '',
@@ -280,6 +283,7 @@ export class CodexAdapter implements ProviderAdapter {
       });
 
       proc.on('error', (error) => {
+        this.activeTasks--;
         if (killTimer) clearTimeout(killTimer);
         signal.removeEventListener('abort', abortHandler);
         resolve({
@@ -290,24 +294,25 @@ export class CodexAdapter implements ProviderAdapter {
       });
 
       proc.on('close', (code) => {
+        this.activeTasks--;
         try {
           if (lineBuf.trim()) {
             this.handleStreamLine(lineBuf, stream, artifacts, model || undefined, execState);
           }
-        } catch { /* ignore parse errors in final buffer flush */ }
+        } catch (err) {
+          console.warn(`[codex] Failed to parse final lineBuf in resume:`, err);
+        }
         if (killTimer) clearTimeout(killTimer);
         signal.removeEventListener('abort', abortHandler);
 
-        // Update session with new threadId from resume (if Codex started a new thread)
-        if (execState.threadId) {
-          this.activeSessions.set(taskId, {
-            threadId: execState.threadId,
-            taskId,
-            workingDirectory,
-            model: model || undefined,
-            storedAt: Date.now(),
-          });
-        }
+        // Update session — use new threadId if emitted, otherwise preserve input sessionId
+        this.activeSessions.set(taskId, {
+          threadId: execState.threadId || threadId,
+          taskId,
+          workingDirectory,
+          model: model || undefined,
+          storedAt: Date.now(),
+        });
 
         resolve({
           success: code === 0,
@@ -566,7 +571,7 @@ export class CodexAdapter implements ProviderAdapter {
       switch (type) {
         case 'thread.started': {
           // Session init — extract thread_id and pass model
-          const threadId = event.thread_id as string | undefined;
+          const threadId = typeof event.thread_id === 'string' ? event.thread_id : undefined;
           if (threadId) {
             execState.threadId = threadId;
             stream.sessionInit(threadId, model);
