@@ -437,16 +437,17 @@ program
       } else if (launchAll) {
         // Setup already complete — read stored remote hosts
         remoteHosts = config.getRemoteHosts();
-        if (remoteHosts.length === 0) {
-          console.log(chalk.yellow('\nNo remote hosts configured. Run with --force-setup to discover SSH hosts.\n'));
+        if (remoteHosts.length === 0 && options.verbose) {
+          console.log(chalk.dim('\n  No remote hosts configured. Run with --force-setup to discover SSH hosts.\n'));
         }
       }
 
       // Start remote agents before starting local
       if (launchAll && remoteHosts.length > 0) {
         const { startRemoteAgents } = await import('./lib/ssh-installer.js');
+        const { formatRemoteHostBox } = await import('./lib/display.js');
 
-        console.log(chalk.bold(`\nStarting agents on ${remoteHosts.length} remote host(s)...\n`));
+        console.log(chalk.bold(`\n  Remote Hosts (${remoteHosts.length})\n`));
 
         const results = await startRemoteAgents(
           remoteHosts,
@@ -458,18 +459,15 @@ program
           (host, msg) => console.log(chalk.dim(`  [${host}] ${msg}`)),
         );
 
-        // Report results
+        // Show structured box per remote host
         for (const r of results) {
-          if (r.success) {
-            console.log(chalk.green(`  ✓ ${r.host.name}: started`));
-          } else {
-            console.log(chalk.red(`  ✗ ${r.host.name}: ${r.message}`));
-          }
+          const status = r.success ? 'running' as const : 'failed' as const;
+          console.log(formatRemoteHostBox(r.host, status, r.message));
         }
 
         const ok = results.filter((r) => r.success).length;
         const fail = results.filter((r) => !r.success).length;
-        console.log(chalk.dim(`\n  Remote agents: ${ok} running, ${fail} failed\n`));
+        console.log(chalk.dim(`  Summary: ${chalk.green(`${ok} running`)}, ${fail > 0 ? chalk.red(`${fail} failed`) : `${fail} failed`}\n`));
       }
 
       // Start local agent
