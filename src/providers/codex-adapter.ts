@@ -283,7 +283,7 @@ export class CodexAdapter implements ProviderAdapter {
       });
 
       proc.on('error', (error) => {
-        this.activeTasks--;
+        // Don't decrement activeTasks here — close handler always fires after error and handles it
         if (killTimer) clearTimeout(killTimer);
         signal.removeEventListener('abort', abortHandler);
         resolve({
