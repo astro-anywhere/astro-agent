@@ -49,14 +49,19 @@ export function detectLocalIP(): string {
 export async function checkRemoteNode(
   host: DiscoveredHost,
 ): Promise<{ available: boolean; version: string | null }> {
-  try {
-    const { stdout } = await sshExec(host, 'node --version');
-    const ver = stdout.trim(); // e.g. "v20.11.0"
-    const major = parseInt(ver.replace(/^v/, ''), 10);
-    return { available: major >= 18, version: ver };
-  } catch {
-    return { available: false, version: null };
+  // Try both `node` and `nodejs` — some distros (e.g. Debian/Ubuntu) only have `nodejs`
+  for (const bin of ['node', 'nodejs']) {
+    try {
+      const { stdout } = await sshExec(host, `${bin} --version`);
+      const ver = stdout.trim(); // e.g. "v20.11.0"
+      const major = parseInt(ver.replace(/^v/, ''), 10);
+      if (major >= 18) return { available: true, version: ver };
+      // Found but too old — keep trying in case the other binary is newer
+    } catch {
+      // binary not found, try next
+    }
   }
+  return { available: false, version: null };
 }
 
 /**
