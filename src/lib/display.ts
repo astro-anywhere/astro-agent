@@ -100,7 +100,7 @@ export function formatLocalMachineBox(
   if (resources.gpu.length > 0) {
     for (const gpu of resources.gpu) {
       const gpuMem = formatBytes(gpu.memoryTotal);
-      const gpuLabel = gpu.vendor === 'Apple' ? 'GPU' : `GPU`;
+      const gpuLabel = 'GPU';
       lines.push(`    ${gpuLabel}   ${chalk.white(gpu.name)} ${chalk.dim(`(${gpuMem})`)}`);
     }
   }

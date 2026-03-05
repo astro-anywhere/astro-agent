@@ -303,16 +303,19 @@ export async function startRemoteAgents(
       );
       if (stdout.trim()) {
         log(host.name, 'Agent started — reading status...');
-        // Give the remote agent a moment to detect its environment and write status
-        await new Promise((r) => setTimeout(r, 3000));
+        // Poll for status file with retries (remote agent may take time to detect environment)
         let agentStatus: RemoteAgentStatus | undefined;
-        try {
-          const { stdout: statusJson } = await sshExec(host, 'cat $HOME/.astro/agent-status.json 2>/dev/null');
-          if (statusJson.trim()) {
-            agentStatus = JSON.parse(statusJson.trim()) as RemoteAgentStatus;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          await new Promise((r) => setTimeout(r, 1000));
+          try {
+            const { stdout: statusJson } = await sshExec(host, 'cat $HOME/.astro/agent-status.json 2>/dev/null');
+            if (statusJson.trim()) {
+              agentStatus = JSON.parse(statusJson.trim()) as RemoteAgentStatus;
+              break;
+            }
+          } catch {
+            // Status file not ready yet, retry
           }
-        } catch {
-          // Non-fatal: status file may not exist yet
         }
         results.push({ host, success: true, message: 'Started', agentStatus });
       } else {

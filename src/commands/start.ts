@@ -6,7 +6,7 @@ import chalk from 'chalk';
 import ora from 'ora';
 import { spawn, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, renameSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import os from 'node:os';
@@ -325,7 +325,9 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       providers: providers.map(p => ({ name: p.name, type: p.type, version: p.version, model: p.capabilities.defaultModel })),
       detectedAt: new Date().toISOString(),
     };
-    writeFileSync(statusPath, JSON.stringify(status, null, 2));
+    const tmpPath = `${statusPath}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(status, null, 2));
+    renameSync(tmpPath, statusPath);
   } catch {
     // Non-fatal
   }
