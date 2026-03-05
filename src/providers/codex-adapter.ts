@@ -29,7 +29,18 @@ interface ActiveSession {
   taskId: string;
   workingDirectory?: string;
   model?: string;
+  storedAt: number;
 }
+
+/** Per-execution mutable state (avoids shared instance fields for concurrency safety) */
+interface ExecutionState {
+  metrics?: CodexMetrics;
+  turnCount: number;
+  threadId?: string;
+}
+
+/** Session TTL: 30 minutes */
+const SESSION_TTL_MS = 30 * 60 * 1000;
 
 export class CodexAdapter implements ProviderAdapter {
   readonly type = 'codex';
@@ -43,16 +54,6 @@ export class CodexAdapter implements ProviderAdapter {
 
   /** Active sessions per task ID for steering/resume */
   private activeSessions = new Map<string, ActiveSession>();
-
-  /**
-   * Accumulated metrics from the current execution.
-   * Populated by handleStreamLine() as usage events arrive,
-   * then read by execute() when producing the final TaskResult.
-   */
-  private lastResultMetrics?: CodexMetrics;
-  private turnCount = 0;
-  /** Thread ID from the most recent execution (populated by handleStreamLine) */
-  private lastThreadId?: string;
 
   async isAvailable(): Promise<boolean> {
     const provider = await getProvider('codex');
@@ -95,29 +96,28 @@ export class CodexAdapter implements ProviderAdapter {
     }
 
     this.activeTasks++;
-    this.lastResultMetrics = undefined;
-    this.turnCount = 0;
-    this.lastThreadId = undefined;
+    this.cleanupExpiredSessions();
+    const execState: ExecutionState = { turnCount: 0 };
     const startedAt = new Date().toISOString();
 
     try {
       stream.status('running', 0, 'Starting Codex');
 
-      const result = await this.runCodex(task, stream, signal);
+      const result = await this.runCodex(task, stream, signal, execState);
 
       // Store session for potential steering/resume
-      if (this.lastThreadId) {
+      if (execState.threadId) {
         this.activeSessions.set(task.id, {
-          threadId: this.lastThreadId,
+          threadId: execState.threadId,
           taskId: task.id,
           workingDirectory: task.workingDirectory,
           model: result.model,
+          storedAt: Date.now(),
         });
       }
 
       // Build metrics from accumulated stream data + result model.
-      // lastResultMetrics is populated by extractUsageFromEvent() during streaming.
-      const finalMetrics = this.buildFinalMetrics(result.model, startedAt);
+      const finalMetrics = this.buildFinalMetrics(result.model, startedAt, execState);
 
       return {
         taskId: task.id,
@@ -170,20 +170,28 @@ export class CodexAdapter implements ProviderAdapter {
   }
 
   /**
-   * Inject a steering message into a completed task's session.
-   * Uses `codex exec resume <threadId> <message> --json` to continue the conversation.
-   * Returns true if the message was successfully injected.
+   * Codex CLI does not support mid-execution steering (injecting messages into a running session).
+   * Unlike Claude SDK which has `streamInput()`, Codex exec is non-interactive.
+   * For post-completion follow-up, use `resumeTask()` instead.
    */
   async injectMessage(taskId: string, _content: string, _interrupt = false): Promise<boolean> {
+    console.log(`[codex] injectMessage not supported: Codex does not support mid-execution steering (task ${taskId})`);
+    return false;
+  }
+
+  /**
+   * Get session context for a task (for resume support).
+   * Returns threadId as sessionId and workingDirectory if available.
+   */
+  getTaskContext(taskId: string): { sessionId: string; workingDirectory?: string } | null {
     const session = this.activeSessions.get(taskId);
-    if (!session) {
-      console.log(`[codex] Cannot inject message: no session for task ${taskId}`);
-      return false;
+    if (!session) return null;
+    // Check TTL
+    if (Date.now() - session.storedAt > SESSION_TTL_MS) {
+      this.activeSessions.delete(taskId);
+      return null;
     }
-    // For Codex, injection means starting a new resume process.
-    // The caller (resumeTask) handles the full lifecycle.
-    // This is a simplified check — return true if we have a session.
-    return true;
+    return { sessionId: session.threadId, workingDirectory: session.workingDirectory };
   }
 
   /**
@@ -221,6 +229,8 @@ export class CodexAdapter implements ProviderAdapter {
       ...(!isGitRepo ? ['--skip-git-repo-check'] : []),
     ];
 
+    const execState: ExecutionState = { turnCount: 0 };
+
     return new Promise((resolve) => {
       let proc: ChildProcess;
 
@@ -242,12 +252,11 @@ export class CodexAdapter implements ProviderAdapter {
       let stdout = '';
       let stderr = '';
       const artifacts: TaskArtifact[] = [];
-      this.lastResultMetrics = undefined;
-      this.turnCount = 0;
+      let killTimer: NodeJS.Timeout | undefined;
 
       const abortHandler = () => {
         proc.kill('SIGTERM');
-        setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+        killTimer = setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
       };
       signal.addEventListener('abort', abortHandler);
 
@@ -260,7 +269,7 @@ export class CodexAdapter implements ProviderAdapter {
         lineBuf = lines.pop() || '';
         for (const line of lines) {
           if (line.trim()) {
-            this.handleStreamLine(line, stream, artifacts, model || undefined);
+            this.handleStreamLine(line, stream, artifacts, model || undefined, execState);
           }
         }
       });
@@ -271,6 +280,7 @@ export class CodexAdapter implements ProviderAdapter {
       });
 
       proc.on('error', (error) => {
+        if (killTimer) clearTimeout(killTimer);
         signal.removeEventListener('abort', abortHandler);
         resolve({
           success: false,
@@ -281,9 +291,22 @@ export class CodexAdapter implements ProviderAdapter {
 
       proc.on('close', (code) => {
         if (lineBuf.trim()) {
-          this.handleStreamLine(lineBuf, stream, artifacts, model || undefined);
+          this.handleStreamLine(lineBuf, stream, artifacts, model || undefined, execState);
         }
+        if (killTimer) clearTimeout(killTimer);
         signal.removeEventListener('abort', abortHandler);
+
+        // Update session with new threadId from resume (if Codex started a new thread)
+        if (execState.threadId) {
+          this.activeSessions.set(taskId, {
+            threadId: execState.threadId,
+            taskId,
+            workingDirectory,
+            model: model || undefined,
+            storedAt: Date.now(),
+          });
+        }
+
         resolve({
           success: code === 0,
           output: stdout,
@@ -296,7 +319,8 @@ export class CodexAdapter implements ProviderAdapter {
   private async runCodex(
     task: Task,
     stream: TaskOutputStream,
-    signal: AbortSignal
+    signal: AbortSignal,
+    execState: ExecutionState,
   ): Promise<{ exitCode: number; output: string; error?: string; artifacts?: TaskArtifact[]; model?: string }> {
     // Codex requires --skip-git-repo-check when running outside a git repository.
     // The task executor already handles git safety at a higher level (worktree creation,
@@ -392,9 +416,10 @@ export class CodexAdapter implements ProviderAdapter {
       let detectedModel: string | undefined = model || undefined;
       const artifacts: TaskArtifact[] = [];
 
+      let killTimer: NodeJS.Timeout | undefined;
       const abortHandler = () => {
         proc.kill('SIGTERM');
-        setTimeout(() => {
+        killTimer = setTimeout(() => {
           if (!proc.killed) {
             proc.kill('SIGKILL');
           }
@@ -417,7 +442,7 @@ export class CodexAdapter implements ProviderAdapter {
         lineBuf = lines.pop() || ''; // keep incomplete last line in buffer
         for (const line of lines) {
           if (line.trim()) {
-            this.handleStreamLine(line, stream, artifacts, detectedModel);
+            this.handleStreamLine(line, stream, artifacts, detectedModel, execState);
             // Extract model from any event that has it
             if (!detectedModel) {
               try {
@@ -438,6 +463,7 @@ export class CodexAdapter implements ProviderAdapter {
       });
 
       proc.on('error', (error) => {
+        if (killTimer) clearTimeout(killTimer);
         signal.removeEventListener('abort', abortHandler);
         if (imagePaths.length > 0) {
           cleanupImages(imagePaths).catch(() => {});
@@ -448,9 +474,10 @@ export class CodexAdapter implements ProviderAdapter {
       proc.on('close', (code) => {
         // Flush remaining buffer
         if (lineBuf.trim()) {
-          this.handleStreamLine(lineBuf, stream, artifacts, detectedModel);
+          this.handleStreamLine(lineBuf, stream, artifacts, detectedModel, execState);
         }
 
+        if (killTimer) clearTimeout(killTimer);
         signal.removeEventListener('abort', abortHandler);
 
         // Also extract artifacts from heuristic patterns in raw output
@@ -490,9 +517,9 @@ export class CodexAdapter implements ProviderAdapter {
    * Called after runCodex() completes, when this.lastResultMetrics
    * has been populated by extractUsageFromEvent() during streaming.
    */
-  private buildFinalMetrics(resultModel: string | undefined, startedAt: string): CodexMetrics | undefined {
+  private buildFinalMetrics(resultModel: string | undefined, startedAt: string, execState: ExecutionState): CodexMetrics | undefined {
     const durationMs = Date.now() - new Date(startedAt).getTime();
-    const accum = this.lastResultMetrics;
+    const accum = execState.metrics;
     const model = resultModel || accum?.model;
     const metrics: CodexMetrics = {
       inputTokens: accum?.inputTokens,
@@ -500,7 +527,7 @@ export class CodexAdapter implements ProviderAdapter {
       totalCost: accum?.totalCost,
       model,
       durationMs,
-      numTurns: this.turnCount || accum?.numTurns,
+      numTurns: execState.turnCount || accum?.numTurns,
     };
 
     // Only include metrics if we have meaningful data
@@ -523,7 +550,8 @@ export class CodexAdapter implements ProviderAdapter {
     line: string,
     stream: TaskOutputStream,
     artifacts: TaskArtifact[],
-    model?: string,
+    model: string | undefined,
+    execState: ExecutionState,
   ): void {
     try {
       const event = JSON.parse(line) as Record<string, unknown>;
@@ -531,21 +559,21 @@ export class CodexAdapter implements ProviderAdapter {
 
       // Extract usage from any event that carries it (OpenAI Responses API pattern).
       // This catches both `response.completed` and `turn.completed` events.
-      this.extractUsageFromEvent(event);
+      this.extractUsageFromEvent(event, execState);
 
       switch (type) {
         case 'thread.started': {
           // Session init — extract thread_id and pass model
           const threadId = event.thread_id as string | undefined;
           if (threadId) {
-            this.lastThreadId = threadId;
+            execState.threadId = threadId;
             stream.sessionInit(threadId, model);
           }
           break;
         }
 
         case 'turn.started': {
-          this.turnCount++;
+          execState.turnCount++;
           stream.status('running', undefined, 'Agent thinking...');
           break;
         }
@@ -558,14 +586,14 @@ export class CodexAdapter implements ProviderAdapter {
           // Extract usage from response object if present
           const response = event.response as Record<string, unknown> | undefined;
           if (response) {
-            this.extractUsageFromEvent(response);
+            this.extractUsageFromEvent(response, execState);
             const responseKeys = Object.keys(response).sort();
             console.log(`[codex] response object fields: ${responseKeys.join(', ')}`);
           }
 
           // Log accumulated metrics
-          if (this.lastResultMetrics) {
-            console.log(`[codex] Accumulated metrics: input_tokens=${this.lastResultMetrics.inputTokens}, output_tokens=${this.lastResultMetrics.outputTokens}, total_cost=${this.lastResultMetrics.totalCost}`);
+          if (execState.metrics) {
+            console.log(`[codex] Accumulated metrics: input_tokens=${execState.metrics.inputTokens}, output_tokens=${execState.metrics.outputTokens}, total_cost=${execState.metrics.totalCost}`);
           } else {
             console.log(`[codex] No usage metrics found in response.completed`);
           }
@@ -672,7 +700,7 @@ export class CodexAdapter implements ProviderAdapter {
    * data into `lastResultMetrics`. Later events overwrite earlier ones, so
    * `response.completed` (which appears last) provides the authoritative totals.
    */
-  private extractUsageFromEvent(event: Record<string, unknown>): void {
+  private extractUsageFromEvent(event: Record<string, unknown>, execState: ExecutionState): void {
     // Check for usage object (OpenAI Responses API format)
     const usage = event.usage as {
       input_tokens?: number;
@@ -681,33 +709,43 @@ export class CodexAdapter implements ProviderAdapter {
     } | undefined;
 
     if (usage && (usage.input_tokens != null || usage.output_tokens != null)) {
-      if (!this.lastResultMetrics) {
-        this.lastResultMetrics = {};
+      if (!execState.metrics) {
+        execState.metrics = {};
       }
       if (usage.input_tokens != null) {
-        this.lastResultMetrics.inputTokens = usage.input_tokens;
+        execState.metrics.inputTokens = usage.input_tokens;
       }
       if (usage.output_tokens != null) {
-        this.lastResultMetrics.outputTokens = usage.output_tokens;
+        execState.metrics.outputTokens = usage.output_tokens;
       }
     }
 
     // Check for cost fields (may be present on response.completed or top-level)
     const totalCost = (event.total_cost ?? event.total_cost_usd ?? event.cost_usd) as number | undefined;
     if (totalCost != null) {
-      if (!this.lastResultMetrics) {
-        this.lastResultMetrics = {};
+      if (!execState.metrics) {
+        execState.metrics = {};
       }
-      this.lastResultMetrics.totalCost = totalCost;
+      execState.metrics.totalCost = totalCost;
     }
 
     // Check for model field
     const eventModel = event.model as string | undefined;
     if (eventModel) {
-      if (!this.lastResultMetrics) {
-        this.lastResultMetrics = {};
+      if (!execState.metrics) {
+        execState.metrics = {};
       }
-      this.lastResultMetrics.model = eventModel;
+      execState.metrics.model = eventModel;
+    }
+  }
+
+  /** Remove sessions older than SESSION_TTL_MS */
+  private cleanupExpiredSessions(): void {
+    const now = Date.now();
+    for (const [taskId, session] of this.activeSessions) {
+      if (now - session.storedAt > SESSION_TTL_MS) {
+        this.activeSessions.delete(taskId);
+      }
     }
   }
 

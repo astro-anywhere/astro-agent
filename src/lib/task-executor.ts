@@ -10,6 +10,7 @@ import type { Task, TaskStatus, ProviderType, HpcCapability } from '../types.js'
 import type { WebSocketClient } from './websocket-client.js';
 import { createProviderAdapter, type ProviderAdapter } from '../providers/index.js';
 import { ClaudeSdkAdapter } from '../providers/claude-sdk-adapter.js';
+import { CodexAdapter } from '../providers/codex-adapter.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree } from './worktree.js';
 import { BranchLockManager, type BranchLockHandle } from './branch-lock.js';
@@ -350,6 +351,7 @@ export class TaskExecutor {
 
     if (running) {
       // Task is still running — inject message into the live session
+      // Only ClaudeSdkAdapter supports mid-execution steering; Codex does not.
       if (running.adapter instanceof ClaudeSdkAdapter && typeof running.adapter.injectMessage === 'function') {
         const injected = await running.adapter.injectMessage(taskId, message, interrupt);
         if (injected) {
@@ -361,13 +363,18 @@ export class TaskExecutor {
     }
 
     // Task is not running — check if we have a preserved session for resume
-    const adapter = this.findAdapterWithSession(taskId);
-    if (adapter) {
-      const context = adapter.getTaskContext(taskId);
+    const resumeAdapter = this.findAdapterWithSession(taskId);
+    if (resumeAdapter) {
+      const context = resumeAdapter.adapter.getTaskContext(taskId);
       if (context) {
-        // Launch a resume as a new "task" execution
-        this.resumeCompletedTask(taskId, message, adapter, context);
-        return { accepted: true };
+        if (resumeAdapter.adapter instanceof ClaudeSdkAdapter) {
+          this.resumeCompletedTask(taskId, message, resumeAdapter.adapter, context);
+          return { accepted: true };
+        }
+        if (resumeAdapter.adapter instanceof CodexAdapter) {
+          this.resumeCompletedCodexTask(taskId, message, resumeAdapter.adapter, context);
+          return { accepted: true };
+        }
       }
     }
 
@@ -375,13 +382,14 @@ export class TaskExecutor {
   }
 
   /**
-   * Find the ClaudeSdkAdapter that has a preserved session for the given task.
+   * Find the adapter that has a preserved session for the given task.
+   * Supports ClaudeSdkAdapter and CodexAdapter.
    */
-  private findAdapterWithSession(taskId: string): ClaudeSdkAdapter | null {
+  private findAdapterWithSession(taskId: string): { adapter: ClaudeSdkAdapter | CodexAdapter } | null {
     for (const adapter of this.adapters.values()) {
-      if (adapter instanceof ClaudeSdkAdapter) {
+      if (adapter instanceof ClaudeSdkAdapter || adapter instanceof CodexAdapter) {
         const context = adapter.getTaskContext(taskId);
-        if (context) return adapter;
+        if (context) return { adapter };
       }
     }
     return null;
@@ -457,6 +465,81 @@ export class TaskExecutor {
         taskId,
         status: 'failed',
         error: `Resume failed: ${errorMsg}`,
+        completedAt: new Date().toISOString(),
+      });
+    }
+  }
+
+  /**
+   * Resume a completed Codex task session for post-completion steering.
+   * Uses `codex exec resume <threadId>` for multi-turn conversations.
+   */
+  private async resumeCompletedCodexTask(
+    taskId: string,
+    message: string,
+    adapter: CodexAdapter,
+    context: { sessionId: string; workingDirectory?: string },
+  ): Promise<void> {
+    const abortController = new AbortController();
+    let textSequence = 0;
+
+    const stream = {
+      stdout: (data: string) => {
+        this.wsClient.sendTaskOutput(taskId, 'stdout', data, 0);
+      },
+      stderr: (data: string) => {
+        this.wsClient.sendTaskOutput(taskId, 'stderr', data, 0);
+      },
+      status: (status: TaskStatus, progress?: number, statusMessage?: string) => {
+        this.wsClient.sendTaskStatus(taskId, status, progress, statusMessage);
+      },
+      toolTrace: (toolName: string, toolInput?: unknown, toolResult?: unknown, success?: boolean) => {
+        this.wsClient.sendToolTrace(taskId, toolName, toolInput, toolResult, success);
+      },
+      text: (data: string) => {
+        this.wsClient.sendTaskText(taskId, data, textSequence++);
+      },
+      toolUse: (toolName: string, toolInput: unknown) => {
+        this.wsClient.sendTaskToolUse(taskId, toolName, toolInput);
+      },
+      toolResult: (toolName: string, result: unknown, success: boolean) => {
+        this.wsClient.sendTaskToolResult(taskId, toolName, result, success);
+      },
+      fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number, diff?: string) => {
+        this.wsClient.sendTaskFileChange(taskId, path, action, linesAdded, linesRemoved, diff);
+      },
+      sessionInit: (sessionId: string, model?: string) => {
+        this.wsClient.sendTaskSessionInit(taskId, sessionId, model);
+      },
+      approvalRequest: async (question: string, options: string[]) => {
+        return this.wsClient.sendApprovalRequest(taskId, question, options);
+      },
+    };
+
+    try {
+      this.wsClient.sendTaskStatus(taskId, 'running', 0, 'Resuming Codex session...');
+      const result = await adapter.resumeTask(
+        taskId,
+        message,
+        context.workingDirectory ?? process.cwd(),
+        context.sessionId,
+        stream,
+        abortController.signal,
+      );
+
+      this.wsClient.sendTaskResult({
+        taskId,
+        status: result.success ? 'completed' : 'failed',
+        output: result.output,
+        error: result.error,
+        completedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.wsClient.sendTaskResult({
+        taskId,
+        status: 'failed',
+        error: `Codex resume failed: ${errorMsg}`,
         completedAt: new Date().toISOString(),
       });
     }
@@ -818,9 +901,9 @@ export class TaskExecutor {
       // Notify task started
       this.wsClient.sendTaskStatus(task.id, 'running', 0, 'Starting');
 
-      // Resume existing Claude session if resumeSessionId is provided
+      // Resume existing session if resumeSessionId is provided (Claude SDK or Codex)
       const canResume = taskWithWorkspace.resumeSessionId
-        && adapter instanceof ClaudeSdkAdapter
+        && (adapter instanceof ClaudeSdkAdapter || adapter instanceof CodexAdapter)
         && isTextOnly;
 
       let result: Awaited<ReturnType<typeof adapter.execute>>;
