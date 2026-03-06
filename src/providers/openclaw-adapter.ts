@@ -253,6 +253,7 @@ export class OpenClawAdapter implements ProviderAdapter {
    * Get preserved session context for a task (used by task executor for resume routing).
    */
   getTaskContext(taskId: string): { sessionId: string; workingDirectory: string } | null {
+    this.cleanupExpiredSessions();
     const session = this.preservedSessions.get(taskId);
     if (!session || Date.now() - session.createdAt > SESSION_TTL_MS) {
       this.preservedSessions.delete(taskId);
@@ -318,6 +319,7 @@ export class OpenClawAdapter implements ProviderAdapter {
           const frame = JSON.parse(String(data)) as GatewayFrame;
           if (frame.type === 'event' && frame.event === 'connect.challenge') {
             clearTimeout(timeout);
+            ws!.removeAllListeners();
             ws!.close();
             done(true);
           }
@@ -328,6 +330,7 @@ export class OpenClawAdapter implements ProviderAdapter {
 
       ws.on('error', () => {
         clearTimeout(timeout);
+        ws?.removeAllListeners();
         done(false);
       });
 
@@ -439,6 +442,7 @@ export class OpenClawAdapter implements ProviderAdapter {
         signal.removeEventListener('abort', abortHandler);
         if (taskTimeout) clearTimeout(taskTimeout);
         if (gracePeriodTimeout) clearTimeout(gracePeriodTimeout);
+        ws.removeAllListeners();
         ws.close();
         resolve({
           output: outputText,
@@ -694,6 +698,7 @@ export class OpenClawAdapter implements ProviderAdapter {
         finished = true;
         signal.removeEventListener('abort', abortHandler);
         if (gracePeriodTimeout) clearTimeout(gracePeriodTimeout);
+        ws.removeAllListeners();
         ws.close();
         resolve({ output: outputText, error });
       };

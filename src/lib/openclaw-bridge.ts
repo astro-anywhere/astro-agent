@@ -111,6 +111,7 @@ export class OpenClawBridge extends EventEmitter {
     }
 
     if (this.ws) {
+      this.ws.removeAllListeners();
       this.ws.close();
       this.ws = null;
     }
@@ -231,6 +232,7 @@ export class OpenClawBridge extends EventEmitter {
       ws.on('error', (err) => {
         console.error('[openclaw-bridge] WebSocket error:', err.message);
         clearTimeout(timeout);
+        ws.close();
         resolve();
       });
     });
@@ -309,6 +311,9 @@ export class OpenClawBridge extends EventEmitter {
       // using the fallback path (no bot token) may match responses to the wrong request.
       // The Telegram polling path (requestApprovalViaTelegram) avoids this issue.
       if (this.pendingApprovals.size > 0 && text.trim()) {
+        if (this.pendingApprovals.size > 1) {
+          console.warn(`[openclaw-bridge] ${this.pendingApprovals.size} concurrent approvals pending — FIFO matching may route response to wrong request`);
+        }
         const [approvalId] = this.pendingApprovals.keys();
         this.resolveApproval(approvalId, text.trim());
         return;
