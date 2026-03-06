@@ -23,7 +23,6 @@ import {
   formatLocalMachineBox,
   formatSetupHint,
   formatNoProvidersWarning,
-  formatBackgroundSummary,
 } from '../lib/display.js';
 import type { RunnerEvent, Task, RepoSetupRequestMessage, RepoDetectRequestMessage, BranchListRequestMessage, GitInitRequestMessage } from '../types.js';
 
@@ -250,14 +249,19 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     }
 
     const bgVersion = await getVersion();
-    const bgProviders = await detectProviders().catch(() => []);
+    const [bgProviders, bgResources] = await Promise.all([
+      detectProviders().catch(() => []),
+      getMachineResources().catch(() => null),
+    ]);
     const bgRemoteHosts = config.getRemoteHosts();
 
     console.log(formatLaunchBanner(bgVersion));
+    if (bgResources) {
+      console.log(formatLocalMachineBox(bgResources, bgProviders, bgVersion, runnerId));
+    }
+    console.log();
     console.log(chalk.green('  ✓ Agent runner started in background'));
     console.log(chalk.dim(`  PID: ${child.pid}`));
-    console.log();
-    console.log(formatBackgroundSummary(bgProviders, bgRemoteHosts.length, runnerId));
     console.log();
     console.log(chalk.dim('  Logs:  ') + chalk.cyan('npx @astroanywhere/agent logs'));
     console.log(chalk.dim('  Stop:  ') + chalk.cyan('npx @astroanywhere/agent stop'));
