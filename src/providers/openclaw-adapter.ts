@@ -63,6 +63,7 @@ export class OpenClawAdapter implements ProviderAdapter {
   private maxTasks = 10;
   private lastError?: string;
   private gatewayConfig: GatewayConfig | null = null;
+  private lastAvailableCheck: { available: boolean; at: number } | null = null;
 
   async isAvailable(): Promise<boolean> {
     const config = this.readGatewayConfig();
@@ -73,8 +74,10 @@ export class OpenClawAdapter implements ProviderAdapter {
     // Probe the gateway with a quick connect
     try {
       const ok = await this.probeGateway(config);
+      this.lastAvailableCheck = { available: ok, at: Date.now() };
       return ok;
     } catch {
+      this.lastAvailableCheck = { available: false, at: Date.now() };
       return false;
     }
   }
@@ -137,7 +140,14 @@ export class OpenClawAdapter implements ProviderAdapter {
   }
 
   async getStatus(): Promise<ProviderStatus> {
-    const available = await this.isAvailable();
+    // Use cached availability if checked within the last 30 seconds to avoid
+    // opening a new WebSocket probe on every status poll
+    let available: boolean;
+    if (this.lastAvailableCheck && Date.now() - this.lastAvailableCheck.at < 30_000) {
+      available = this.lastAvailableCheck.available;
+    } else {
+      available = await this.isAvailable();
+    }
     return {
       available,
       version: null,
@@ -176,20 +186,24 @@ export class OpenClawAdapter implements ProviderAdapter {
 
   private probeGateway(config: GatewayConfig): Promise<boolean> {
     return new Promise((resolve) => {
+      let resolved = false;
+      const done = (val: boolean) => { if (!resolved) { resolved = true; resolve(val); } };
+
+      let ws: WebSocket | undefined;
       const timeout = setTimeout(() => {
-        ws.close();
-        resolve(false);
+        ws?.close();
+        done(false);
       }, 5000);
 
-      const ws = new WebSocket(config.url);
+      ws = new WebSocket(config.url);
 
       ws.on('message', (data) => {
         try {
           const frame = JSON.parse(String(data)) as GatewayFrame;
           if (frame.type === 'event' && frame.event === 'connect.challenge') {
             clearTimeout(timeout);
-            ws.close();
-            resolve(true);
+            ws!.close();
+            done(true);
           }
         } catch {
           // ignore
@@ -198,12 +212,12 @@ export class OpenClawAdapter implements ProviderAdapter {
 
       ws.on('error', () => {
         clearTimeout(timeout);
-        resolve(false);
+        done(false);
       });
 
       ws.on('close', () => {
         clearTimeout(timeout);
-        resolve(false);
+        done(false);
       });
     });
   }
@@ -212,12 +226,13 @@ export class OpenClawAdapter implements ProviderAdapter {
 
   private connectToGateway(config: GatewayConfig): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
+      let ws: WebSocket | undefined;
       const timeout = setTimeout(() => {
-        ws.close();
+        ws?.close();
         reject(new Error('Gateway connection timeout'));
       }, CONNECT_TIMEOUT_MS);
 
-      const ws = new WebSocket(config.url);
+      ws = new WebSocket(config.url);
 
       ws.on('message', (data) => {
         try {
@@ -299,6 +314,7 @@ export class OpenClawAdapter implements ProviderAdapter {
       const finish = (error?: string) => {
         if (finished) return;
         finished = true;
+        signal.removeEventListener('abort', abortHandler);
         if (taskTimeout) clearTimeout(taskTimeout);
         if (gracePeriodTimeout) clearTimeout(gracePeriodTimeout);
         ws.close();
@@ -522,11 +538,7 @@ export class OpenClawAdapter implements ProviderAdapter {
         },
       }));
 
-      // Ensure signal listener and timeout are cleaned up when ws closes
-      ws.on('close', () => {
-        signal.removeEventListener('abort', abortHandler);
-        if (taskTimeout) clearTimeout(taskTimeout);
-      });
+      // Note: signal listener and timeout cleanup is handled in finish()
     });
   }
 }

@@ -52,10 +52,20 @@ class MockGateway {
   port: number
   connections: import('ws').WebSocket[] = []
   onChatSend?: (params: Record<string, unknown>, ws: import('ws').WebSocket) => void
+  private _ready: Promise<void>
 
   constructor(port: number) {
     this.port = port
     this.wss = new WebSocketServer({ port })
+    this._ready = new Promise((resolve) => {
+      this.wss.on('listening', () => {
+        const addr = this.wss.address()
+        if (typeof addr === 'object' && addr) {
+          this.port = addr.port
+        }
+        resolve()
+      })
+    })
 
     this.wss.on('connection', (ws) => {
       this.connections.push(ws)
@@ -158,6 +168,10 @@ class MockGateway {
     })
   }
 
+  async waitReady(): Promise<void> {
+    await this._ready
+  }
+
   async close(): Promise<void> {
     for (const ws of this.connections) {
       ws.close()
@@ -178,12 +192,10 @@ describe('OpenClaw Gateway Adapter', () => {
   let port: number
 
   beforeEach(async () => {
-    // Use a random port to avoid conflicts
-    port = 19000 + Math.floor(Math.random() * 1000)
-    gateway = new MockGateway(port)
-
-    // Wait for server to be ready
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    // Use port 0 for OS-assigned port to avoid conflicts in parallel test runs
+    gateway = new MockGateway(0)
+    await gateway.waitReady()
+    port = gateway.port
 
     adapter = new OpenClawAdapter()
     // Override config discovery to use our test port
