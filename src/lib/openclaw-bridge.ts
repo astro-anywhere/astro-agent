@@ -124,6 +124,10 @@ export class OpenClawBridge extends EventEmitter {
       this.ws.close();
       this.ws = null;
     }
+
+    // Remove external EventEmitter listeners (e.g., 'inbound' from websocket-client)
+    // to prevent leaks if the bridge is restarted after stop()
+    this.removeAllListeners();
   }
 
   // ─── Gateway Config ─────────────────────────────────────────────
