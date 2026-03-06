@@ -55,6 +55,17 @@ const CONNECT_TIMEOUT_MS = 10_000;
 // Adapter
 // ---------------------------------------------------------------------------
 
+/** Preserved session info for multi-turn resume */
+interface PreservedSession {
+  sessionKey: string;
+  taskId: string;
+  workingDirectory?: string;
+  createdAt: number;
+}
+
+/** TTL for preserved sessions (30 minutes) */
+const SESSION_TTL_MS = 30 * 60 * 1000;
+
 export class OpenClawAdapter implements ProviderAdapter {
   readonly type = 'openclaw';
   readonly name = 'OpenClaw';
@@ -64,6 +75,9 @@ export class OpenClawAdapter implements ProviderAdapter {
   private lastError?: string;
   private gatewayConfig: GatewayConfig | null = null;
   private lastAvailableCheck: { available: boolean; at: number } | null = null;
+
+  /** Preserved sessions for multi-turn resume, keyed by taskId */
+  private preservedSessions = new Map<string, PreservedSession>();
 
   async isAvailable(): Promise<boolean> {
     const config = this.readGatewayConfig();
@@ -101,8 +115,21 @@ export class OpenClawAdapter implements ProviderAdapter {
 
     try {
       stream.status('running', 0, 'Connecting to OpenClaw gateway');
+      const sessionKey = `astro:task:${task.id}`;
       const result = await this.runViaGateway(task, stream, signal);
       const isCancelled = signal.aborted || result.error === 'Task cancelled';
+
+      // Preserve session for multi-turn resume (unless cancelled/failed)
+      if (!isCancelled && !result.error) {
+        this.cleanupExpiredSessions();
+        this.preservedSessions.set(task.id, {
+          sessionKey,
+          taskId: task.id,
+          workingDirectory: task.workingDirectory,
+          createdAt: Date.now(),
+        });
+      }
+
       return {
         taskId: task.id,
         status: isCancelled ? 'cancelled' : result.error ? 'failed' : 'completed',
@@ -155,6 +182,95 @@ export class OpenClawAdapter implements ProviderAdapter {
       maxTasks: this.maxTasks,
       lastError: this.lastError,
     };
+  }
+
+  // ─── Multi-Turn Resume ─────────────────────────────────────────
+
+  /**
+   * Resume a completed session by sending another chat.send to the same sessionKey.
+   * The OpenClaw gateway preserves session history per sessionKey.
+   */
+  async resumeTask(
+    taskId: string,
+    message: string,
+    _workingDirectory: string,
+    sessionId: string,
+    stream: TaskOutputStream,
+    signal: AbortSignal,
+  ): Promise<{ success: boolean; output: string; error?: string }> {
+    if (!this.gatewayConfig) {
+      // Attempt availability check as fallback (mirrors execute() pattern)
+      const available = await this.isAvailable();
+      if (!available || !this.gatewayConfig) {
+        return { success: false, output: '', error: 'OpenClaw gateway not available' };
+      }
+    }
+
+    // Use the preserved session key, or construct one from the original taskId (keyed by taskId)
+    const session = this.preservedSessions.get(taskId);
+    const sessionKey = session?.sessionKey || `astro:task:${sessionId}`;
+
+    this.activeTasks++;
+    let ws: WebSocket | undefined;
+    try {
+      ws = await this.connectToGateway(this.gatewayConfig);
+      stream.status('running', 5, 'Resuming OpenClaw session');
+
+      // sendChatMessage() registers ws error/close handlers before sending,
+      // so it owns cleanup (calls ws.close() in its finish() helper)
+      const result = await this.sendChatMessage(ws, sessionKey, message, stream, signal);
+      ws = undefined;
+
+      // Update preserved session timestamp
+      if (session) {
+        session.createdAt = Date.now();
+      }
+
+      return {
+        success: !result.error,
+        output: result.output,
+        error: result.error,
+      };
+    } catch (error) {
+      ws?.close();
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.lastError = errorMsg;
+      return { success: false, output: '', error: errorMsg };
+    } finally {
+      this.activeTasks--;
+    }
+  }
+
+  /**
+   * Mid-execution message injection is not supported for OpenClaw gateway.
+   * The gateway processes one chat.send at a time per session.
+   */
+  async injectMessage(_taskId: string, _content: string, _interrupt?: boolean): Promise<boolean> {
+    return false;
+  }
+
+  /**
+   * Get preserved session context for a task (used by task executor for resume routing).
+   */
+  getTaskContext(taskId: string): { sessionId: string; workingDirectory: string } | null {
+    const session = this.preservedSessions.get(taskId);
+    if (!session || Date.now() - session.createdAt > SESSION_TTL_MS) {
+      this.preservedSessions.delete(taskId);
+      return null;
+    }
+    return {
+      sessionId: session.sessionKey,
+      workingDirectory: session.workingDirectory || '',
+    };
+  }
+
+  private cleanupExpiredSessions(): void {
+    const now = Date.now();
+    for (const [key, session] of this.preservedSessions) {
+      if (now - session.createdAt > SESSION_TTL_MS) {
+        this.preservedSessions.delete(key);
+      }
+    }
   }
 
   // ─── Gateway Config Discovery ────────────────────────────────────
@@ -539,6 +655,136 @@ export class OpenClawAdapter implements ProviderAdapter {
       }));
 
       // Note: signal listener and timeout cleanup is handled in finish()
+    });
+  }
+
+  // ─── Reusable Chat Message Sender (for resume) ────────────────────
+
+  /**
+   * Send a chat message to an already-connected gateway WebSocket.
+   * Used by resumeTask() to continue a conversation on the same sessionKey.
+   */
+  private sendChatMessage(
+    ws: WebSocket,
+    sessionKey: string,
+    message: string,
+    stream: TaskOutputStream,
+    signal: AbortSignal,
+  ): Promise<{ output: string; error?: string }> {
+    return new Promise((resolve) => {
+      const idempotencyKey = randomUUID();
+      let outputText = '';
+      let finished = false;
+      let lifecycleEnded = false;
+      let chatFinalReceived = false;
+      let gracePeriodTimeout: ReturnType<typeof setTimeout> | undefined;
+
+      const finish = (error?: string) => {
+        if (finished) return;
+        finished = true;
+        signal.removeEventListener('abort', abortHandler);
+        if (gracePeriodTimeout) clearTimeout(gracePeriodTimeout);
+        ws.close();
+        resolve({ output: outputText, error });
+      };
+
+      const tryFinishAfterLifecycle = () => {
+        if (chatFinalReceived) {
+          finish();
+        } else {
+          gracePeriodTimeout = setTimeout(() => { if (!finished) finish(); }, 500);
+        }
+      };
+
+      const abortHandler = () => {
+        try {
+          ws.send(JSON.stringify({
+            type: 'req',
+            id: 'abort-resume',
+            method: 'chat.abort',
+            params: { sessionKey },
+          }));
+        } catch { /* ignore */ }
+        finish('Task cancelled');
+      };
+      signal.addEventListener('abort', abortHandler);
+
+      ws.on('message', (data) => {
+        if (finished) return;
+
+        let frame: GatewayFrame;
+        try {
+          frame = JSON.parse(String(data));
+        } catch { return; }
+
+        if (frame.type === 'res' && frame.id === 'chat-resume-1') {
+          if (!frame.ok) {
+            finish(`Gateway rejected resume: ${frame.error?.message || 'unknown'}`);
+          }
+          return;
+        }
+
+        if (frame.type === 'event' && frame.event === 'agent') {
+          const p = frame.payload || {};
+          if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) return;
+
+          const streamType = p.stream as string;
+          const eventData = p.data as Record<string, unknown> | undefined;
+
+          if (streamType === 'lifecycle') {
+            const phase = eventData?.phase as string;
+            if (phase === 'end') {
+              lifecycleEnded = true;
+              tryFinishAfterLifecycle();
+            }
+          } else if (streamType === 'assistant') {
+            const delta = eventData?.delta as string || eventData?.text as string;
+            if (delta) {
+              outputText += delta;
+              stream.text(delta);
+            }
+          } else if (streamType === 'tool_use') {
+            const toolName = (eventData?.name as string) || 'unknown';
+            stream.toolUse(toolName, eventData?.input || {});
+          } else if (streamType === 'tool_result') {
+            const toolName = (eventData?.name as string) || 'unknown';
+            stream.toolResult(toolName, eventData?.result || '', eventData?.success !== false);
+          } else if (streamType === 'file_change') {
+            const filePath = eventData?.path as string || eventData?.file as string;
+            if (filePath) {
+              const rawAction = (eventData?.type as string) || 'modified';
+              const action = (['created', 'modified', 'deleted'].includes(rawAction) ? rawAction : 'modified') as 'created' | 'modified' | 'deleted';
+              stream.fileChange(filePath, action);
+            }
+          }
+          return;
+        }
+
+        if (frame.type === 'event' && frame.event === 'chat') {
+          const p = frame.payload || {};
+          if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) return;
+          if ((p.state as string) === 'final') {
+            chatFinalReceived = true;
+            if (lifecycleEnded) finish();
+          }
+          return;
+        }
+      });
+
+      ws.on('close', () => { if (!finished) finish('Gateway connection closed'); });
+      ws.on('error', (err) => { if (!finished) finish(`Gateway error: ${err.message}`); });
+
+      // Send the resume message
+      ws.send(JSON.stringify({
+        type: 'req',
+        id: 'chat-resume-1',
+        method: 'chat.send',
+        params: {
+          sessionKey,
+          message,
+          idempotencyKey,
+        },
+      }));
     });
   }
 }
