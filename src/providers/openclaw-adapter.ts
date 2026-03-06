@@ -206,8 +206,8 @@ export class OpenClawAdapter implements ProviderAdapter {
       }
     }
 
-    // Use the preserved session key, or construct one from the original taskId
-    const session = this.preservedSessions.get(sessionId) || this.preservedSessions.get(taskId);
+    // Use the preserved session key, or construct one from the original taskId (keyed by taskId)
+    const session = this.preservedSessions.get(taskId);
     const sessionKey = session?.sessionKey || `astro:task:${sessionId}`;
 
     this.activeTasks++;

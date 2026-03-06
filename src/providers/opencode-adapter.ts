@@ -176,8 +176,8 @@ export class OpenCodeAdapter implements ProviderAdapter {
       return { success: false, output: '', error: 'OpenCode not available' };
     }
 
-    // Look up the original session ID from preserved sessions
-    const session = this.preservedSessions.get(sessionId) || this.preservedSessions.get(taskId);
+    // Look up the original session ID from preserved sessions (keyed by taskId)
+    const session = this.preservedSessions.get(taskId);
     const resolvedSessionId = session?.sessionId || sessionId;
 
     this.activeTasks++;
@@ -354,9 +354,24 @@ export class OpenCodeAdapter implements ProviderAdapter {
         reject(error);
       });
 
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      if (timeout) {
+        timeoutHandle = setTimeout(() => {
+          if (!proc.killed) {
+            proc.kill('SIGTERM');
+            setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+          }
+        }, timeout);
+      }
+
       proc.on('close', (code) => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
         if (lineBuf.trim()) {
-          try { this.handleStreamLine(lineBuf, stream); } catch { /* ignore */ }
+          try {
+            this.handleStreamLine(lineBuf, stream);
+          } catch (err) {
+            console.warn('[opencode] Failed to parse final buffer line:', err instanceof Error ? err.message : String(err));
+          }
         }
         signal.removeEventListener('abort', abortHandler);
         resolve({
@@ -366,15 +381,6 @@ export class OpenCodeAdapter implements ProviderAdapter {
           artifacts: artifacts.length > 0 ? artifacts : undefined,
         });
       });
-
-      if (timeout) {
-        setTimeout(() => {
-          if (!proc.killed) {
-            proc.kill('SIGTERM');
-            setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
-          }
-        }, timeout);
-      }
     });
   }
 

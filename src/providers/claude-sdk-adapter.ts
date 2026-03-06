@@ -659,6 +659,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       env: {
         ...process.env,
         ...task.environment,
+        // Enable ~/.claude/skills/ discovery so user-defined skills are available in chat
         ...(isChatTask ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' } : {}),
       },
     };
