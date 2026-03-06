@@ -66,7 +66,8 @@ export class SlurmJobMonitor {
     try {
       await execFileAsync('sacct', ['--version'], { timeout: 5_000 });
       this.sacctAvailable = true;
-    } catch {
+    } catch (err) {
+      console.log('[slurm-monitor] sacct not available:', err instanceof Error ? err.message : err);
       this.sacctAvailable = false;
     }
     return this.sacctAvailable;
@@ -194,6 +195,9 @@ export class SlurmJobMonitor {
 
       // sacct can return multiple lines (job + job.batch steps)
       // Take the first line (main job)
+      // Reset failure counter on successful poll
+      job.pollFailures = 0;
+
       const firstLine = stdout.trim().split('\n')[0];
       if (firstLine) {
         const parts = firstLine.split('|');

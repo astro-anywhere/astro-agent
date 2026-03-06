@@ -45,6 +45,9 @@ import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
 import { config } from '../lib/config.js';
 
+/** Shell execution tools whose output may contain real sbatch submissions */
+const SHELL_TOOLS = new Set(['Bash', 'bash', 'shell', 'execute_command', 'terminal']);
+
 /**
  * Determine whether to enable sandbox mode for Claude Code.
  *
@@ -1137,7 +1140,6 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
             // Detect sbatch submissions for job tracking.
             // Layer 1: Only scan results from shell execution tools to avoid false
             // positives when the AI reads docs containing example sbatch output.
-            const SHELL_TOOLS = new Set(['Bash', 'bash', 'shell', 'execute_command', 'terminal']);
             const resolvedToolName = block.tool_use_id ? toolUseNames.get(block.tool_use_id) : undefined;
             if (this.jobMonitor && typeof resultContent === 'string'
                 && resolvedToolName && SHELL_TOOLS.has(resolvedToolName)) {
@@ -1147,7 +1149,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
                 // Try to extract output path from sbatch script (common pattern: --output=...)
                 const outputMatch = resultContent.match(/--output[= ](\S+)/);
                 const outputPath = outputMatch?.[1]?.replace('%j', jobId);
-                await this.jobMonitor.trackJob(jobId, task.id, task.planNodeId, outputPath);
+                // Fire-and-forget: don't block message processing while sacct is probed
+                this.jobMonitor.trackJob(jobId, task.id, task.planNodeId, outputPath).catch((err) => {
+                  console.error(`[claude-sdk] Failed to track sbatch job ${jobId}:`, err);
+                });
                 console.log(`[claude-sdk] Detected sbatch submission: job ${jobId} (tool: ${resolvedToolName})`);
               }
             }
