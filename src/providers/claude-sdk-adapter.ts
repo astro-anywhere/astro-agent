@@ -616,7 +616,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
   /**
    * Fast path for text-only tasks (chat, summarize).
    * Skips HPC context, MCP servers, tool infrastructure, canUseTool handler,
-   * sandbox, settingSources, and image handling to minimize time-to-first-token.
+   * sandbox, and image handling to minimize time-to-first-token.
+   *
+   * Chat tasks load settingSources so user skills (~/.claude/skills/) are available.
+   * Summarize tasks skip settingSources (no skills needed for structured extraction).
    */
   private async runTextOnlyQuery(
     task: Task,
@@ -630,17 +633,20 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     artifacts?: TaskArtifact[];
     metrics?: TaskResult['metrics'];
   }> {
-    // Chat tasks get read-only tools; summarize tasks stay text-only
+    // Chat tasks get read-only tools + Skill for user skill invocation;
+    // summarize tasks stay text-only
     const isChatTask = task.type === 'chat';
     const chatAllowedTools = hasWorkdir
-      ? ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch']
-      : ['WebSearch', 'WebFetch'];
+      ? ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Skill']
+      : ['WebSearch', 'WebFetch', 'Skill'];
 
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
       maxTurns: task.maxTurns ?? 10,
       permissionMode: isChatTask ? 'bypassPermissions' : 'plan',
       ...(isChatTask ? {} : { tools: [] }),
+      // Chat tasks load user skills via settingSources; summarize tasks skip for speed
+      ...(isChatTask ? { settingSources: ['user', 'project', 'local'] as const } : {}),
       persistSession: true,
       ...(hasWorkdir ? { cwd: task.workingDirectory } : {}),
       ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
@@ -650,7 +656,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           console.error(`[claude-sdk][stderr][${task.id.slice(0, 8)}] ${trimmed}`);
         }
       },
-      env: { ...process.env, ...task.environment },
+      env: {
+        ...process.env,
+        ...task.environment,
+        ...(isChatTask ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' } : {}),
+      },
     };
 
     if (isChatTask) {
