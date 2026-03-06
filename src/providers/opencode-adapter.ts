@@ -18,6 +18,17 @@ import type { Task, TaskResult, TaskArtifact } from '../types.js';
 import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
 
+/** Preserved session info for multi-turn resume */
+interface PreservedSession {
+  sessionId: string;
+  taskId: string;
+  workingDirectory?: string;
+  createdAt: number;
+}
+
+/** TTL for preserved sessions (30 minutes) */
+const SESSION_TTL_MS = 30 * 60 * 1000;
+
 export class OpenCodeAdapter implements ProviderAdapter {
   readonly type = 'opencode';
   readonly name = 'OpenCode';
@@ -30,6 +41,10 @@ export class OpenCodeAdapter implements ProviderAdapter {
   private lastResultMetrics?: TaskResult['metrics'];
   /** Maps tool_use_id → tool name for correlating tool_use with tool_result */
   private toolIdToName = new Map<string, string>();
+  /** Preserved sessions for multi-turn resume, keyed by taskId */
+  private preservedSessions = new Map<string, PreservedSession>();
+  /** Last session ID captured from the 'system' event */
+  private lastSessionId?: string;
 
   async isAvailable(): Promise<boolean> {
     const provider = await getProvider('opencode');
@@ -77,12 +92,25 @@ export class OpenCodeAdapter implements ProviderAdapter {
       stream.status('running', 0, 'Starting OpenCode');
 
       this.lastResultMetrics = undefined;
+      this.lastSessionId = undefined;
       this.toolIdToName.clear();
       const result = await this.runOpenCode(task, stream, signal);
+      const succeeded = result.exitCode === 0;
+
+      // Preserve session for multi-turn resume
+      if (succeeded && this.lastSessionId) {
+        this.cleanupExpiredSessions();
+        this.preservedSessions.set(task.id, {
+          sessionId: this.lastSessionId,
+          taskId: task.id,
+          workingDirectory: task.workingDirectory,
+          createdAt: Date.now(),
+        });
+      }
 
       return {
         taskId: task.id,
-        status: result.exitCode === 0 ? 'completed' : 'failed',
+        status: succeeded ? 'completed' : 'failed',
         exitCode: result.exitCode,
         output: result.output,
         error: result.error,
@@ -130,49 +158,156 @@ export class OpenCodeAdapter implements ProviderAdapter {
     };
   }
 
+  // ─── Multi-Turn Resume ─────────────────────────────────────────
+
+  /**
+   * Resume a completed session using `opencode run --session <id> --print`.
+   * OpenCode CLI supports `--session <id>` to continue a previous session.
+   */
+  async resumeTask(
+    taskId: string,
+    message: string,
+    workingDirectory: string,
+    sessionId: string,
+    stream: TaskOutputStream,
+    signal: AbortSignal,
+  ): Promise<{ success: boolean; output: string; error?: string }> {
+    if (!this.opencodePath) {
+      return { success: false, output: '', error: 'OpenCode not available' };
+    }
+
+    // Look up the original session ID from preserved sessions (keyed by taskId)
+    const session = this.preservedSessions.get(taskId);
+    const resolvedSessionId = session?.sessionId || sessionId;
+
+    this.activeTasks++;
+    try {
+      this.lastResultMetrics = undefined;
+      this.lastSessionId = undefined;
+      this.toolIdToName.clear();
+
+      const model = this.configModel;
+      const args = [
+        'run',
+        '--print',
+        '--output-format', 'json',
+        '--session', resolvedSessionId,
+        ...(model ? ['--model', model] : []),
+        message,
+      ];
+
+      const result = await this.spawnAndStream(args, workingDirectory, stream, signal);
+
+      // Update preserved session with new session ID if available
+      if (this.lastSessionId && session) {
+        session.sessionId = this.lastSessionId;
+        session.createdAt = Date.now();
+      }
+
+      return {
+        success: result.exitCode === 0,
+        output: result.output,
+        error: result.error,
+      };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.lastError = errorMsg;
+      return { success: false, output: '', error: errorMsg };
+    } finally {
+      this.activeTasks--;
+    }
+  }
+
+  /**
+   * Mid-execution message injection is not supported for OpenCode CLI.
+   */
+  async injectMessage(_taskId: string, _content: string, _interrupt?: boolean): Promise<boolean> {
+    return false;
+  }
+
+  /**
+   * Get preserved session context for a task.
+   */
+  getTaskContext(taskId: string): { sessionId: string; workingDirectory: string } | null {
+    const session = this.preservedSessions.get(taskId);
+    if (!session || Date.now() - session.createdAt > SESSION_TTL_MS) {
+      this.preservedSessions.delete(taskId);
+      return null;
+    }
+    return {
+      sessionId: session.sessionId,
+      workingDirectory: session.workingDirectory || '',
+    };
+  }
+
+  private cleanupExpiredSessions(): void {
+    const now = Date.now();
+    for (const [key, session] of this.preservedSessions) {
+      if (now - session.createdAt > SESSION_TTL_MS) {
+        this.preservedSessions.delete(key);
+      }
+    }
+  }
+
+  // ─── CLI Execution ────────────────────────────────────────────
+
   private runOpenCode(
     task: Task,
     stream: TaskOutputStream,
     signal: AbortSignal
   ): Promise<{ exitCode: number; output: string; error?: string; artifacts?: TaskArtifact[] }> {
+    const model = task.model || this.configModel;
+    const effectivePrompt = task.systemPrompt
+      ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
+      : task.prompt;
+
+    const args = [
+      'run',
+      '--print',
+      '--output-format', 'json',
+      ...(model ? ['--model', model] : []),
+      effectivePrompt,
+    ];
+
+    return this.spawnAndStream(
+      args,
+      task.workingDirectory,
+      stream,
+      signal,
+      task.environment,
+      task.timeout,
+    );
+  }
+
+  /**
+   * Shared spawn + stream logic used by both execute and resume paths.
+   */
+  private spawnAndStream(
+    args: string[],
+    workingDirectory: string | undefined,
+    stream: TaskOutputStream,
+    signal: AbortSignal,
+    environment?: Record<string, string>,
+    timeout?: number,
+  ): Promise<{ exitCode: number; output: string; error?: string; artifacts?: TaskArtifact[] }> {
     return new Promise((resolve, reject) => {
-      // OpenCode CLI: run --print --output-format json
-      // --print: Non-interactive mode (no TUI)
-      // --output-format json: JSONL streaming output
-      const model = task.model || this.configModel;
-
-      // Combine systemPrompt with prompt when provided (e.g., interactive plan sessions)
-      const effectivePrompt = task.systemPrompt
-        ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
-        : task.prompt;
-
-      const args = [
-        'run',
-        '--print',
-        '--output-format', 'json',
-        ...(model ? ['--model', model] : []),
-        effectivePrompt,
-      ];
-
       const env = {
         ...process.env,
-        ...task.environment,
+        ...environment,
       };
 
-      // Validate working directory exists before spawning
-      if (task.workingDirectory && !existsSync(task.workingDirectory)) {
+      if (workingDirectory && !existsSync(workingDirectory)) {
         reject(new Error(
-          `Working directory does not exist: ${task.workingDirectory}. ` +
+          `Working directory does not exist: ${workingDirectory}. ` +
           `Ensure the directory exists on this machine before dispatching.`
         ));
         return;
       }
 
       let proc: ChildProcess;
-
       try {
         proc = spawn(this.opencodePath!, args, {
-          cwd: task.workingDirectory || undefined,
+          cwd: workingDirectory || undefined,
           env,
           stdio: ['pipe', 'pipe', 'pipe'],
         });
@@ -181,38 +316,34 @@ export class OpenCodeAdapter implements ProviderAdapter {
         return;
       }
 
-      // Close stdin immediately
       proc.stdin?.end();
 
       let stdout = '';
       let stderr = '';
       const artifacts: TaskArtifact[] = [];
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      let killHandle: ReturnType<typeof setTimeout> | undefined;
 
       const abortHandler = () => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (killHandle) clearTimeout(killHandle);
         proc.kill('SIGTERM');
-        setTimeout(() => {
-          if (!proc.killed) {
-            proc.kill('SIGKILL');
-          }
+        killHandle = setTimeout(() => {
+          if (!proc.killed) proc.kill('SIGKILL');
         }, 5000);
       };
-
       signal.addEventListener('abort', abortHandler);
 
-      // Line buffer for incomplete JSONL lines
       let lineBuf = '';
 
       proc.stdout?.on('data', (data: Buffer) => {
         const text = data.toString();
         stdout += text;
-
         lineBuf += text;
         const lines = lineBuf.split('\n');
         lineBuf = lines.pop() || '';
         for (const line of lines) {
-          if (line.trim()) {
-            this.handleStreamLine(line, stream);
-          }
+          if (line.trim()) this.handleStreamLine(line, stream);
         }
       });
 
@@ -223,18 +354,31 @@ export class OpenCodeAdapter implements ProviderAdapter {
       });
 
       proc.on('error', (error) => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (killHandle) clearTimeout(killHandle);
         signal.removeEventListener('abort', abortHandler);
         reject(error);
       });
+      if (timeout) {
+        timeoutHandle = setTimeout(() => {
+          if (!proc.killed) {
+            proc.kill('SIGTERM');
+            killHandle = setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+          }
+        }, timeout);
+      }
 
       proc.on('close', (code) => {
-        // Flush remaining buffer
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (killHandle) clearTimeout(killHandle);
         if (lineBuf.trim()) {
-          this.handleStreamLine(lineBuf, stream);
+          try {
+            this.handleStreamLine(lineBuf, stream);
+          } catch (err) {
+            console.warn('[opencode] Failed to parse final buffer line:', err instanceof Error ? err.message : String(err));
+          }
         }
-
         signal.removeEventListener('abort', abortHandler);
-
         resolve({
           exitCode: code ?? 1,
           output: stdout,
@@ -242,19 +386,6 @@ export class OpenCodeAdapter implements ProviderAdapter {
           artifacts: artifacts.length > 0 ? artifacts : undefined,
         });
       });
-
-      if (task.timeout) {
-        setTimeout(() => {
-          if (!proc.killed) {
-            proc.kill('SIGTERM');
-            setTimeout(() => {
-              if (!proc.killed) {
-                proc.kill('SIGKILL');
-              }
-            }, 5000);
-          }
-        }, task.timeout);
-      }
     });
   }
 
@@ -317,6 +448,7 @@ export class OpenCodeAdapter implements ProviderAdapter {
           const sessionId = event.session_id as string | undefined;
           const model = event.model as string | undefined;
           if (sessionId) {
+            this.lastSessionId = sessionId;
             stream.sessionInit(sessionId, model);
           }
           break;
