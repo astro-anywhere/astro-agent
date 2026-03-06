@@ -483,11 +483,14 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
             }
             return { name: d.name, path: fullPath, isDirectory, isSymlink };
           })
-          .filter(e => e.isDirectory)
-          .sort((a, b) => a.name.localeCompare(b.name));
+          .sort((a, b) => {
+            // Directories first, then files, alphabetical within each group
+            if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+            return a.name.localeCompare(b.name);
+          });
 
         wsClient.sendDirectoryListResponse(correlationId, resolvedPath, entries, undefined, homeDir);
-        log('debug', `Sent ${entries.length} directories for path: ${resolvedPath}`, logLevel);
+        log('debug', `Sent ${entries.length} entries (dirs+files) for path: ${resolvedPath}`, logLevel);
       } catch (error) {
         log('warn', `Failed to list directories in ${path}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
         wsClient.sendDirectoryListResponse(correlationId, path || '~', [], `Failed: ${error instanceof Error ? error.message : String(error)}`, homedir());
