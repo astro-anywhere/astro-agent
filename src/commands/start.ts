@@ -6,17 +6,25 @@ import chalk from 'chalk';
 import ora from 'ora';
 import { spawn, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, renameSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import os from 'node:os';
 import { homedir } from 'node:os';
 import { config } from '../lib/config.js';
 import { detectProviders } from '../lib/providers.js';
-import { getMachineResources, formatResourceSummary } from '../lib/resources.js';
+import { getMachineResources } from '../lib/resources.js';
 import { WebSocketClient } from '../lib/websocket-client.js';
 import { TaskExecutor } from '../lib/task-executor.js';
 import { localRepoSetup } from '../lib/repo-utils.js';
 import { executionStrategyRegistry } from '../execution/index.js';
+import {
+  formatLaunchBanner,
+  formatLocalMachineBox,
+  formatSetupHint,
+  formatNoProvidersWarning,
+  formatBackgroundSummary,
+} from '../lib/display.js';
 import type { RunnerEvent, Task, RepoSetupRequestMessage, RepoDetectRequestMessage, BranchListRequestMessage, GitInitRequestMessage } from '../types.js';
 
 interface StartOptions {
@@ -241,15 +249,20 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       writeFileSync(pidFile, String(child.pid));
     }
 
-    console.log(chalk.green('✓ Agent runner started in background'));
+    const bgVersion = await getVersion();
+    const bgProviders = await detectProviders().catch(() => []);
+    const bgRemoteHosts = config.getRemoteHosts();
+
+    console.log(formatLaunchBanner(bgVersion));
+    console.log(chalk.green('  ✓ Agent runner started in background'));
     console.log(chalk.dim(`  PID: ${child.pid}`));
-    console.log(chalk.dim(`  Runner ID: ${runnerId}`));
     console.log();
-    console.log('To view logs:');
-    console.log(chalk.cyan('  npx @astroanywhere/agent logs'));
+    console.log(formatBackgroundSummary(bgProviders, bgRemoteHosts.length, runnerId));
     console.log();
-    console.log('To stop:');
-    console.log(chalk.cyan('  npx @astroanywhere/agent stop'));
+    console.log(chalk.dim('  Logs:  ') + chalk.cyan('npx @astroanywhere/agent logs'));
+    console.log(chalk.dim('  Stop:  ') + chalk.cyan('npx @astroanywhere/agent stop'));
+    console.log();
+    console.log(formatSetupHint(bgRemoteHosts.length));
 
     return;
   }
@@ -257,16 +270,15 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
   // Foreground mode: run directly
   const verbose = options.verbose ?? false;
 
-  console.log(chalk.bold('\n🤖 Astro Agent Runner\n'));
-
   const version = await getVersion();
+  console.log(formatLaunchBanner(version));
+
   if (verbose) {
-    console.log(chalk.dim(`Version: ${version}`));
-    console.log(chalk.dim(`Runner ID: ${runnerId}`));
-    console.log(chalk.dim(`Machine ID: ${machineId}`));
-    console.log(chalk.dim(`Relay: ${relayUrl}`));
-    console.log(chalk.dim(`Max concurrent tasks: ${maxTasks}`));
-    console.log(chalk.dim(`Log level: ${logLevel}`));
+    console.log(chalk.dim(`  Runner ID: ${runnerId}`));
+    console.log(chalk.dim(`  Machine ID: ${machineId}`));
+    console.log(chalk.dim(`  Relay: ${relayUrl}`));
+    console.log(chalk.dim(`  Max concurrent tasks: ${maxTasks}`));
+    console.log(chalk.dim(`  Log level: ${logLevel}`));
     console.log();
   }
 
@@ -274,56 +286,76 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
   const claudeOauthToken = config.getClaudeOauthToken();
   if (claudeOauthToken && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
     process.env.CLAUDE_CODE_OAUTH_TOKEN = claudeOauthToken;
-    if (verbose) console.log(chalk.dim('Using stored Claude OAuth token'));
+    if (verbose) console.log(chalk.dim('  Using stored Claude OAuth token'));
   }
 
-  // Detect resources
-  const resourceSpinner = ora('Detecting machine resources...').start();
-  let resources;
-  try {
-    resources = await getMachineResources();
-    resourceSpinner.succeed('Machine resources detected');
-    if (verbose) {
-      console.log(chalk.dim(formatResourceSummary(resources)));
-    }
-  } catch (error) {
-    resourceSpinner.fail('Failed to detect resources');
-    console.error(chalk.red(error instanceof Error ? error.message : String(error)));
-  }
+  // Detect resources + providers + strategies in parallel
+  const spinner = ora('Detecting environment...').start();
 
-  // Detect providers
-  const providerSpinner = ora('Detecting agent providers...').start();
+  let resources: Awaited<ReturnType<typeof getMachineResources>> | undefined;
   let providers: Awaited<ReturnType<typeof detectProviders>> = [];
+  let executionStrategies: Awaited<ReturnType<typeof executionStrategyRegistry.detectAll>> = [];
+
   try {
-    providers = await detectProviders();
-    if (providers.length > 0) {
-      providerSpinner.succeed(`Found ${providers.length} provider(s): ${providers.map((p) => p.name).join(', ')}`);
-    } else {
-      providerSpinner.warn('No providers available');
-    }
+    const [res, prov, strats] = await Promise.all([
+      getMachineResources().catch(() => undefined),
+      detectProviders().catch(() => [] as Awaited<ReturnType<typeof detectProviders>>),
+      executionStrategyRegistry.detectAll().catch(() => [] as Awaited<ReturnType<typeof executionStrategyRegistry.detectAll>>),
+    ]);
+    resources = res;
+    providers = prov;
+    executionStrategies = strats;
+    spinner.succeed('Environment detected');
   } catch {
-    providerSpinner.fail('Failed to detect providers');
-    providers = [];
+    spinner.fail('Failed to detect environment');
   }
 
-  // Detect execution strategies
-  const strategySpinner = ora('Detecting execution strategies...').start();
-  let executionStrategies: Awaited<ReturnType<typeof executionStrategyRegistry.detectAll>> = [];
+  // Write status file so remote launchers can read our detection results
   try {
-    executionStrategies = await executionStrategyRegistry.detectAll();
+    const statusPath = join(homedir(), '.astro', 'agent-status.json');
+    const status = {
+      version,
+      runnerId,
+      hostname: resources?.hostname ?? os.hostname(),
+      platform: resources?.platform ?? os.platform(),
+      arch: resources?.arch ?? os.arch(),
+      cpuCores: resources?.cpu.cores,
+      memoryGB: resources ? Math.round(resources.memory.total / (1024 ** 3)) : undefined,
+      gpu: resources?.gpu.map(g => ({ name: g.name, vendor: g.vendor, memoryGB: Math.round(g.memoryTotal / (1024 ** 3)) })),
+      providers: providers.map(p => ({ name: p.name, type: p.type, version: p.version, model: p.capabilities.defaultModel })),
+      detectedAt: new Date().toISOString(),
+    };
+    const tmpPath = `${statusPath}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(status, null, 2));
+    renameSync(tmpPath, statusPath);
+  } catch {
+    // Non-fatal
+  }
+
+  // Display structured machine box
+  if (resources) {
+    console.log();
+    console.log(formatLocalMachineBox(resources, providers, version, runnerId));
+  }
+
+  // Show provider warning if none found
+  if (providers.length === 0) {
+    console.log();
+    console.log(formatNoProvidersWarning());
+  }
+
+  // Show execution strategies in verbose mode
+  if (verbose && executionStrategies.length > 0) {
     const available = executionStrategies.filter((s) => s.available);
     if (available.length > 0) {
-      strategySpinner.succeed(
-        `Found ${available.length} execution strategy(s): ${available.map((s) => s.name).join(', ')}`,
-      );
-    } else {
-      strategySpinner.warn('No execution strategies detected (direct always available)');
+      console.log(chalk.dim(`  Execution strategies: ${available.map((s) => s.name).join(', ')}`));
     }
-  } catch {
-    strategySpinner.fail('Failed to detect execution strategies');
-    executionStrategies = [];
   }
 
+  // Show setup hint (rebuild scenario)
+  const remoteHosts = config.getRemoteHosts();
+  console.log();
+  console.log(formatSetupHint(remoteHosts.length));
   console.log();
 
   // Create WebSocket client

@@ -45,6 +45,9 @@ import type {
   BranchListResponseMessage,
   GitInitRequestMessage,
   GitInitResponseMessage,
+  ChannelNotificationMessage,
+  ChannelResponseMessage,
+  ChannelApprovalRequestMessage,
   ProviderInfo,
   ExecutionStrategyInfo,
   RunnerConfig,
@@ -53,6 +56,7 @@ import type {
   TaskResult,
   Task,
 } from '../types.js';
+import { OpenClawBridge } from './openclaw-bridge.js';
 import { getMachineResources } from './resources.js';
 import { config as configManager } from './config.js';
 
@@ -118,6 +122,9 @@ type IncomingMessage =
   | BranchListRequestMessage
   | GitInitRequestMessage
   | import('../types.js').SessionsListRequestMessage
+  | ChannelNotificationMessage
+  | ChannelResponseMessage
+  | ChannelApprovalRequestMessage
   | ErrorMessage;
 
 export class WebSocketClient {
@@ -140,6 +147,7 @@ export class WebSocketClient {
   private pendingMessages: WSMessage[] = [];
   private static MAX_PENDING = 5000;
   private pendingApprovals: Map<string, { resolve: (result: { answered: boolean; answer?: string; message?: string }) => void; reject: (error: Error) => void }> = new Map();
+  private openclawBridge: OpenClawBridge | null = null;
 
   private onEvent?: RunnerEventHandler;
   private onTaskDispatch?: (task: Task) => void;
@@ -797,6 +805,16 @@ export class WebSocketClient {
         return;
       }
 
+      // Handle channel.* (dot notation from relay) — normalize to underscore
+      if (typeof raw.type === 'string' && raw.type.startsWith('channel.')) {
+        const normalized = {
+          ...raw,
+          type: raw.type.replaceAll('.', '_'),
+        } as unknown as IncomingMessage;
+        this.routeMessage(normalized);
+        return;
+      }
+
       const message = raw as unknown as IncomingMessage;
       this.routeMessage(message);
     } catch (error) {
@@ -860,6 +878,15 @@ export class WebSocketClient {
       case 'sessions_list_request':
         this.handleSessionsListRequest(message as import('../types.js').SessionsListRequestMessage);
         break;
+      case 'channel_notification':
+        this.handleChannelNotification(message as ChannelNotificationMessage);
+        break;
+      case 'channel_response':
+        this.handleChannelResponse(message as ChannelResponseMessage);
+        break;
+      case 'channel_approval_request':
+        this.handleChannelApprovalRequest(message as ChannelApprovalRequestMessage);
+        break;
       case 'error':
         this.handleError(message);
         break;
@@ -870,6 +897,151 @@ export class WebSocketClient {
     // Apply server-provided configuration
     if (message.payload.config) {
       this.config = { ...this.config, ...message.payload.config };
+    }
+
+    // Start the OpenClaw bridge if this machine has the openclaw provider
+    if (this.providers.some(p => p.type === 'openclaw' && p.available)) {
+      this.startOpenClawBridge();
+    }
+  }
+
+  // ─── OpenClaw Bridge (channel relay) ────────────────────────────
+
+  private startOpenClawBridge(): void {
+    if (this.openclawBridge) return;
+
+    const bridge = new OpenClawBridge();
+    this.openclawBridge = bridge; // Assign immediately to prevent double-start on rapid reconnect
+    bridge.start().then((connected) => {
+      if (!connected) {
+        // Only null out if this is still our bridge (not replaced by a newer attempt)
+        if (this.openclawBridge === bridge) {
+          bridge.stop();
+          this.openclawBridge = null;
+        }
+        return;
+      }
+      console.log('[ws-client] OpenClaw bridge started for channel relay');
+
+      // Forward inbound messages from OpenClaw to the server
+      bridge.on('inbound', (payload: Record<string, unknown>) => {
+        this.send({
+          type: 'channel_inbound',
+          timestamp: new Date().toISOString(),
+          payload: {
+            sourceMessageId: (payload.messageId as string) ?? String(Date.now()),
+            text: (payload.text as string) ?? '',
+            senderId: (payload.senderId as string) ?? 'unknown',
+            senderName: (payload.senderName as string) ?? 'unknown',
+            channelId: (payload.channelId as string) ?? '',
+            threadId: payload.threadId as string | undefined,
+            metadata: payload.metadata as Record<string, unknown> | undefined,
+          },
+        });
+      });
+    }).catch((err) => {
+      if (this.openclawBridge === bridge) {
+        bridge.stop();
+        this.openclawBridge = null;
+      }
+      console.warn('[ws-client] Failed to start OpenClaw bridge:', err);
+    });
+  }
+
+  private async handleChannelNotification(message: ChannelNotificationMessage): Promise<void> {
+    const { correlationId, notification } = message.payload;
+
+    if (!this.openclawBridge?.isConnected) {
+      this.send({
+        type: 'channel_notification_ack',
+        timestamp: new Date().toISOString(),
+        payload: { correlationId, success: false, error: 'OpenClaw bridge not connected' },
+      });
+      return;
+    }
+
+    try {
+      await this.openclawBridge.sendNotification(notification);
+      this.send({
+        type: 'channel_notification_ack',
+        timestamp: new Date().toISOString(),
+        payload: { correlationId, success: true },
+      });
+    } catch (err) {
+      this.send({
+        type: 'channel_notification_ack',
+        timestamp: new Date().toISOString(),
+        payload: {
+          correlationId,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
+    }
+  }
+
+  private async handleChannelResponse(message: ChannelResponseMessage): Promise<void> {
+    const { correlationId, response } = message.payload;
+
+    if (!this.openclawBridge?.isConnected) {
+      this.send({
+        type: 'channel_response_ack',
+        timestamp: new Date().toISOString(),
+        payload: { correlationId, success: false, error: 'OpenClaw bridge not connected' },
+      });
+      return;
+    }
+
+    try {
+      await this.openclawBridge.sendResponse(response);
+      this.send({
+        type: 'channel_response_ack',
+        timestamp: new Date().toISOString(),
+        payload: { correlationId, success: true },
+      });
+    } catch (err) {
+      this.send({
+        type: 'channel_response_ack',
+        timestamp: new Date().toISOString(),
+        payload: {
+          correlationId,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
+    }
+  }
+
+  private async handleChannelApprovalRequest(message: ChannelApprovalRequestMessage): Promise<void> {
+    const { correlationId, approvalId, projectId, taskId, question, options, to } = message.payload;
+
+    if (!this.openclawBridge?.isConnected) {
+      console.warn(`[ws-client] Channel approval ${approvalId} skipped: OpenClaw bridge not connected`);
+      this.send({
+        type: 'channel_approval_response',
+        timestamp: new Date().toISOString(),
+        payload: { correlationId, approvalId, response: '', error: 'OpenClaw bridge not connected' },
+      });
+      return;
+    }
+
+    try {
+      const response = await this.openclawBridge.requestApproval({
+        approvalId, projectId, taskId, question, options, to,
+      });
+      this.send({
+        type: 'channel_approval_response',
+        timestamp: new Date().toISOString(),
+        payload: { correlationId, approvalId, response },
+      });
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.warn(`[ws-client] Channel approval ${approvalId} failed:`, errorMsg);
+      this.send({
+        type: 'channel_approval_response',
+        timestamp: new Date().toISOString(),
+        payload: { correlationId, approvalId, response: '', error: errorMsg },
+      });
     }
   }
 
@@ -1251,6 +1423,11 @@ export class WebSocketClient {
   private cleanup(): void {
     this.stopHeartbeat();
     this.cancelTokenRefresh();
+
+    if (this.openclawBridge) {
+      this.openclawBridge.stop();
+      this.openclawBridge = null;
+    }
 
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);

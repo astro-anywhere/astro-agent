@@ -298,6 +298,10 @@ export type WSMessageType =
   | 'branch_list_response'
   | 'git_init_response'
   | 'sessions_list_response'
+  | 'channel_notification_ack'
+  | 'channel_response_ack'
+  | 'channel_approval_response'
+  | 'channel_inbound'
   // Server -> Client
   | 'registered'
   | 'heartbeat_ack'
@@ -317,6 +321,9 @@ export type WSMessageType =
   | 'branch_list_request'
   | 'git_init_request'
   | 'sessions_list_request'
+  | 'channel_notification'
+  | 'channel_response'
+  | 'channel_approval_request'
   | 'error';
 
 export interface WSMessage {
@@ -783,6 +790,99 @@ export interface SessionsListResponseMessage extends WSMessage {
     correlationId: string;
     sessions: ClaudeCodeSessionInfo[];
     error?: string;
+  };
+}
+
+// ============================================================================
+// Channel Relay Types (Server <-> Agent Runner <-> OpenClaw Gateway)
+// ============================================================================
+
+/** Server -> Agent: Send a notification through OpenClaw */
+export interface ChannelNotificationMessage extends WSMessage {
+  type: 'channel_notification';
+  payload: {
+    correlationId: string;
+    notification: {
+      type: string;
+      projectId: string;
+      summary: string;
+      astroUrl?: string;
+      to?: string;
+      metadata?: Record<string, unknown>;
+    };
+  };
+}
+
+/** Agent -> Server: Notification delivery acknowledgment */
+export interface ChannelNotificationAckMessage extends WSMessage {
+  type: 'channel_notification_ack';
+  payload: {
+    correlationId: string;
+    success: boolean;
+    error?: string;
+  };
+}
+
+/** Server -> Agent: Send a chat response through OpenClaw */
+export interface ChannelResponseMessage extends WSMessage {
+  type: 'channel_response';
+  payload: {
+    correlationId: string;
+    response: {
+      text: string;
+      channelId: string;
+      threadId?: string;
+      metadata?: Record<string, unknown>;
+    };
+  };
+}
+
+/** Agent -> Server: Response delivery acknowledgment */
+export interface ChannelResponseAckMessage extends WSMessage {
+  type: 'channel_response_ack';
+  payload: {
+    correlationId: string;
+    success: boolean;
+    error?: string;
+  };
+}
+
+/** Server -> Agent: Request user approval through OpenClaw */
+export interface ChannelApprovalRequestMessage extends WSMessage {
+  type: 'channel_approval_request';
+  payload: {
+    correlationId: string;
+    approvalId: string;
+    projectId: string;
+    taskId: string;
+    question: string;
+    options?: string[];
+    to?: string;
+  };
+}
+
+/** Agent -> Server: User responded to approval via OpenClaw */
+export interface ChannelApprovalResponseMessage extends WSMessage {
+  type: 'channel_approval_response';
+  payload: {
+    correlationId: string;
+    approvalId: string;
+    response: string;
+    error?: string;
+  };
+}
+
+/** Agent -> Server: Unprompted inbound message from user via OpenClaw */
+export interface ChannelInboundMessage extends WSMessage {
+  type: 'channel_inbound';
+  payload: {
+    sourceMessageId: string;
+    text: string;
+    senderId: string;
+    senderName: string;
+    channelId: string;
+    threadId?: string;
+    metadata?: Record<string, unknown>;
   };
 }
 
