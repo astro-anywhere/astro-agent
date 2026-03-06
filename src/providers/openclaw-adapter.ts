@@ -234,13 +234,13 @@ export class OpenClawAdapter implements ProviderAdapter {
 
       ws = new WebSocket(config.url);
 
-      ws.on('message', (data) => {
+      const handshakeHandler = (data: Buffer) => {
         try {
           const frame = JSON.parse(String(data)) as GatewayFrame;
 
           // Step 1: Receive challenge, send connect
           if (frame.type === 'event' && frame.event === 'connect.challenge') {
-            ws.send(JSON.stringify({
+            ws!.send(JSON.stringify({
               type: 'req',
               id: 'connect-1',
               method: 'connect',
@@ -264,22 +264,28 @@ export class OpenClawAdapter implements ProviderAdapter {
           // Step 2: Receive connect response
           if (frame.type === 'res' && frame.id === 'connect-1') {
             clearTimeout(timeout);
+            ws!.removeListener('message', handshakeHandler);
+            ws!.removeListener('error', errorHandler);
             if (frame.ok) {
-              resolve(ws);
+              resolve(ws!);
             } else {
-              ws.close();
+              ws!.close();
               reject(new Error(`Gateway handshake failed: ${frame.error?.message || 'unknown'}`));
             }
           }
         } catch {
           // ignore parse errors during handshake
         }
-      });
+      };
 
-      ws.on('error', (err) => {
+      const errorHandler = (err: Error) => {
         clearTimeout(timeout);
+        ws?.removeListener('message', handshakeHandler);
         reject(err);
-      });
+      };
+
+      ws.on('message', handshakeHandler);
+      ws.on('error', errorHandler);
     });
   }
 
@@ -390,7 +396,7 @@ export class OpenClawAdapter implements ProviderAdapter {
         if (frame.type === 'event' && frame.event === 'agent') {
           const p = frame.payload || {};
 
-          // Filter to our session
+          // Filter to our session — gateway prepends 'agent:main:' to sessionKey
           if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) {
             return;
           }
@@ -457,7 +463,7 @@ export class OpenClawAdapter implements ProviderAdapter {
         if (frame.type === 'event' && frame.event === 'chat') {
           const p = frame.payload || {};
 
-          // Filter to our session
+          // Filter to our session — gateway prepends 'agent:main:' to sessionKey
           if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) {
             return;
           }
