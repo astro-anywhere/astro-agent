@@ -355,17 +355,19 @@ export class OpenCodeAdapter implements ProviderAdapter {
       });
 
       let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      let killHandle: ReturnType<typeof setTimeout> | undefined;
       if (timeout) {
         timeoutHandle = setTimeout(() => {
           if (!proc.killed) {
             proc.kill('SIGTERM');
-            setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+            killHandle = setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
           }
         }, timeout);
       }
 
       proc.on('close', (code) => {
         if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (killHandle) clearTimeout(killHandle);
         if (lineBuf.trim()) {
           try {
             this.handleStreamLine(lineBuf, stream);

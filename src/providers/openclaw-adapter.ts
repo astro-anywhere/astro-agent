@@ -211,11 +211,13 @@ export class OpenClawAdapter implements ProviderAdapter {
     const sessionKey = session?.sessionKey || `astro:task:${sessionId}`;
 
     this.activeTasks++;
+    let ws: WebSocket | undefined;
     try {
-      const ws = await this.connectToGateway(this.gatewayConfig);
+      ws = await this.connectToGateway(this.gatewayConfig);
       stream.status('running', 5, 'Resuming OpenClaw session');
 
       const result = await this.sendChatMessage(ws, sessionKey, message, stream, signal);
+      ws = undefined; // Ownership transferred to sendChatMessage (closes on finish)
 
       // Update preserved session timestamp
       if (session) {
@@ -228,6 +230,7 @@ export class OpenClawAdapter implements ProviderAdapter {
         error: result.error,
       };
     } catch (error) {
+      ws?.close();
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.lastError = errorMsg;
       return { success: false, output: '', error: errorMsg };
