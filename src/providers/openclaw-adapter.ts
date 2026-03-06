@@ -533,16 +533,20 @@ export class OpenClawAdapter implements ProviderAdapter {
         : task.prompt;
 
       // Send chat.send
-      ws.send(JSON.stringify({
-        type: 'req',
-        id: 'chat-send-1',
-        method: 'chat.send',
-        params: {
-          sessionKey,
-          message: effectivePrompt,
-          idempotencyKey,
-        },
-      }));
+      try {
+        ws.send(JSON.stringify({
+          type: 'req',
+          id: 'chat-send-1',
+          method: 'chat.send',
+          params: {
+            sessionKey,
+            message: effectivePrompt,
+            idempotencyKey,
+          },
+        }));
+      } catch (err) {
+        finish(`Failed to send chat.send: ${err instanceof Error ? err.message : String(err)}`);
+      }
 
       // Note: signal listener and timeout cleanup is handled in finish()
     });

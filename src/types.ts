@@ -807,6 +807,7 @@ export interface ChannelNotificationMessage extends WSMessage {
       projectId: string;
       summary: string;
       astroUrl?: string;
+      to?: string;
       metadata?: Record<string, unknown>;
     };
   };

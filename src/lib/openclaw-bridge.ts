@@ -146,6 +146,12 @@ export class OpenClawBridge extends EventEmitter {
     if (!this.gatewayConfig) return Promise.resolve();
 
     return new Promise((resolve) => {
+      // Clean up old WebSocket handlers to prevent leaks on reconnection
+      if (this.ws) {
+        this.ws.removeAllListeners();
+        this.ws = null;
+      }
+
       const timeout = setTimeout(() => {
         console.warn('[openclaw-bridge] Connection timeout');
         this.ws?.close();

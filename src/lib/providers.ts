@@ -298,19 +298,20 @@ async function detectCodex(): Promise<ProviderInfo | null> {
 function probeGatewayReachable(url: string): Promise<boolean> {
   return new Promise((resolve) => {
     let ws: WebSocket | undefined;
-    const timeout = setTimeout(() => { ws?.close(); resolve(false) }, 5000);
+    const timeout = setTimeout(() => { ws?.removeAllListeners(); ws?.close(); resolve(false) }, 5000);
     ws = new WebSocket(url);
     ws.on('message', (data) => {
       try {
         const frame = JSON.parse(String(data));
         if (frame.type === 'event' && frame.event === 'connect.challenge') {
           clearTimeout(timeout);
+          ws.removeAllListeners();
           ws.close();
           resolve(true);
         }
       } catch { /* ignore */ }
     });
-    ws.on('error', () => { clearTimeout(timeout); resolve(false) });
+    ws.on('error', () => { clearTimeout(timeout); ws?.removeAllListeners(); resolve(false) });
     ws.on('close', () => { clearTimeout(timeout); resolve(false) });
   });
 }
