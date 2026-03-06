@@ -63,6 +63,7 @@ export class OpenClawBridge extends EventEmitter {
   private pendingApprovals = new Map<string, PendingRequest>();
   private _connected = false;
   private _started = false;
+  private _connecting = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Default recipient for send (e.g., Telegram username, phone). Read from openclaw.json */
   private defaultRecipient: string | null = null;
@@ -85,7 +86,15 @@ export class OpenClawBridge extends EventEmitter {
     this.defaultRecipient = config.defaultRecipient || null;
     this.telegramBotToken = this.readTelegramBotToken();
     this._started = true;
-    await this.connect();
+    try {
+      await this.connect();
+    } catch {
+      // Reset so future start() calls can retry
+      this._started = false;
+    }
+    if (!this._connected) {
+      this._started = false;
+    }
     return this._connected;
   }
 
@@ -145,6 +154,8 @@ export class OpenClawBridge extends EventEmitter {
 
   private connect(): Promise<void> {
     if (!this.gatewayConfig) return Promise.resolve();
+    if (this._connecting) return Promise.resolve();
+    this._connecting = true;
 
     return new Promise((resolve) => {
       // Clean up old WebSocket handlers to prevent leaks on reconnection
@@ -153,10 +164,16 @@ export class OpenClawBridge extends EventEmitter {
         this.ws = null;
       }
 
+      const done = () => { this._connecting = false; resolve(); };
+
       const timeout = setTimeout(() => {
         console.warn('[openclaw-bridge] Connection timeout');
-        this.ws?.close();
-        resolve();
+        if (this.ws) {
+          this.ws.removeAllListeners();
+          this.ws.close();
+          this.ws = null;
+        }
+        done();
       }, CONNECT_TIMEOUT_MS);
 
       const ws = new WebSocket(this.gatewayConfig!.url);
@@ -201,11 +218,11 @@ export class OpenClawBridge extends EventEmitter {
             this._connected = true;
             console.log('[openclaw-bridge] Connected to gateway');
             this.emit('connected');
-            resolve();
+            done();
           } else {
             console.error('[openclaw-bridge] Handshake failed:', frame.error?.message);
             ws.close();
-            resolve();
+            done();
           }
           return;
         }
@@ -232,8 +249,10 @@ export class OpenClawBridge extends EventEmitter {
       ws.on('error', (err) => {
         console.error('[openclaw-bridge] WebSocket error:', err.message);
         clearTimeout(timeout);
+        ws.removeAllListeners();
         ws.close();
-        resolve();
+        this.ws = null;
+        done();
       });
     });
   }

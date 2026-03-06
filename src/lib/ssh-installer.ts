@@ -305,8 +305,9 @@ export async function startRemoteAgents(
         log(host.name, 'Agent started — reading status...');
         // Poll for status file with retries (remote agent may take time to detect environment)
         let agentStatus: RemoteAgentStatus | undefined;
-        for (let attempt = 0; attempt < 10; attempt++) {
-          await new Promise((r) => setTimeout(r, 1000));
+        for (let attempt = 0; attempt < 8; attempt++) {
+          const delay = Math.min(100 * Math.pow(2, attempt), 3200); // 100, 200, 400, 800, 1600, 3200, 3200, 3200 (~9.5s total)
+          await new Promise((r) => setTimeout(r, delay));
           try {
             const { stdout: statusJson } = await sshExec(host, 'cat $HOME/.astro/agent-status.json 2>/dev/null');
             if (statusJson.trim()) {

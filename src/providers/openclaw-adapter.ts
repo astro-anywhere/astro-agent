@@ -308,6 +308,7 @@ export class OpenClawAdapter implements ProviderAdapter {
 
       let ws: WebSocket | undefined;
       const timeout = setTimeout(() => {
+        ws?.removeAllListeners();
         ws?.close();
         done(false);
       }, 5000);
@@ -347,6 +348,7 @@ export class OpenClawAdapter implements ProviderAdapter {
     return new Promise((resolve, reject) => {
       let ws: WebSocket | undefined;
       const timeout = setTimeout(() => {
+        ws?.removeAllListeners();
         ws?.close();
         reject(new Error('Gateway connection timeout'));
       }, CONNECT_TIMEOUT_MS);

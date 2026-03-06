@@ -914,7 +914,11 @@ export class WebSocketClient {
     this.openclawBridge = bridge; // Assign immediately to prevent double-start on rapid reconnect
     bridge.start().then((connected) => {
       if (!connected) {
-        this.openclawBridge = null;
+        // Only null out if this is still our bridge (not replaced by a newer attempt)
+        if (this.openclawBridge === bridge) {
+          bridge.stop();
+          this.openclawBridge = null;
+        }
         return;
       }
       console.log('[ws-client] OpenClaw bridge started for channel relay');
@@ -936,7 +940,10 @@ export class WebSocketClient {
         });
       });
     }).catch((err) => {
-      this.openclawBridge = null;
+      if (this.openclawBridge === bridge) {
+        bridge.stop();
+        this.openclawBridge = null;
+      }
       console.warn('[ws-client] Failed to start OpenClaw bridge:', err);
     });
   }
