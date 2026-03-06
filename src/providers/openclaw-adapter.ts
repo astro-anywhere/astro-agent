@@ -216,8 +216,10 @@ export class OpenClawAdapter implements ProviderAdapter {
       ws = await this.connectToGateway(this.gatewayConfig);
       stream.status('running', 5, 'Resuming OpenClaw session');
 
+      // sendChatMessage() registers ws error/close handlers before sending,
+      // so it owns cleanup (calls ws.close() in its finish() helper)
       const result = await this.sendChatMessage(ws, sessionKey, message, stream, signal);
-      ws = undefined; // Ownership transferred to sendChatMessage (closes on finish)
+      ws = undefined;
 
       // Update preserved session timestamp
       if (session) {

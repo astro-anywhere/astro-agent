@@ -321,10 +321,14 @@ export class OpenCodeAdapter implements ProviderAdapter {
       let stdout = '';
       let stderr = '';
       const artifacts: TaskArtifact[] = [];
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      let killHandle: ReturnType<typeof setTimeout> | undefined;
 
       const abortHandler = () => {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        if (killHandle) clearTimeout(killHandle);
         proc.kill('SIGTERM');
-        setTimeout(() => {
+        killHandle = setTimeout(() => {
           if (!proc.killed) proc.kill('SIGKILL');
         }, 5000);
       };
@@ -348,9 +352,6 @@ export class OpenCodeAdapter implements ProviderAdapter {
         stderr += text;
         stream.stderr(text);
       });
-
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-      let killHandle: ReturnType<typeof setTimeout> | undefined;
 
       proc.on('error', (error) => {
         if (timeoutHandle) clearTimeout(timeoutHandle);
