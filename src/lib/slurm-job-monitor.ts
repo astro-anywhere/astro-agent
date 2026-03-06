@@ -33,6 +33,7 @@ interface TrackedJob {
   lastOutputOffset: number;
   stdoutSequence: number;
   trackingSince: Date;
+  pollFailures: number;
 }
 
 /** Terminal Slurm states */
@@ -41,11 +42,15 @@ const TERMINAL_STATES = new Set([
   'PREEMPTED', 'NODE_FAIL', 'OUT_OF_MEMORY',
 ]);
 
+/** Max consecutive sacct failures before untracking a job (Layer 3 safety net) */
+const MAX_POLL_FAILURES = 3;
+
 export class SlurmJobMonitor {
   private jobs = new Map<string, TrackedJob>();
   private pollInterval: ReturnType<typeof setInterval> | null = null;
   private wsClient: WebSocketClient;
   private pollIntervalMs: number;
+  private sacctAvailable: boolean | null = null; // null = not yet checked
 
   constructor(wsClient: WebSocketClient, pollIntervalMs = 30_000) {
     this.wsClient = wsClient;
@@ -53,14 +58,38 @@ export class SlurmJobMonitor {
   }
 
   /**
-   * Track a submitted Slurm job
+   * Layer 2: Check if sacct is available on this machine.
+   * Caches the result so we only probe once.
    */
-  trackJob(
+  async isSacctAvailable(): Promise<boolean> {
+    if (this.sacctAvailable !== null) return this.sacctAvailable;
+    try {
+      await execFileAsync('sacct', ['--version'], { timeout: 5_000 });
+      this.sacctAvailable = true;
+    } catch {
+      this.sacctAvailable = false;
+    }
+    return this.sacctAvailable;
+  }
+
+  /**
+   * Track a submitted Slurm job.
+   * Layer 2: Validates sacct is available before tracking. If sacct is not
+   * installed, the job cannot be monitored and would block results forever.
+   */
+  async trackJob(
     slurmJobId: string,
     executionId: string,
     nodeId: string,
     outputPath?: string,
-  ): void {
+  ): Promise<void> {
+    // Layer 2: Don't track if we can't monitor
+    const canMonitor = await this.isSacctAvailable();
+    if (!canMonitor) {
+      console.warn(`[slurm-monitor] sacct not available — skipping tracking for job ${slurmJobId}`);
+      return;
+    }
+
     console.log(`[slurm-monitor] Tracking job ${slurmJobId} for task ${executionId}`);
     this.jobs.set(slurmJobId, {
       slurmJobId,
@@ -70,6 +99,7 @@ export class SlurmJobMonitor {
       lastOutputOffset: 0,
       stdoutSequence: 0,
       trackingSince: new Date(),
+      pollFailures: 0,
     });
 
     // Start polling if not already running
@@ -173,7 +203,12 @@ export class SlurmJobMonitor {
         elapsed = parts[2] || undefined;
       }
     } catch {
-      // sacct not available or job not yet visible
+      // Layer 3: sacct failed — increment failure count and untrack after threshold
+      job.pollFailures++;
+      if (job.pollFailures >= MAX_POLL_FAILURES) {
+        console.warn(`[slurm-monitor] Job ${slurmJobId} unreachable after ${MAX_POLL_FAILURES} polls — untracking`);
+        this.untrackJob(slurmJobId);
+      }
       return;
     }
 
