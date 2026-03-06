@@ -270,8 +270,11 @@ describe('onDirectoryList callback logic', () => {
         }
         return { name: d.name, path: fullPath, isDirectory, isSymlink }
       })
-      .filter(e => e.isDirectory)
-      .sort((a, b) => a.name.localeCompare(b.name))
+      .sort((a, b) => {
+        // Directories first, then files, alphabetical within each group
+        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
 
     return { resolvedPath, entries, homeDirectory: homeDir }
   }
@@ -293,12 +296,17 @@ describe('onDirectoryList callback logic', () => {
     expect(result.error).toBe('Directory does not exist')
   })
 
-  it('lists only directories (no files)', () => {
-    // Use /tmp which should exist on any system and contain some dirs
+  it('lists directories and files, with directories first', () => {
+    // Use /tmp which should exist on any system
     const result = handleDirectoryList('/tmp')
-    if (result.entries.length > 0) {
+    if (result.entries.length > 1) {
+      // Verify directories come before files
+      let seenFile = false
       result.entries.forEach(entry => {
-        expect(entry.isDirectory).toBe(true)
+        if (!entry.isDirectory) seenFile = true
+        if (entry.isDirectory && seenFile) {
+          throw new Error(`Directory "${entry.name}" appeared after a file — directories should come first`)
+        }
       })
     }
     expect(result.error).toBeUndefined()
@@ -326,7 +334,7 @@ describe('onDirectoryList callback logic', () => {
       expect(typeof entry.name).toBe('string')
       expect(entry.path).toBeDefined()
       expect(entry.path).toContain(entry.name)
-      expect(entry.isDirectory).toBe(true)
+      expect(typeof entry.isDirectory).toBe('boolean')
     })
   })
 
@@ -373,16 +381,19 @@ describe('Directory list end-to-end message flow', () => {
     expect(path).toBe(homedir())
     expect(correlationId).toBe('e2e-corr-1')
 
-    // 3. Agent lists directory
+    // 3. Agent lists directory (includes both files and directories)
     const dirents = readdirSync(path, { withFileTypes: true })
     const entries = dirents
-      .filter(d => !d.name.startsWith('.') && d.isDirectory())
+      .filter(d => !d.name.startsWith('.'))
       .map(d => ({
         name: d.name,
         path: join(path, d.name),
-        isDirectory: true as const,
+        isDirectory: d.isDirectory(),
       }))
-      .sort((a, b) => a.name.localeCompare(b.name))
+      .sort((a, b) => {
+        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
 
     // 4. Agent sends response
     const response: DirectoryListResponseMessage = {
@@ -403,7 +414,7 @@ describe('Directory list end-to-end message flow', () => {
     expect(response.payload.homeDirectory).toBe(homedir())
     expect(Array.isArray(response.payload.entries)).toBe(true)
     response.payload.entries.forEach(entry => {
-      expect(entry.isDirectory).toBe(true)
+      expect(typeof entry.isDirectory).toBe('boolean')
       expect(entry.name).not.toMatch(/^\./)
     })
   })
