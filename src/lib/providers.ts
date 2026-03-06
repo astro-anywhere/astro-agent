@@ -297,8 +297,9 @@ async function detectCodex(): Promise<ProviderInfo | null> {
  */
 function probeGatewayReachable(url: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const timeout = setTimeout(() => { ws.close(); resolve(false) }, 5000);
-    const ws = new WebSocket(url);
+    let ws: WebSocket | undefined;
+    const timeout = setTimeout(() => { ws?.close(); resolve(false) }, 5000);
+    ws = new WebSocket(url);
     ws.on('message', (data) => {
       try {
         const frame = JSON.parse(String(data));

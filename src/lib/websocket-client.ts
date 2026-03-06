@@ -809,7 +809,7 @@ export class WebSocketClient {
       if (typeof raw.type === 'string' && raw.type.startsWith('channel.')) {
         const normalized = {
           ...raw,
-          type: raw.type.replace('.', '_'),
+          type: raw.type.replaceAll('.', '_'),
         } as unknown as IncomingMessage;
         this.routeMessage(normalized);
         return;
@@ -911,29 +911,32 @@ export class WebSocketClient {
     if (this.openclawBridge) return;
 
     const bridge = new OpenClawBridge();
+    this.openclawBridge = bridge; // Assign immediately to prevent double-start on rapid reconnect
     bridge.start().then((connected) => {
-      if (connected) {
-        this.openclawBridge = bridge;
-        console.log('[ws-client] OpenClaw bridge started for channel relay');
-
-        // Forward inbound messages from OpenClaw to the server
-        bridge.on('inbound', (payload: Record<string, unknown>) => {
-          this.send({
-            type: 'channel_inbound',
-            timestamp: new Date().toISOString(),
-            payload: {
-              sourceMessageId: (payload.messageId as string) ?? String(Date.now()),
-              text: (payload.text as string) ?? '',
-              senderId: (payload.senderId as string) ?? 'unknown',
-              senderName: (payload.senderName as string) ?? 'unknown',
-              channelId: (payload.channelId as string) ?? '',
-              threadId: payload.threadId as string | undefined,
-              metadata: payload.metadata as Record<string, unknown> | undefined,
-            },
-          });
-        });
+      if (!connected) {
+        this.openclawBridge = null;
+        return;
       }
+      console.log('[ws-client] OpenClaw bridge started for channel relay');
+
+      // Forward inbound messages from OpenClaw to the server
+      bridge.on('inbound', (payload: Record<string, unknown>) => {
+        this.send({
+          type: 'channel_inbound',
+          timestamp: new Date().toISOString(),
+          payload: {
+            sourceMessageId: (payload.messageId as string) ?? String(Date.now()),
+            text: (payload.text as string) ?? '',
+            senderId: (payload.senderId as string) ?? 'unknown',
+            senderName: (payload.senderName as string) ?? 'unknown',
+            channelId: (payload.channelId as string) ?? '',
+            threadId: payload.threadId as string | undefined,
+            metadata: payload.metadata as Record<string, unknown> | undefined,
+          },
+        });
+      });
     }).catch((err) => {
+      this.openclawBridge = null;
       console.warn('[ws-client] Failed to start OpenClaw bridge:', err);
     });
   }

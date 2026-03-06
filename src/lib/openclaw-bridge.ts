@@ -66,6 +66,8 @@ export class OpenClawBridge extends EventEmitter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Default recipient for send (e.g., Telegram username, phone). Read from openclaw.json */
   private defaultRecipient: string | null = null;
+  /** Telegram bot token, cached from config at start() */
+  private telegramBotToken: string | null = null;
 
   get isConnected(): boolean {
     return this._connected && this.ws !== null && this.ws.readyState === WebSocket.OPEN;
@@ -81,6 +83,7 @@ export class OpenClawBridge extends EventEmitter {
 
     this.gatewayConfig = config;
     this.defaultRecipient = config.defaultRecipient || null;
+    this.telegramBotToken = this.readTelegramBotToken();
     this._started = true;
     await this.connect();
     return this._connected;
@@ -381,7 +384,7 @@ export class OpenClawBridge extends EventEmitter {
 
     const options = opts.options ?? ['Yes', 'No'];
 
-    const botToken = this.readTelegramBotToken();
+    const botToken = this.telegramBotToken;
     if (botToken) {
       return this.requestApprovalViaTelegram(botToken, to, opts.question, options);
     }
