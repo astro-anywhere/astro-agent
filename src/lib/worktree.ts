@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, appendFile, rm, copyFile } from 'node:fs/promises';
+import { mkdir, readFile, appendFile, rm, copyFile, cp } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
@@ -193,6 +193,22 @@ export async function createWorktree(
   const worktreeWorkingDirectory = useRelativePath
     ? join(worktreePath, relativePath)
     : worktreePath;
+
+  // If the working subdirectory doesn't exist in the worktree (e.g., it contains
+  // only untracked or gitignored files), copy the source content so the agent
+  // has files to work with. Without this, spawn() fails with ENOENT on the cwd.
+  // This happens when the workdir is a deeply nested untracked folder inside a
+  // parent git repo (git worktree only checks out tracked content).
+  if (useRelativePath && !existsSync(worktreeWorkingDirectory)) {
+    console.log(`[worktree] Working directory "${relativePath}" not in worktree (untracked?), copying from source`);
+    try {
+      await cp(resolvedWorkingDirectory, worktreeWorkingDirectory, { recursive: true });
+      console.log(`[worktree] Copied "${relativePath}" into worktree successfully`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to copy untracked working directory "${relativePath}" into worktree: ${msg}`);
+    }
+  }
 
   return {
     workingDirectory: worktreeWorkingDirectory,
