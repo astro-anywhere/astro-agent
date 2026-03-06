@@ -63,6 +63,45 @@ export async function isGitRepo(workdir: string): Promise<boolean> {
 }
 
 /**
+ * Check if a working directory is an untracked subdirectory of a parent git repo.
+ *
+ * Returns true when:
+ * - The workdir is inside a git repo (git root found by walking up)
+ * - The git root is a DIFFERENT directory than the workdir
+ * - The workdir has ZERO tracked files in that repo
+ *
+ * This detects the case where a user places their project folder inside a
+ * directory that happens to have a .git (e.g., ~/tmp has a .git and the
+ * project is at ~/tmp/my-project/). The worktree logic would latch onto the
+ * parent repo, but the project's files aren't tracked there, so the worktree
+ * would be empty.
+ */
+export async function isUntrackedInParentRepo(workdir: string): Promise<boolean> {
+  try {
+    const { resolve, relative } = await import('node:path');
+    const { stdout: gitRootRaw } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
+      cwd: workdir,
+      timeout: 5_000,
+    });
+    const gitRoot = resolve(gitRootRaw.trim());
+    const resolvedWorkdir = resolve(workdir);
+
+    // If workdir IS the git root, it's not a "parent repo" situation
+    if (gitRoot === resolvedWorkdir) return false;
+
+    // Check if any files in the workdir are tracked by the parent repo
+    const rel = relative(gitRoot, resolvedWorkdir);
+    const { stdout: trackedFiles } = await execFileAsync(
+      'git', ['-C', gitRoot, 'ls-files', rel],
+      { timeout: 5_000 },
+    );
+    return trackedFiles.trim().length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Check if a git repository has uncommitted changes
  */
 export async function hasUncommittedChanges(workdir: string): Promise<boolean> {

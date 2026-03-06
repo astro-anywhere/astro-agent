@@ -23,6 +23,7 @@ import {
   checkWorkdirSafety,
   isGitAvailable,
   isGitRepo,
+  isUntrackedInParentRepo,
   createSandbox,
   WorkdirSafetyTier,
   type SafetyCheckResult,
@@ -1304,6 +1305,18 @@ export class TaskExecutor {
     if (this.gitAvailable && !(await isGitRepo(task.workingDirectory))) {
       console.warn(`[executor] Task ${task.id}: not a git repo (${task.workingDirectory}), falling back to direct execution`);
       return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
+    }
+
+    // Untracked subdirectory of a parent repo: the workdir inherits a git repo
+    // from a parent directory but has zero tracked files in it. This happens when
+    // a project folder is placed inside a directory that happens to have a .git
+    // (e.g., ~/tmp/.git exists and the project is at ~/tmp/my-project/).
+    // Bootstrap a LOCAL git repo in the workdir so worktree creation uses the
+    // local repo (closest .git wins) instead of the irrelevant parent repo.
+    if (this.gitAvailable && await isUntrackedInParentRepo(task.workingDirectory)) {
+      console.log(`[executor] Task ${task.id}: workdir is untracked in parent repo, bootstrapping local git`);
+      stream.stdout(`[astro] Working directory is untracked in parent repo, initializing local git...\n`);
+      await this.initializeGit(task.workingDirectory);
     }
 
     // Zero-commit git repo: bootstrap with .gitignore + CLAUDE.md + initial commit
