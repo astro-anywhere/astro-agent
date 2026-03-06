@@ -199,7 +199,11 @@ export class OpenClawAdapter implements ProviderAdapter {
     signal: AbortSignal,
   ): Promise<{ success: boolean; output: string; error?: string }> {
     if (!this.gatewayConfig) {
-      return { success: false, output: '', error: 'OpenClaw gateway not available' };
+      // Attempt availability check as fallback (mirrors execute() pattern)
+      const available = await this.isAvailable();
+      if (!available || !this.gatewayConfig) {
+        return { success: false, output: '', error: 'OpenClaw gateway not available' };
+      }
     }
 
     // Use the preserved session key, or construct one from the original taskId
