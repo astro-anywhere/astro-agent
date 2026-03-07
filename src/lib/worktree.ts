@@ -105,15 +105,18 @@ export async function createWorktree(
   // failures when re-executing a task whose previous branch was already pushed
   await deleteRemoteBranch(gitRoot, taskBranchName);
 
-  // Fetch latest so we branch from up-to-date origin
-  try {
-    await execFileAsync(
-      'git',
-      ['-C', gitRoot, '-c', 'core.hooksPath=/dev/null', 'fetch', 'origin'],
-      { env: withGitEnv(), timeout: 30_000 }
-    );
-  } catch {
-    // Non-fatal: proceed with potentially stale refs
+  // Fetch latest so we branch from up-to-date origin (skip for local-only repos)
+  const hasRemote = await repoHasRemote(gitRoot);
+  if (hasRemote) {
+    try {
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, '-c', 'core.hooksPath=/dev/null', 'fetch', 'origin'],
+        { env: withGitEnv(), timeout: 30_000 }
+      );
+    } catch {
+      // Non-fatal: proceed with potentially stale refs
+    }
   }
 
   // Detect the repo's default branch (main/master/develop) for fallback
@@ -362,7 +365,7 @@ async function ensureProjectBranch(
       console.log(`[worktree] Created local project branch ${projectBranch}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[worktree] Failed to create local project branch: ${msg}`);
+      throw new Error(`Failed to create local project branch ${projectBranch}: ${msg}`);
     }
   }
 }

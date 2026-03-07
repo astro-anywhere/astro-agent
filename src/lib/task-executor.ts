@@ -1088,9 +1088,6 @@ export class TaskExecutor {
             result.branchName = prepared.branchName;
             keepBranch = true;
 
-            if (prepared.projectBranch && (!prepared.gitRoot || !prepared.branchName)) {
-              console.warn(`[executor] Task ${task.id}: projectBranch=${prepared.projectBranch} but gitRoot=${prepared.gitRoot}, branchName=${prepared.branchName} — skipping local merge`);
-            }
             if (prepared.gitRoot && prepared.projectBranch && prepared.branchName) {
               // Local merge: squash-merge task branch into project accumulation branch
               this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Merging into project branch...');
@@ -1118,6 +1115,8 @@ export class TaskExecutor {
                 result.deliveryStatus = 'skipped';
                 console.log(`[executor] Task ${task.id}: no changes to merge`);
               }
+            } else if (prepared.projectBranch) {
+              console.warn(`[executor] Task ${task.id}: projectBranch=${prepared.projectBranch} but gitRoot=${prepared.gitRoot}, branchName=${prepared.branchName} — skipping local merge`);
             } else {
               console.log(`[executor] Task ${task.id}: branch mode, committing locally (no project branch)`);
             }

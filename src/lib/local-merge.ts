@@ -15,7 +15,9 @@ import { rm } from 'node:fs/promises';
 const execFileAsync = promisify(execFile);
 
 function withGitEnv(): NodeJS.ProcessEnv {
-  return { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+  // LC_ALL=C ensures git outputs English messages regardless of user locale,
+  // which is required for reliable string matching (e.g., "nothing to commit").
+  return { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' };
 }
 
 export interface LocalMergeResult {
