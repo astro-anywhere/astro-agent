@@ -31,6 +31,11 @@ import type {
   ErrorMessage,
   FileListRequestMessage,
   FileListResponseMessage,
+  FileContentRequestMessage,
+  FileContentResponseMessage,
+  FileUploadRequestMessage,
+  FileUploadChunkMessage,
+  FileUploadResponseMessage,
   DirectoryListRequestMessage,
   DirectoryListResponseMessage,
   CreateDirectoryRequestMessage,
@@ -84,6 +89,9 @@ export interface WebSocketClientOptions {
   onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
   onTaskCleanup?: (taskId: string, branchName?: string) => void;
   onFileList?: (path: string, correlationId: string) => void;
+  onFileContent?: (path: string, correlationId: string) => void;
+  onFileUpload?: (destinationPath: string, fileName: string, size: number, totalChunks: number, overwrite: boolean, correlationId: string) => void;
+  onFileUploadChunk?: (correlationId: string, chunkIndex: number, encoding: 'utf-8' | 'base64', content: string) => void;
   onDirectoryList?: (path: string, correlationId: string) => void;
   onCreateDirectory?: (parentPath: string, name: string, correlationId: string) => void;
   onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
@@ -114,6 +122,9 @@ type IncomingMessage =
   | TaskSafetyDecisionMessage
   | ConfigUpdateMessage
   | FileListRequestMessage
+  | FileContentRequestMessage
+  | FileUploadRequestMessage
+  | FileUploadChunkMessage
   | DirectoryListRequestMessage
   | CreateDirectoryRequestMessage
   | RepoSetupRequestMessage
@@ -156,6 +167,9 @@ export class WebSocketClient {
   private onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
   private onTaskCleanup?: (taskId: string, branchName?: string) => void;
   private onFileList?: (path: string, correlationId: string) => void;
+  private onFileContent?: (path: string, correlationId: string) => void;
+  private onFileUpload?: (destinationPath: string, fileName: string, size: number, totalChunks: number, overwrite: boolean, correlationId: string) => void;
+  private onFileUploadChunk?: (correlationId: string, chunkIndex: number, encoding: 'utf-8' | 'base64', content: string) => void;
   private onDirectoryList?: (path: string, correlationId: string) => void;
   private onCreateDirectory?: (parentPath: string, name: string, correlationId: string) => void;
   private onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
@@ -180,6 +194,9 @@ export class WebSocketClient {
     this.onTaskSafetyDecision = options.onTaskSafetyDecision;
     this.onTaskCleanup = options.onTaskCleanup;
     this.onFileList = options.onFileList;
+    this.onFileContent = options.onFileContent;
+    this.onFileUpload = options.onFileUpload;
+    this.onFileUploadChunk = options.onFileUploadChunk;
     this.onDirectoryList = options.onDirectoryList;
     this.onCreateDirectory = options.onCreateDirectory;
     this.onRepoSetup = options.onRepoSetup;
@@ -854,6 +871,15 @@ export class WebSocketClient {
       case 'file_list_request':
         this.handleFileListRequest(message as FileListRequestMessage);
         break;
+      case 'file_content_request':
+        this.handleFileContentRequest(message as FileContentRequestMessage);
+        break;
+      case 'file_upload_request':
+        this.handleFileUploadRequest(message as FileUploadRequestMessage);
+        break;
+      case 'file_upload_chunk':
+        this.handleFileUploadChunk(message as FileUploadChunkMessage);
+        break;
       case 'directory_list_request':
         this.handleDirectoryListRequest(message as DirectoryListRequestMessage);
         break;
@@ -1161,6 +1187,56 @@ export class WebSocketClient {
       type: 'file_list_response',
       timestamp: new Date().toISOString(),
       payload: { correlationId, files },
+    };
+    this.send(msg);
+  }
+
+  private handleFileContentRequest(message: FileContentRequestMessage): void {
+    const { path, correlationId } = message.payload;
+    this.onFileContent?.(path, correlationId);
+  }
+
+  /**
+   * Send file content response
+   */
+  sendFileContentResponse(
+    correlationId: string,
+    path: string,
+    content?: string,
+    encoding?: 'utf-8' | 'base64',
+    mimeType?: string,
+    size?: number,
+    error?: string,
+    chunked?: boolean,
+    chunkIndex?: number,
+    totalChunks?: number,
+  ): void {
+    const msg: FileContentResponseMessage = {
+      type: 'file_content_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, path, content, encoding, mimeType, size, error, chunked, chunkIndex, totalChunks },
+    };
+    this.send(msg);
+  }
+
+  private handleFileUploadRequest(message: FileUploadRequestMessage): void {
+    const { destinationPath, fileName, size, totalChunks, overwrite, correlationId } = message.payload;
+    this.onFileUpload?.(destinationPath, fileName, size, totalChunks, overwrite, correlationId);
+  }
+
+  private handleFileUploadChunk(message: FileUploadChunkMessage): void {
+    const { correlationId, chunkIndex, encoding, content } = message.payload;
+    this.onFileUploadChunk?.(correlationId, chunkIndex, encoding, content);
+  }
+
+  /**
+   * Send file upload response
+   */
+  sendFileUploadResponse(correlationId: string, success: boolean, path?: string, error?: string): void {
+    const msg: FileUploadResponseMessage = {
+      type: 'file_upload_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, success, path, error },
     };
     this.send(msg);
   }

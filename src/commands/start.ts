@@ -370,6 +370,16 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
   // eslint-disable-next-line prefer-const -- reassigned on line 530 after wsClient creation
   let taskExecutor: TaskExecutor;
 
+  // Track in-progress file upload sessions for chunked transfers
+  let uploadSessions: Map<string, {
+    destinationPath: string;
+    fileName: string;
+    fullPath: string;
+    totalChunks: number;
+    chunks: Map<number, { encoding: string; content: string }>;
+    tmpPath: string;
+  }> | undefined;
+
   const wsClient = new WebSocketClient({
     runnerId,
     machineId,
@@ -446,6 +456,167 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       } catch (error) {
         log('warn', `Failed to list files in ${path}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
         wsClient.sendFileListResponse(correlationId, []);
+      }
+    },
+    onFileContent: (path: string, correlationId: string) => {
+      log('debug', `File content request for path: ${path}`, logLevel);
+      try {
+        if (!existsSync(path)) {
+          wsClient.sendFileContentResponse(correlationId, path, undefined, undefined, undefined, undefined, 'File not found');
+          return;
+        }
+
+        const stat = statSync(path);
+        if (stat.isDirectory()) {
+          wsClient.sendFileContentResponse(correlationId, path, undefined, undefined, undefined, undefined, 'Path is a directory');
+          return;
+        }
+
+        const ext = path.split('.').pop()?.toLowerCase() ?? '';
+        const mimeMap: Record<string, string> = {
+          png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+          webp: 'image/webp', svg: 'image/svg+xml', pdf: 'application/pdf',
+          json: 'application/json', xml: 'application/xml',
+          html: 'text/html', htm: 'text/html', css: 'text/css',
+          js: 'text/javascript', ts: 'text/javascript', tsx: 'text/javascript', jsx: 'text/javascript',
+          md: 'text/markdown', txt: 'text/plain', csv: 'text/csv',
+          py: 'text/x-python', rb: 'text/x-ruby', go: 'text/x-go',
+          rs: 'text/x-rust', java: 'text/x-java', c: 'text/x-c', cpp: 'text/x-c++',
+          sh: 'text/x-shellscript', yaml: 'text/yaml', yml: 'text/yaml',
+          toml: 'text/toml',
+        };
+        const mimeType = mimeMap[ext] ?? 'application/octet-stream';
+
+        const textTypes = ['text/', 'application/json', 'application/xml', 'image/svg+xml'];
+        const isText = textTypes.some(t => mimeType.startsWith(t));
+
+        const fileBuffer = readFileSync(path);
+        const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+
+        if (fileBuffer.length > CHUNK_SIZE) {
+          const encoding = isText ? 'utf-8' as const : 'base64' as const;
+          const fullContent = isText ? fileBuffer.toString('utf-8') : fileBuffer.toString('base64');
+          const totalChunks = Math.ceil(fullContent.length / CHUNK_SIZE);
+
+          for (let i = 0; i < totalChunks; i++) {
+            const chunk = fullContent.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+            wsClient.sendFileContentResponse(
+              correlationId, path, chunk, encoding, mimeType, fileBuffer.length,
+              undefined, true, i, totalChunks,
+            );
+          }
+          log('debug', `Sent file content for ${path} in ${totalChunks} chunks (${fileBuffer.length} bytes)`, logLevel);
+        } else {
+          const encoding = isText ? 'utf-8' as const : 'base64' as const;
+          const content = isText ? fileBuffer.toString('utf-8') : fileBuffer.toString('base64');
+          wsClient.sendFileContentResponse(
+            correlationId, path, content, encoding, mimeType, fileBuffer.length,
+          );
+          log('debug', `Sent file content for ${path} (${fileBuffer.length} bytes)`, logLevel);
+        }
+      } catch (error) {
+        log('warn', `Failed to read file ${path}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendFileContentResponse(correlationId, path, undefined, undefined, undefined, undefined, `Failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    },
+    onFileUpload: (destinationPath: string, fileName: string, size: number, totalChunks: number, overwrite: boolean, correlationId: string) => {
+      log('debug', `File upload request: ${fileName} -> ${destinationPath} (${size} bytes, ${totalChunks} chunks, overwrite=${overwrite})`, logLevel);
+
+      // Security: reject path traversal
+      if (fileName.includes('..') || destinationPath.includes('..')) {
+        wsClient.sendFileUploadResponse(correlationId, false, undefined, 'Path traversal not allowed');
+        return;
+      }
+
+      // Security: reject sensitive paths
+      const sensitivePatterns = ['/etc/', '/.ssh/', '/usr/', '/bin/', '/sbin/'];
+      const resolvedDest = destinationPath === '~' ? homedir() : destinationPath;
+      if (sensitivePatterns.some(p => resolvedDest.includes(p))) {
+        wsClient.sendFileUploadResponse(correlationId, false, undefined, 'Upload to sensitive path not allowed');
+        return;
+      }
+
+      // Size limit: 50MB
+      if (size > 50 * 1024 * 1024) {
+        wsClient.sendFileUploadResponse(correlationId, false, undefined, 'File too large (max 50MB)');
+        return;
+      }
+
+      const fullPath = join(resolvedDest, fileName);
+
+      // Check for conflicts
+      if (existsSync(fullPath) && !overwrite) {
+        wsClient.sendFileUploadResponse(correlationId, false, fullPath, 'File already exists');
+        return;
+      }
+
+      // Ensure destination directory exists
+      try {
+        mkdirSync(resolvedDest, { recursive: true });
+      } catch (err) {
+        wsClient.sendFileUploadResponse(correlationId, false, undefined, `Cannot create directory: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+
+      // For single-chunk uploads, wait for the chunk to arrive
+      // For multi-chunk, store metadata for chunk assembly
+      if (!uploadSessions) {
+        uploadSessions = new Map();
+      }
+      uploadSessions.set(correlationId, {
+        destinationPath: resolvedDest,
+        fileName,
+        fullPath,
+        totalChunks,
+        chunks: new Map(),
+        tmpPath: `${fullPath}.tmp.${correlationId.slice(0, 8)}`,
+      });
+      log('debug', `Upload session created for ${correlationId}: ${fullPath}`, logLevel);
+    },
+    onFileUploadChunk: (correlationId: string, chunkIndex: number, encoding: 'utf-8' | 'base64', content: string) => {
+      if (!uploadSessions?.has(correlationId)) {
+        log('warn', `Received chunk for unknown upload session: ${correlationId}`, logLevel);
+        wsClient.sendFileUploadResponse(correlationId, false, undefined, 'Unknown upload session');
+        return;
+      }
+
+      const session = uploadSessions.get(correlationId)!;
+      session.chunks.set(chunkIndex, { encoding, content });
+      log('debug', `Received chunk ${chunkIndex + 1}/${session.totalChunks} for ${session.fileName}`, logLevel);
+
+      // Check if all chunks received
+      if (session.chunks.size >= session.totalChunks) {
+        try {
+          // Reassemble chunks in order
+          const orderedChunks: Buffer[] = [];
+          for (let i = 0; i < session.totalChunks; i++) {
+            const chunk = session.chunks.get(i);
+            if (!chunk) {
+              throw new Error(`Missing chunk ${i}`);
+            }
+            orderedChunks.push(
+              chunk.encoding === 'base64'
+                ? Buffer.from(chunk.content, 'base64')
+                : Buffer.from(chunk.content, 'utf-8')
+            );
+          }
+
+          const fullBuffer = Buffer.concat(orderedChunks);
+
+          // Atomic write: write to temp file then rename
+          writeFileSync(session.tmpPath, fullBuffer);
+          renameSync(session.tmpPath, session.fullPath);
+
+          wsClient.sendFileUploadResponse(correlationId, true, session.fullPath);
+          log('debug', `Upload complete: ${session.fullPath} (${fullBuffer.length} bytes)`, logLevel);
+        } catch (error) {
+          // Clean up temp file on error
+          try { unlinkSync(session.tmpPath); } catch { /* ignore */ }
+          wsClient.sendFileUploadResponse(correlationId, false, undefined, `Write failed: ${error instanceof Error ? error.message : String(error)}`);
+          log('warn', `Upload write failed for ${session.fullPath}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        } finally {
+          uploadSessions.delete(correlationId);
+        }
       }
     },
     onDirectoryList: (path: string, correlationId: string) => {
