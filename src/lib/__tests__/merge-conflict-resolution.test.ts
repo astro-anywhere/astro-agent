@@ -26,10 +26,6 @@ interface MockPRMergeResult {
   error?: string;
 }
 
-interface MockTaskContext {
-  sessionId?: string;
-}
-
 interface MockAdapter {
   name: string;
   resumeTask: ReturnType<typeof vi.fn>;
@@ -63,7 +59,7 @@ async function simulateBranchMergeRetry(opts: {
   isResumable: boolean;
   maxAttempts?: number;
 }): Promise<DeliveryResult> {
-  const { localMerge, acquireLock, adapter, taskId, isResumable, projectBranch } = opts;
+  const { localMerge, acquireLock, adapter, taskId, isResumable } = opts;
   const MAX_MERGE_ATTEMPTS = opts.maxAttempts ?? 3;
   const result: DeliveryResult = {};
 
@@ -133,7 +129,7 @@ async function simulatePRMergeRetry(opts: {
   isResumable: boolean;
   maxAttempts?: number;
 }): Promise<DeliveryResult> {
-  const { mergePR, getRemoteSha, adapter, taskId, branchName, baseBranch, isResumable } = opts;
+  const { mergePR, getRemoteSha, adapter, taskId, isResumable } = opts;
   const MAX_PR_MERGE_ATTEMPTS = opts.maxAttempts ?? 3;
   const result: DeliveryResult = {};
   let prMergeResolved = false;
