@@ -102,6 +102,22 @@ export async function isUntrackedInParentRepo(workdir: string): Promise<boolean>
 }
 
 /**
+ * Check if a git repository has any configured remotes.
+ * Returns false for repos created with `git init` that never had a remote added.
+ */
+export async function repoHasRemote(workdir: string): Promise<boolean> {
+  try {
+    const { stdout } = await execFileAsync('git', ['remote'], {
+      cwd: workdir,
+      timeout: 5_000,
+    });
+    return stdout.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Check if a git repository has uncommitted changes
  */
 export async function hasUncommittedChanges(workdir: string): Promise<boolean> {
