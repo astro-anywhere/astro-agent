@@ -1713,3 +1713,233 @@ describe('Branch mode — additional edge cases', () => {
     expect(result.deliveryError).toContain('3 attempts');
   });
 });
+
+// ============================================================================
+// 9. Pre-merge rebase (mirrors tryPreMergeRebase from task-executor.ts)
+// ============================================================================
+
+/**
+ * Mirror of tryPreMergeRebase from task-executor.ts.
+ * Best-effort rebase onto latest target branch before merge attempt.
+ */
+async function simulateTryPreMergeRebase(opts: {
+  fetchFn?: () => Promise<void>;
+  mergeBaseFn: () => Promise<string>;
+  targetTipFn: () => Promise<string>;
+  rebaseFn: () => Promise<void>;
+  rebaseAbortFn?: () => Promise<void>;
+  isRemote: boolean;
+}): Promise<{ rebased: boolean; skipped?: boolean }> {
+  try {
+    if (opts.isRemote && opts.fetchFn) {
+      await opts.fetchFn();
+    }
+
+    const mergeBase = await opts.mergeBaseFn();
+    const targetTip = await opts.targetTipFn();
+
+    if (mergeBase.trim() === targetTip.trim()) {
+      return { rebased: false, skipped: true };
+    }
+
+    await opts.rebaseFn();
+    return { rebased: true };
+  } catch {
+    if (opts.rebaseAbortFn) {
+      await opts.rebaseAbortFn().catch(() => {});
+    }
+    return { rebased: false };
+  }
+}
+
+describe('Pre-merge rebase (tryPreMergeRebase)', () => {
+  it('skips rebase when target branch has not moved (same SHA)', async () => {
+    const sha = 'abc123def456';
+    const result = await simulateTryPreMergeRebase({
+      mergeBaseFn: vi.fn().mockResolvedValue(sha),
+      targetTipFn: vi.fn().mockResolvedValue(sha),
+      rebaseFn: vi.fn(),
+      isRemote: false,
+    });
+
+    expect(result).toEqual({ rebased: false, skipped: true });
+  });
+
+  it('rebases successfully when target branch moved forward (local mode)', async () => {
+    const rebaseFn = vi.fn().mockResolvedValue(undefined);
+    const result = await simulateTryPreMergeRebase({
+      mergeBaseFn: vi.fn().mockResolvedValue('sha_old'),
+      targetTipFn: vi.fn().mockResolvedValue('sha_new'),
+      rebaseFn,
+      isRemote: false,
+    });
+
+    expect(result).toEqual({ rebased: true });
+    expect(rebaseFn).toHaveBeenCalledOnce();
+  });
+
+  it('fetches origin before rebase in remote mode', async () => {
+    const fetchFn = vi.fn().mockResolvedValue(undefined);
+    const rebaseFn = vi.fn().mockResolvedValue(undefined);
+    const result = await simulateTryPreMergeRebase({
+      fetchFn,
+      mergeBaseFn: vi.fn().mockResolvedValue('sha_old'),
+      targetTipFn: vi.fn().mockResolvedValue('sha_new'),
+      rebaseFn,
+      isRemote: true,
+    });
+
+    expect(result).toEqual({ rebased: true });
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(rebaseFn).toHaveBeenCalledOnce();
+  });
+
+  it('does not fetch in local mode', async () => {
+    const fetchFn = vi.fn();
+    await simulateTryPreMergeRebase({
+      fetchFn,
+      mergeBaseFn: vi.fn().mockResolvedValue('sha_old'),
+      targetTipFn: vi.fn().mockResolvedValue('sha_new'),
+      rebaseFn: vi.fn().mockResolvedValue(undefined),
+      isRemote: false,
+    });
+
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it('aborts rebase on conflict and returns rebased: false', async () => {
+    const rebaseAbortFn = vi.fn().mockResolvedValue(undefined);
+    const result = await simulateTryPreMergeRebase({
+      mergeBaseFn: vi.fn().mockResolvedValue('sha_old'),
+      targetTipFn: vi.fn().mockResolvedValue('sha_new'),
+      rebaseFn: vi.fn().mockRejectedValue(new Error('CONFLICT')),
+      rebaseAbortFn,
+      isRemote: false,
+    });
+
+    expect(result).toEqual({ rebased: false });
+    expect(rebaseAbortFn).toHaveBeenCalledOnce();
+  });
+
+  it('handles rebase abort failure gracefully', async () => {
+    const rebaseAbortFn = vi.fn().mockRejectedValue(new Error('abort failed'));
+    const result = await simulateTryPreMergeRebase({
+      mergeBaseFn: vi.fn().mockResolvedValue('sha_old'),
+      targetTipFn: vi.fn().mockResolvedValue('sha_new'),
+      rebaseFn: vi.fn().mockRejectedValue(new Error('CONFLICT')),
+      rebaseAbortFn,
+      isRemote: false,
+    });
+
+    // Should still return gracefully even if abort fails
+    expect(result).toEqual({ rebased: false });
+  });
+
+  it('handles fetch failure gracefully (remote mode)', async () => {
+    const fetchFn = vi.fn().mockRejectedValue(new Error('network error'));
+    const result = await simulateTryPreMergeRebase({
+      fetchFn,
+      mergeBaseFn: vi.fn().mockResolvedValue('sha_old'),
+      targetTipFn: vi.fn().mockResolvedValue('sha_new'),
+      rebaseFn: vi.fn(),
+      isRemote: true,
+    });
+
+    // Fetch failure caught by outer try/catch
+    expect(result).toEqual({ rebased: false });
+  });
+
+  it('handles merge-base failure gracefully', async () => {
+    const result = await simulateTryPreMergeRebase({
+      mergeBaseFn: vi.fn().mockRejectedValue(new Error('not a git repo')),
+      targetTipFn: vi.fn().mockResolvedValue('sha_new'),
+      rebaseFn: vi.fn(),
+      isRemote: false,
+    });
+
+    expect(result).toEqual({ rebased: false });
+  });
+
+  it('trims whitespace from SHAs for comparison', async () => {
+    const rebaseFn = vi.fn();
+    const result = await simulateTryPreMergeRebase({
+      mergeBaseFn: vi.fn().mockResolvedValue('abc123\n'),
+      targetTipFn: vi.fn().mockResolvedValue('abc123\n'),
+      rebaseFn,
+      isRemote: false,
+    });
+
+    expect(result).toEqual({ rebased: false, skipped: true });
+    expect(rebaseFn).not.toHaveBeenCalled();
+  });
+
+  it('integration: pre-rebase avoids conflict in subsequent merge', async () => {
+    // Scenario: project branch moved from SHA_X to SHA_Y.
+    // Pre-rebase succeeds → subsequent merge should be clean.
+    const preRebase = await simulateTryPreMergeRebase({
+      mergeBaseFn: vi.fn().mockResolvedValue('SHA_X'),
+      targetTipFn: vi.fn().mockResolvedValue('SHA_Y'),
+      rebaseFn: vi.fn().mockResolvedValue(undefined),
+      isRemote: false,
+    });
+
+    expect(preRebase.rebased).toBe(true);
+
+    // Now the merge should succeed on first attempt
+    const mergeResult = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockResolvedValue({ merged: true, commitSha: 'SHA_Z' }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter: {
+        name: 'test',
+        resumeTask: vi.fn(),
+        getTaskContext: vi.fn().mockReturnValue({ sessionId: 's1' }),
+      },
+      taskId: 't1',
+      projectBranch: 'proj',
+      isResumable: true,
+    });
+
+    expect(mergeResult.deliveryStatus).toBe('success');
+    expect(mergeResult.commitAfterSha).toBe('SHA_Z');
+  });
+
+  it('integration: pre-rebase fails → retry loop resolves conflict', async () => {
+    // Scenario: project branch moved AND has overlapping changes.
+    // Pre-rebase fails (conflict) → merge also conflicts → agent resolves.
+    const preRebase = await simulateTryPreMergeRebase({
+      mergeBaseFn: vi.fn().mockResolvedValue('SHA_X'),
+      targetTipFn: vi.fn().mockResolvedValue('SHA_Y'),
+      rebaseFn: vi.fn().mockRejectedValue(new Error('CONFLICT')),
+      rebaseAbortFn: vi.fn().mockResolvedValue(undefined),
+      isRemote: false,
+    });
+
+    expect(preRebase.rebased).toBe(false);
+
+    // Merge conflicts on first attempt, succeeds after agent resolves
+    let mergeCall = 0;
+    const adapter: MockAdapter = {
+      name: 'claude',
+      resumeTask: vi.fn().mockResolvedValue(undefined),
+      getTaskContext: vi.fn().mockReturnValue({ sessionId: 's1' }),
+    };
+
+    const mergeResult = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockImplementation(async () => {
+        mergeCall++;
+        if (mergeCall === 1) {
+          return { merged: false, conflict: true, conflictFiles: ['shared.ts'] };
+        }
+        return { merged: true, commitSha: 'SHA_RESOLVED' };
+      }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 't1',
+      projectBranch: 'proj',
+      isResumable: true,
+    });
+
+    expect(mergeResult.deliveryStatus).toBe('success');
+    expect(adapter.resumeTask).toHaveBeenCalledOnce();
+  });
+});

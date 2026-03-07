@@ -99,6 +99,43 @@ IMPORTANT: Do NOT create a merge commit. Use rebase so the history is clean.
 After you force-push, I will automatically retry the GitHub merge.`;
 }
 
+/**
+ * Best-effort pre-merge rebase: if the project branch has moved forward
+ * (another task merged), rebase the task branch onto the latest tip before
+ * attempting the squash merge. This avoids conflicts in the common case
+ * where changes don't overlap. On any failure, silently aborts — the
+ * existing merge retry loop handles real conflicts.
+ */
+async function tryPreMergeRebase(
+  workdir: string,
+  targetBranch: string,
+  isRemote: boolean,
+): Promise<{ rebased: boolean; skipped?: boolean }> {
+  try {
+    const rebaseTarget = isRemote ? `origin/${targetBranch}` : targetBranch;
+
+    if (isRemote) {
+      await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: workdir, timeout: 30_000 });
+    }
+
+    // Check if rebase is needed (target branch moved since we branched)
+    const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', 'HEAD', rebaseTarget], { cwd: workdir });
+    const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: workdir });
+
+    if (mergeBase.trim() === targetTip.trim()) {
+      return { rebased: false, skipped: true }; // Already up to date
+    }
+
+    // Try automatic rebase — timeout after 60s (should be fast for non-conflicting changes)
+    await execFileAsync('git', ['rebase', rebaseTarget], { cwd: workdir, timeout: 60_000 });
+    return { rebased: true };
+  } catch {
+    // Abort on failure — existing retry loop will handle conflicts
+    await execFileAsync('git', ['rebase', '--abort'], { cwd: workdir }).catch(() => {});
+    return { rebased: false };
+  }
+}
+
 interface RunningTask {
   task: Task;
   abortController: AbortController;
@@ -1117,6 +1154,16 @@ export class TaskExecutor {
             keepBranch = true;
 
             if (prepared.gitRoot && prepared.projectBranch && prepared.branchName) {
+              // Pre-merge rebase: if the project branch moved forward (another task
+              // merged), rebase our task branch first. Avoids conflicts when changes
+              // don't overlap, and saves one retry cycle when they do.
+              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.projectBranch, false);
+              if (preRebase.rebased) {
+                console.log(`[executor] Task ${task.id}: pre-merge rebase onto ${prepared.projectBranch} succeeded`);
+              } else if (!preRebase.skipped) {
+                console.log(`[executor] Task ${task.id}: pre-merge rebase had conflicts, falling back to merge retry loop`);
+              }
+
               const mergeLockKey = BranchLockManager.computeLockKey(
                 prepared.gitRoot,
                 task.shortProjectId,
@@ -1233,6 +1280,19 @@ export class TaskExecutor {
             }
           } else {
             // 'pr' — push + create PR, auto-merge into project branch if applicable
+            this.wsClient.sendTaskStatus(task.id, 'running', 94, 'Rebasing before push...');
+            // Pre-push rebase: if the target branch moved forward, rebase our task
+            // branch so the PR will be cleanly mergeable. The branch hasn't been
+            // pushed yet, so no force-push is needed.
+            if (prepared.baseBranch) {
+              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.baseBranch, true);
+              if (preRebase.rebased) {
+                console.log(`[executor] Task ${task.id}: pre-push rebase onto origin/${prepared.baseBranch} succeeded`);
+              } else if (!preRebase.skipped) {
+                console.log(`[executor] Task ${task.id}: pre-push rebase had conflicts, proceeding without rebase`);
+              }
+            }
+
             this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Creating pull request...');
             console.log(`[executor] Task ${task.id}: pr mode, attempting PR creation for branch ${prepared.branchName}`);
             const hasProjectBranch = !!task.projectBranch;
