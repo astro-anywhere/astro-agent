@@ -361,6 +361,24 @@ describe('localMergeIntoProjectBranch', () => {
     expect(result.commitSha).toBe('abc123def456789');
   });
 
+  it('returns error when commit fails for non-empty-tree reason (e.g., pre-commit hook)', async () => {
+    setGitResponses({
+      'diff --stat': { stdout: ' src/index.ts | 5 ++---\n' },
+      'worktree add': { stdout: '' },
+      'merge --squash': { stdout: '' },
+      'commit -m': { error: new Error('pre-commit hook rejected: lint failed') },
+      'worktree remove': { stdout: '' },
+    });
+
+    const result = await localMergeIntoProjectBranch(
+      '/repo', 'task', 'proj', 'msg',
+    );
+
+    expect(result.merged).toBe(false);
+    expect(result.error).toContain('Commit failed');
+    expect(result.error).toContain('pre-commit hook');
+  });
+
   it('handles diff --stat with whitespace-only output as no changes', async () => {
     setGitResponses({
       'diff --stat': { stdout: '   \n  \n' },

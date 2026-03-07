@@ -113,9 +113,19 @@ export async function localMergeIntoProjectBranch(
         ['-C', tmpMergeDir, 'commit', '-m', commitMessage],
         { env: withGitEnv(), timeout: 10_000 },
       );
-    } catch {
-      // Nothing to commit (identical trees) — not an error
-      return { merged: false };
+    } catch (commitErr: unknown) {
+      // Node's execFile error has .message='Command failed: ...' but the actual
+      // git output is in .stdout/.stderr on the error object.
+      const errObj = commitErr as { message?: string; stdout?: string; stderr?: string };
+      const allOutput = [errObj.message, errObj.stdout, errObj.stderr]
+        .filter(Boolean).join('\n');
+      if (allOutput.includes('nothing to commit') || allOutput.includes('nothing added to commit')) {
+        // Identical trees — not an error
+        return { merged: false };
+      }
+      // Real commit failure (pre-commit hook, disk full, etc.)
+      const msg = commitErr instanceof Error ? commitErr.message : String(commitErr);
+      return { merged: false, error: `Commit failed: ${msg}` };
     }
 
     // 5. Get the resulting commit SHA
