@@ -226,7 +226,7 @@ describe('localMergeIntoProjectBranch', () => {
   });
 
   it('handles rev-parse HEAD failure after successful commit', async () => {
-    // If commit succeeds but rev-parse HEAD fails, the error should propagate
+    // If commit succeeds but rev-parse HEAD fails, return structured error (not throw)
     setGitResponses({
       'diff --stat': { stdout: ' file.ts | 3 +-\n' },
       'worktree add': { stdout: '' },
@@ -236,9 +236,9 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    await expect(
-      localMergeIntoProjectBranch('/repo', 'task', 'proj', 'msg'),
-    ).rejects.toThrow('ambiguous argument HEAD');
+    const result = await localMergeIntoProjectBranch('/repo', 'task', 'proj', 'msg');
+    expect(result.merged).toBe(false);
+    expect(result.error).toContain('failed to capture SHA');
   });
 
   it('falls back to rm + prune when worktree remove fails in cleanup', async () => {

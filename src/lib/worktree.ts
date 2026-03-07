@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { applyWorktreeInclude } from './worktree-include.js';
 import { runSetupScript } from './worktree-setup.js';
+import { repoHasRemote } from './workdir-safety.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -299,7 +300,6 @@ async function ensureProjectBranch(
   projectBranch: string,
   defaultBranch: string,
 ): Promise<void> {
-  const { repoHasRemote } = await import('./workdir-safety.js');
   const hasRemote = await repoHasRemote(gitRoot);
 
   if (hasRemote) {

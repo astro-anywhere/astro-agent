@@ -8,6 +8,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { rm } from 'node:fs/promises';
 
@@ -52,7 +53,8 @@ export async function localMergeIntoProjectBranch(
   }
 
   // 2. Create a temporary worktree for the merge operation
-  const tmpMergeDir = join(gitRoot, '.astro', 'tmp-merge', `merge-${Date.now()}`);
+  const suffix = `${Date.now()}-${randomBytes(4).toString('hex')}`;
+  const tmpMergeDir = join(gitRoot, '.astro', 'tmp-merge', `merge-${suffix}`);
   try {
     await execFileAsync(
       'git',
@@ -117,13 +119,17 @@ export async function localMergeIntoProjectBranch(
     }
 
     // 5. Get the resulting commit SHA
-    const { stdout: sha } = await execFileAsync(
-      'git',
-      ['-C', tmpMergeDir, 'rev-parse', 'HEAD'],
-      { env: withGitEnv(), timeout: 5_000 },
-    );
-
-    return { merged: true, commitSha: sha.trim() };
+    try {
+      const { stdout: sha } = await execFileAsync(
+        'git',
+        ['-C', tmpMergeDir, 'rev-parse', 'HEAD'],
+        { env: withGitEnv(), timeout: 5_000 },
+      );
+      return { merged: true, commitSha: sha.trim() };
+    } catch (shaErr) {
+      const msg = shaErr instanceof Error ? shaErr.message : String(shaErr);
+      return { merged: false, error: `Merge committed but failed to capture SHA: ${msg}` };
+    }
   } finally {
     // 6. Always clean up the temporary merge worktree
     try {
