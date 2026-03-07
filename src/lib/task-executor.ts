@@ -1222,7 +1222,7 @@ export class TaskExecutor {
                     } catch (resumeErr) {
                       console.error(`[executor] Task ${task.id}: agent conflict resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`);
                       result.deliveryStatus = 'failed';
-                      result.deliveryError = `Merge conflict in: ${conflictFiles}. Agent resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`;
+                      result.deliveryError = `Merge conflict in: ${mergeResult.conflictFiles?.join(', ') ?? 'unknown files'}. Agent resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`;
                       break;
                     }
                     // Loop continues — will retry merge
@@ -1323,7 +1323,7 @@ export class TaskExecutor {
                 const resumable = this.isResumableAdapter(adapter)
                   && !!adapter.getTaskContext(task.id)?.sessionId;
 
-                if (resumable && hasProjectBranch && prepared.branchName) {
+                if (resumable && hasProjectBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
                   for (let attempt = 1; attempt <= MAX_PR_MERGE_ATTEMPTS; attempt++) {
                     console.log(`[executor] Task ${task.id}: PR auto-merge failed (attempt ${attempt}), resuming ${adapter.name} to resolve`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `PR merge conflict — agent resolving (attempt ${attempt})...`);
@@ -1333,7 +1333,7 @@ export class TaskExecutor {
                     try {
                       await adapter.resumeTask(
                         task.id,
-                        buildPRConflictResolutionPrompt(prepared.baseBranch!, prepared.branchName, attempt, MAX_PR_MERGE_ATTEMPTS),
+                        buildPRConflictResolutionPrompt(prepared.baseBranch, prepared.branchName, attempt, MAX_PR_MERGE_ATTEMPTS),
                         prepared.workingDirectory,
                         context.sessionId,
                         stream,
@@ -1349,13 +1349,13 @@ export class TaskExecutor {
 
                     // Retry the GitHub merge
                     this.wsClient.sendTaskStatus(task.id, 'running', 98, `Retrying PR merge (attempt ${attempt})...`);
-                    const retryMerge = await mergePullRequest(prepared.workingDirectory, prResult.prNumber!, {
+                    const retryMerge = await mergePullRequest(prepared.workingDirectory, prResult.prNumber, {
                       method: 'squash',
                       deleteBranch: true,
                     });
 
                     if (retryMerge.ok) {
-                      result.commitAfterSha = await getRemoteBranchSha(prepared.gitRoot!, prepared.baseBranch!) ?? undefined;
+                      result.commitAfterSha = await getRemoteBranchSha(prepared.gitRoot, prepared.baseBranch) ?? undefined;
                       result.deliveryStatus = 'success';
                       prMergeResolved = true;
                       console.log(`[executor] Task ${task.id}: PR merged on retry (attempt ${attempt}), commitAfterSha=${result.commitAfterSha}`);
@@ -1364,7 +1364,7 @@ export class TaskExecutor {
 
                     if (attempt === MAX_PR_MERGE_ATTEMPTS) {
                       result.deliveryStatus = 'failed';
-                      result.deliveryError = `PR created but auto-merge failed after ${attempt} attempts: ${retryMerge.error}`;
+                      result.deliveryError = `PR created but auto-merge failed after ${attempt} attempts: ${retryMerge.error ?? 'merge conflict'}`;
                       console.error(`[executor] Task ${task.id}: PR merge failed after ${attempt} attempts`);
                     }
                     // Loop continues — agent will try again
