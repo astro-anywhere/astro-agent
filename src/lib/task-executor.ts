@@ -34,6 +34,15 @@ import {
 const execFileAsync = promisify(execFileCb);
 
 /**
+ * Sanitize a git ref name for embedding in prompt shell commands.
+ * Strips characters that could enable command injection (;, $, `, |, &, etc.)
+ * while preserving valid git ref characters (alphanumeric, /, -, _, .).
+ */
+function sanitizeGitRef(ref: string): string {
+  return ref.replace(/[^a-zA-Z0-9/_.\-]/g, '');
+}
+
+/**
  * Build a prompt instructing the agent to resolve merge conflicts.
  * The agent's worktree has the task branch checked out; it needs to
  * rebase onto the project branch to resolve conflicts, then commit.
@@ -44,6 +53,7 @@ function buildConflictResolutionPrompt(
   attempt: number,
   maxAttempts: number,
 ): string {
+  const safeBranch = sanitizeGitRef(projectBranch);
   const fileList = conflictFiles.map(f => `- ${f}`).join('\n');
   return `MERGE CONFLICT DETECTED (attempt ${attempt}/${maxAttempts})
 
@@ -53,11 +63,11 @@ parallel tasks have modified overlapping files since you branched.
 Conflicting files:
 ${fileList}
 
-The project branch is: ${projectBranch}
+The project branch is: ${safeBranch}
 
 Please resolve this:
-1. Fetch the latest project branch: git fetch origin 2>/dev/null; git fetch . ${projectBranch}:${projectBranch} 2>/dev/null || true
-2. Rebase onto the project branch: git rebase ${projectBranch}
+1. Fetch the latest project branch: git fetch origin 2>/dev/null; git fetch . ${safeBranch}:${safeBranch} 2>/dev/null || true
+2. Rebase onto the project branch: git rebase ${safeBranch}
 3. For each conflict, open the file, resolve the conflict markers (<<<<<<< / ======= / >>>>>>>), keeping the correct combination of both changes
 4. Stage resolved files: git add <resolved-files>
 5. Continue the rebase: git rebase --continue
@@ -78,22 +88,24 @@ function buildPRConflictResolutionPrompt(
   attempt: number,
   maxAttempts: number,
 ): string {
+  const safeBranch = sanitizeGitRef(projectBranch);
+  const safeTaskBranch = sanitizeGitRef(branchName);
   return `MERGE CONFLICT DETECTED ON GITHUB (attempt ${attempt}/${maxAttempts})
 
 Your pull request cannot be automatically merged into the project branch because
 parallel tasks have modified overlapping files.
 
-Your task branch is: ${branchName}
-The target branch is: ${projectBranch}
+Your task branch is: ${safeTaskBranch}
+The target branch is: ${safeBranch}
 
 Please resolve this:
-1. Fetch the latest target branch: git fetch origin ${projectBranch}
-2. Rebase onto the target branch: git rebase origin/${projectBranch}
+1. Fetch the latest target branch: git fetch origin ${safeBranch}
+2. Rebase onto the target branch: git rebase origin/${safeBranch}
 3. For each conflict, open the file, resolve the conflict markers (<<<<<<< / ======= / >>>>>>>), keeping the correct combination of both changes
 4. Stage resolved files: git add <resolved-files>
 5. Continue the rebase: git rebase --continue
 6. Verify your changes still work (run a quick build/test if applicable)
-7. Force-push the rebased branch: git push --force-with-lease origin ${branchName}
+7. Force-push the rebased branch: git push --force-with-lease origin ${safeTaskBranch}
 
 IMPORTANT: Do NOT create a merge commit. Use rebase so the history is clean.
 After you force-push, I will automatically retry the GitHub merge.`;

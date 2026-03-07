@@ -15,6 +15,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // 1. Prompt generation functions (mirrors task-executor.ts lines 41-100)
 // ============================================================================
 
+/** Mirror of sanitizeGitRef from task-executor.ts */
+function sanitizeGitRef(ref: string): string {
+  return ref.replace(/[^a-zA-Z0-9/_.\-]/g, '');
+}
+
 /**
  * Mirror of buildConflictResolutionPrompt from task-executor.ts.
  * Tested separately to verify prompt content without needing the full executor.
@@ -25,6 +30,7 @@ function buildConflictResolutionPrompt(
   attempt: number,
   maxAttempts: number,
 ): string {
+  const safeBranch = sanitizeGitRef(projectBranch);
   const fileList = conflictFiles.map(f => `- ${f}`).join('\n');
   return `MERGE CONFLICT DETECTED (attempt ${attempt}/${maxAttempts})
 
@@ -34,11 +40,11 @@ parallel tasks have modified overlapping files since you branched.
 Conflicting files:
 ${fileList}
 
-The project branch is: ${projectBranch}
+The project branch is: ${safeBranch}
 
 Please resolve this:
-1. Fetch the latest project branch: git fetch origin 2>/dev/null; git fetch . ${projectBranch}:${projectBranch} 2>/dev/null || true
-2. Rebase onto the project branch: git rebase ${projectBranch}
+1. Fetch the latest project branch: git fetch origin 2>/dev/null; git fetch . ${safeBranch}:${safeBranch} 2>/dev/null || true
+2. Rebase onto the project branch: git rebase ${safeBranch}
 3. For each conflict, open the file, resolve the conflict markers (<<<<<<< / ======= / >>>>>>>), keeping the correct combination of both changes
 4. Stage resolved files: git add <resolved-files>
 5. Continue the rebase: git rebase --continue
@@ -57,22 +63,24 @@ function buildPRConflictResolutionPrompt(
   attempt: number,
   maxAttempts: number,
 ): string {
+  const safeBranch = sanitizeGitRef(projectBranch);
+  const safeTaskBranch = sanitizeGitRef(branchName);
   return `MERGE CONFLICT DETECTED ON GITHUB (attempt ${attempt}/${maxAttempts})
 
 Your pull request cannot be automatically merged into the project branch because
 parallel tasks have modified overlapping files.
 
-Your task branch is: ${branchName}
-The target branch is: ${projectBranch}
+Your task branch is: ${safeTaskBranch}
+The target branch is: ${safeBranch}
 
 Please resolve this:
-1. Fetch the latest target branch: git fetch origin ${projectBranch}
-2. Rebase onto the target branch: git rebase origin/${projectBranch}
+1. Fetch the latest target branch: git fetch origin ${safeBranch}
+2. Rebase onto the target branch: git rebase origin/${safeBranch}
 3. For each conflict, open the file, resolve the conflict markers (<<<<<<< / ======= / >>>>>>>), keeping the correct combination of both changes
 4. Stage resolved files: git add <resolved-files>
 5. Continue the rebase: git rebase --continue
 6. Verify your changes still work (run a quick build/test if applicable)
-7. Force-push the rebased branch: git push --force-with-lease origin ${branchName}
+7. Force-push the rebased branch: git push --force-with-lease origin ${safeTaskBranch}
 
 IMPORTANT: Do NOT create a merge commit. Use rebase so the history is clean.
 After you force-push, I will automatically retry the GitHub merge.`;
@@ -199,18 +207,19 @@ async function simulatePRMergeRetry(opts: {
   const result: DeliveryResult = {};
   let prMergeResolved = false;
 
-  const resumable = isResumable
-    && !!adapter.getTaskContext(taskId)?.sessionId;
+  // Cache context once before the loop — mirrors real code (task-executor.ts:1324)
+  const prTaskContext = isResumable
+    ? adapter.getTaskContext(taskId)
+    : null;
 
-  if (resumable) {
+  if (prTaskContext?.sessionId) {
     for (let attempt = 1; attempt <= MAX_PR_MERGE_ATTEMPTS; attempt++) {
-      const context = adapter.getTaskContext(taskId)!;
       try {
         await adapter.resumeTask(
           taskId,
           buildPRConflictResolutionPrompt(opts.baseBranch, opts.branchName, attempt, MAX_PR_MERGE_ATTEMPTS),
           '/tmp/workdir',
-          context.sessionId,
+          prTaskContext.sessionId,
         );
       } catch (resumeErr) {
         result.deliveryStatus = 'failed';
