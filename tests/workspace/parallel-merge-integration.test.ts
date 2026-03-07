@@ -21,6 +21,7 @@ vi.mock('../src/lib/worktree-setup.js', () => ({
 }));
 
 import { localMergeIntoProjectBranch } from '../../src/lib/local-merge.js';
+import { createWorktree } from '../../src/lib/worktree.js';
 import { BranchLockManager } from '../../src/lib/branch-lock.js';
 
 const tmpDirs: string[] = [];
@@ -263,5 +264,49 @@ describe('Parallel execution with merge-only lock (real git)', { timeout: 30_000
     // 4 commits: initial + 3 squash merges
     const logCount = git(repo, 'rev-list', '--count', projectBranch);
     expect(parseInt(logCount)).toBe(4);
+  });
+
+  it('parallel worktree creation handles ensureProjectBranch race (local mode)', async () => {
+    const repo = createLocalRepo();
+    const shortProjectId = 'race01';
+
+    // Both tasks create worktrees concurrently. The first call to createWorktree
+    // will trigger ensureProjectBranch() which creates the project branch.
+    // The second call races — ensureProjectBranch() must handle "already exists"
+    // gracefully and not throw.
+    const [wt1, wt2] = await Promise.all([
+      createWorktree({
+        workingDirectory: repo,
+        taskId: 'race-task-1',
+        shortProjectId,
+        shortNodeId: 'n1',
+        projectBranch: `astro/${shortProjectId}`,
+      }),
+      createWorktree({
+        workingDirectory: repo,
+        taskId: 'race-task-2',
+        shortProjectId,
+        shortNodeId: 'n2',
+        projectBranch: `astro/${shortProjectId}`,
+      }),
+    ]);
+
+    // Both worktrees should have been created successfully
+    expect(wt1).not.toBeNull();
+    expect(wt2).not.toBeNull();
+    expect(wt1!.branchName).toContain('n1');
+    expect(wt2!.branchName).toContain('n2');
+
+    // The project branch should exist
+    const branches = git(repo, 'branch', '--list', `astro/${shortProjectId}`);
+    expect(branches.trim()).toContain(`astro/${shortProjectId}`);
+
+    // Both worktrees branched from the same project branch
+    expect(wt1!.projectBranch).toBe(`astro/${shortProjectId}`);
+    expect(wt2!.projectBranch).toBe(`astro/${shortProjectId}`);
+
+    // Cleanup
+    await wt1!.cleanup();
+    await wt2!.cleanup();
   });
 });

@@ -293,10 +293,10 @@ export async function removeLingeringWorktrees(gitRoot: string, branchName: stri
  *
  * Idempotent — safe to call on every task dispatch.
  *
- * Note: In practice, concurrent calls for the same project are prevented by
- * the per-project branch lock in task-executor.ts. The function is still
- * internally idempotent as a secondary safety net — if called concurrently,
- * only the first push succeeds; others fail non-fatally (branch already exists).
+ * Note: This function may be called concurrently by parallel tasks in the
+ * same project (there is no external lock around workspace preparation).
+ * It is internally idempotent: if a parallel task already created the branch,
+ * the "already exists" error is caught and handled gracefully.
  */
 async function ensureProjectBranch(
   gitRoot: string,
@@ -338,15 +338,28 @@ async function ensureProjectBranch(
         ['-C', gitRoot, 'branch', projectBranch, startPoint],
         { env: withGitEnv(), timeout: 10_000 }
       );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Handle race condition: parallel task already created the branch locally.
+      if (msg.includes('already exists')) {
+        console.log(`[worktree] Project branch ${projectBranch} created by another task (race OK)`);
+      } else {
+        console.warn(`[worktree] Failed to create project branch: ${msg}`);
+      }
+      // Branch may exist (created by another task) — still try to push below.
+    }
+    // Push to origin (idempotent — if another task already pushed, this is a no-op).
+    try {
       await execFileAsync(
         'git',
         ['-C', gitRoot, 'push', '-u', 'origin', projectBranch],
         { env: withGitEnv(), timeout: 30_000 }
       );
-      console.log(`[worktree] Created and pushed project branch ${projectBranch}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[worktree] Failed to create/push project branch: ${msg}`);
+      console.log(`[worktree] Pushed project branch ${projectBranch} to origin`);
+    } catch {
+      // Non-fatal: push may fail if another task already pushed, or if
+      // branch creation failed above for a real reason. Either way, the
+      // worktree creation will fail cleanly if the branch doesn't exist.
     }
   } else {
     // --- Local mode (no remote): create branch locally only ---
