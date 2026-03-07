@@ -1417,3 +1417,299 @@ describe('Simulation fidelity — matches real code invariants', () => {
     expect(validStatuses).toContain(r3.deliveryStatus);
   });
 });
+
+// ============================================================================
+// 6. Prompt mirror verification — test mirrors match real source exactly
+// ============================================================================
+
+describe('Prompt mirror verification', () => {
+  it('branch prompt contains all 6 numbered steps', () => {
+    const prompt = buildConflictResolutionPrompt(['a.ts'], 'proj', 1, 3);
+    expect(prompt).toContain('1. Fetch the latest project branch');
+    expect(prompt).toContain('2. Rebase onto the project branch');
+    expect(prompt).toContain('3. For each conflict');
+    expect(prompt).toContain('4. Stage resolved files');
+    expect(prompt).toContain('5. Continue the rebase');
+    expect(prompt).toContain('6. Verify your changes still work');
+  });
+
+  it('PR prompt contains all 7 numbered steps', () => {
+    const prompt = buildPRConflictResolutionPrompt('proj', 'task-br', 1, 3);
+    expect(prompt).toContain('1. Fetch the latest target branch');
+    expect(prompt).toContain('2. Rebase onto the target branch');
+    expect(prompt).toContain('3. For each conflict');
+    expect(prompt).toContain('4. Stage resolved files');
+    expect(prompt).toContain('5. Continue the rebase');
+    expect(prompt).toContain('6. Verify your changes still work');
+    expect(prompt).toContain('7. Force-push the rebased branch');
+  });
+
+  it('branch prompt uses local fetch (not origin) for project branch', () => {
+    const prompt = buildConflictResolutionPrompt(['a.ts'], 'astro/abc123', 1, 3);
+    // Real code fetches locally: `git fetch . <branch>:<branch>`
+    expect(prompt).toContain('git fetch . astro/abc123:astro/abc123');
+  });
+
+  it('PR prompt uses origin fetch for target branch', () => {
+    const prompt = buildPRConflictResolutionPrompt('astro/abc123', 'task-br', 1, 3);
+    expect(prompt).toContain('git fetch origin astro/abc123');
+    expect(prompt).toContain('git rebase origin/astro/abc123');
+  });
+
+  it('branch prompt rebase uses local ref (no origin/ prefix)', () => {
+    const prompt = buildConflictResolutionPrompt(['a.ts'], 'astro/proj', 1, 3);
+    expect(prompt).toContain('git rebase astro/proj');
+    expect(prompt).not.toContain('git rebase origin/astro/proj');
+  });
+
+  it('PR prompt rebase uses origin/ prefix', () => {
+    const prompt = buildPRConflictResolutionPrompt('astro/proj', 'br', 1, 3);
+    expect(prompt).toContain('git rebase origin/astro/proj');
+  });
+
+  it('both prompts include conflict marker instructions', () => {
+    const branch = buildConflictResolutionPrompt(['a.ts'], 'p', 1, 3);
+    const pr = buildPRConflictResolutionPrompt('p', 'b', 1, 3);
+    for (const prompt of [branch, pr]) {
+      expect(prompt).toContain('<<<<<<< / ======= / >>>>>>>');
+    }
+  });
+});
+
+// ============================================================================
+// 7. PR mode — additional edge cases
+// ============================================================================
+
+describe('PR mode — additional edge cases', () => {
+  let adapter: MockAdapter;
+  beforeEach(() => {
+    adapter = {
+      name: 'test',
+      resumeTask: vi.fn(),
+      getTaskContext: vi.fn().mockReturnValue({ sessionId: 'sess-1' }),
+    };
+  });
+
+  it('non-resumable adapter: result says PR created but auto-merge failed', async () => {
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn().mockResolvedValue({ ok: false }),
+      getRemoteSha: vi.fn().mockResolvedValue('sha'),
+      adapter,
+      taskId: 't1',
+      branchName: 'br',
+      baseBranch: 'main',
+      isResumable: false,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toBe('PR created but auto-merge into project branch failed');
+    expect(adapter.resumeTask).not.toHaveBeenCalled();
+  });
+
+  it('mergePR returns ok: false without error string → attempt-count error', async () => {
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn().mockResolvedValue({ ok: false }),
+      getRemoteSha: vi.fn().mockResolvedValue('sha'),
+      adapter,
+      taskId: 't1',
+      branchName: 'br',
+      baseBranch: 'main',
+      isResumable: true,
+      maxAttempts: 1,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toContain('auto-merge failed after 1 attempts');
+    expect(result.deliveryError).toContain('undefined'); // error is undefined
+  });
+
+  it('resume called on every attempt even when merge keeps failing', async () => {
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn().mockResolvedValue({ ok: false, error: 'conflict' }),
+      getRemoteSha: vi.fn().mockResolvedValue('sha'),
+      adapter,
+      taskId: 't1',
+      branchName: 'br',
+      baseBranch: 'main',
+      isResumable: true,
+      maxAttempts: 3,
+    });
+
+    expect(adapter.resumeTask).toHaveBeenCalledTimes(3);
+    expect(result.deliveryStatus).toBe('failed');
+  });
+
+  it('first attempt succeeds → only one resume call', async () => {
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn().mockResolvedValue({ ok: true }),
+      getRemoteSha: vi.fn().mockResolvedValue('abc123'),
+      adapter,
+      taskId: 't1',
+      branchName: 'br',
+      baseBranch: 'main',
+      isResumable: true,
+    });
+
+    expect(adapter.resumeTask).toHaveBeenCalledTimes(1);
+    expect(result.deliveryStatus).toBe('success');
+    expect(result.commitAfterSha).toBe('abc123');
+  });
+
+  it('resume error on first attempt → no merge retry', async () => {
+    const mockMergePR = vi.fn();
+    adapter.resumeTask.mockRejectedValue(new Error('agent crash'));
+
+    const result = await simulatePRMergeRetry({
+      mergePR: mockMergePR,
+      getRemoteSha: vi.fn(),
+      adapter,
+      taskId: 't1',
+      branchName: 'br',
+      baseBranch: 'main',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(mockMergePR).not.toHaveBeenCalled();
+  });
+
+  it('getRemoteSha returns empty string → commitAfterSha is empty string', async () => {
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn().mockResolvedValue({ ok: true }),
+      getRemoteSha: vi.fn().mockResolvedValue(''),
+      adapter,
+      taskId: 't1',
+      branchName: 'br',
+      baseBranch: 'main',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('success');
+    expect(result.commitAfterSha).toBe('');
+  });
+});
+
+// ============================================================================
+// 8. Branch mode — additional edge cases
+// ============================================================================
+
+describe('Branch mode — additional edge cases', () => {
+  let adapter: MockAdapter;
+  beforeEach(() => {
+    adapter = {
+      name: 'test',
+      resumeTask: vi.fn(),
+      getTaskContext: vi.fn().mockReturnValue({ sessionId: 'sess-1' }),
+    };
+  });
+
+  it('three consecutive conflicts, each resolved, last attempt succeeds', async () => {
+    let callCount = 0;
+    const result = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount < 3) {
+          return Promise.resolve({ merged: false, conflict: true, conflictFiles: ['f.ts'] });
+        }
+        return Promise.resolve({ merged: true, commitSha: 'final' });
+      }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 't1',
+      projectBranch: 'proj',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('success');
+    expect(result.commitAfterSha).toBe('final');
+    expect(adapter.resumeTask).toHaveBeenCalledTimes(2);
+  });
+
+  it('merge error string is preserved exactly in deliveryError', async () => {
+    const errorMsg = 'fatal: git merge failed with exit code 128';
+    const result = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockResolvedValue({ merged: false, error: errorMsg }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 't1',
+      projectBranch: 'proj',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toBe(errorMsg);
+  });
+
+  it('localMerge throws (not a result object) → lock still released', async () => {
+    const releaseFn = vi.fn();
+    await expect(
+      simulateBranchMergeRetry({
+        localMerge: vi.fn().mockRejectedValue(new Error('git crash')),
+        acquireLock: vi.fn().mockResolvedValue({ release: releaseFn }),
+        adapter,
+        taskId: 't1',
+        projectBranch: 'proj',
+        isResumable: true,
+      }),
+    ).rejects.toThrow('git crash');
+
+    expect(releaseFn).toHaveBeenCalledTimes(1);
+  });
+
+  it('conflict files with special characters are preserved in error', async () => {
+    const files = ['src/lib/my file (1).ts', 'src/types/special[0].d.ts'];
+    const result = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockResolvedValue({ merged: false, conflict: true, conflictFiles: files }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 't1',
+      projectBranch: 'proj',
+      isResumable: false,
+    });
+
+    expect(result.deliveryError).toContain('my file (1).ts');
+    expect(result.deliveryError).toContain('special[0].d.ts');
+  });
+
+  it('adapter.getTaskContext called on every conflict attempt', async () => {
+    let mergeCallCount = 0;
+    const result = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockImplementation(() => {
+        mergeCallCount++;
+        if (mergeCallCount < 3) {
+          return Promise.resolve({ merged: false, conflict: true, conflictFiles: ['a.ts'] });
+        }
+        return Promise.resolve({ merged: true, commitSha: 'ok' });
+      }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 't1',
+      projectBranch: 'proj',
+      isResumable: true,
+    });
+
+    // getTaskContext is called once for the resumable check + once per conflict attempt
+    // The isResumable check calls it first, then each conflict attempt calls it again
+    expect(adapter.getTaskContext.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(result.deliveryStatus).toBe('success');
+  });
+
+  it('deliveryError for multi-attempt failure includes all conflict files', async () => {
+    const result = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockResolvedValue({
+        merged: false,
+        conflict: true,
+        conflictFiles: ['a.ts', 'b.ts', 'c.ts'],
+      }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 't1',
+      projectBranch: 'proj',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toContain('a.ts, b.ts, c.ts');
+    expect(result.deliveryError).toContain('3 attempts');
+  });
+});
