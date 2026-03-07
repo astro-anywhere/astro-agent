@@ -802,6 +802,532 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
   });
 });
 
+describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => {
+  it('concurrent merges to the same project branch serialize correctly', async () => {
+    // Two tasks merging simultaneously — both should succeed since they touch different files
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/concurrent', 'main');
+
+    // Create two task branches with non-overlapping files
+    git(repo, 'checkout', '-b', 'astro/concurrent-a', 'astro/concurrent');
+    writeFileSync(join(repo, 'alpha.txt'), 'alpha\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Alpha');
+    git(repo, 'checkout', 'main');
+
+    git(repo, 'checkout', '-b', 'astro/concurrent-b', 'astro/concurrent');
+    writeFileSync(join(repo, 'beta.txt'), 'beta\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Beta');
+    git(repo, 'checkout', 'main');
+
+    // Fire both merges concurrently
+    const [rA, rB] = await Promise.all([
+      localMergeIntoProjectBranch(repo, 'astro/concurrent-a', 'astro/concurrent', 'Alpha'),
+      localMergeIntoProjectBranch(repo, 'astro/concurrent-b', 'astro/concurrent', 'Beta'),
+    ]);
+
+    // At least one should succeed. The other may also succeed (if worktree locking works)
+    // or may fail with a worktree error (since both try to checkout the same branch).
+    // The critical thing: no crash, no corruption, no stale worktrees.
+    const mergedCount = [rA, rB].filter(r => r.merged).length;
+    expect(mergedCount).toBeGreaterThanOrEqual(1);
+
+    // If one failed, it should have a structured error (not throw)
+    for (const r of [rA, rB]) {
+      if (!r.merged && r.error) {
+        expect(typeof r.error).toBe('string');
+      }
+    }
+
+    // No stale worktrees
+    const worktreeList = git(repo, 'worktree', 'list', '--porcelain');
+    const worktreeCount = worktreeList.split('\n').filter(l => l.startsWith('worktree ')).length;
+    expect(worktreeCount).toBe(1);
+  });
+
+  it('unicode filenames and content merge correctly', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/unicode', 'main');
+
+    git(repo, 'checkout', '-b', 'astro/unicode-t1', 'astro/unicode');
+    writeFileSync(join(repo, 'résumé.txt'), '日本語テスト\nemoji: 🎉\naccent: à la carte\n');
+    writeFileSync(join(repo, 'data.txt'), 'Ñoño — ñ, ü, ö, ä\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Add unicode files — résumé + data');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/unicode-t1', 'astro/unicode', 'Unicode content — 日本語',
+    );
+
+    expect(result.merged).toBe(true);
+
+    // Verify content roundtrips correctly
+    const content = git(repo, 'show', 'astro/unicode:data.txt');
+    expect(content).toContain('Ñoño');
+
+    // Verify commit message with unicode
+    const commitMsg = git(repo, 'log', '-1', '--format=%s', 'astro/unicode');
+    expect(commitMsg).toContain('日本語');
+  });
+
+  it('commit message with special characters (quotes, newlines, backticks)', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/msg', 'main');
+
+    git(repo, 'checkout', '-b', 'astro/msg-t1', 'astro/msg');
+    writeFileSync(join(repo, 'file.txt'), 'content\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Work');
+    git(repo, 'checkout', 'main');
+
+    // Commit message with characters that could break shell escaping
+    const trickMessage = `Fix "the bug" in O'Reilly's \`code\` — yes/no $HOME`;
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/msg-t1', 'astro/msg', trickMessage,
+    );
+
+    expect(result.merged).toBe(true);
+
+    // Verify the commit message was stored correctly (execFile is shell-safe)
+    const storedMsg = git(repo, 'log', '-1', '--format=%s', 'astro/msg');
+    expect(storedMsg).toBe(trickMessage);
+  });
+
+  it('symlinks in the repo merge correctly', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/symlink', 'main');
+
+    git(repo, 'checkout', '-b', 'astro/symlink-t1', 'astro/symlink');
+    writeFileSync(join(repo, 'target.txt'), 'I am the target\n');
+    const { symlinkSync } = await import('node:fs');
+    symlinkSync('target.txt', join(repo, 'link.txt'));
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Add symlink');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/symlink-t1', 'astro/symlink', 'Symlink merge',
+    );
+
+    expect(result.merged).toBe(true);
+    const files = git(repo, 'ls-tree', '--name-only', 'astro/symlink');
+    expect(files).toContain('link.txt');
+    expect(files).toContain('target.txt');
+  });
+
+  it('file rename detection works across branches', async () => {
+    const repo = createLocalRepo();
+
+    // Add a file to main
+    writeFileSync(join(repo, 'old-name.ts'), 'export function hello() { return "world"; }\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Add file');
+    git(repo, 'branch', 'astro/rename', 'main');
+
+    // Task: rename the file
+    git(repo, 'checkout', '-b', 'astro/rename-t1', 'astro/rename');
+    git(repo, 'mv', 'old-name.ts', 'new-name.ts');
+    git(repo, 'commit', '-m', 'Rename file');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/rename-t1', 'astro/rename', 'Renamed file',
+    );
+
+    expect(result.merged).toBe(true);
+    const files = git(repo, 'ls-tree', '--name-only', 'astro/rename');
+    expect(files).toContain('new-name.ts');
+    expect(files).not.toContain('old-name.ts');
+  });
+
+  it('handles stale tmp-merge directory from a previous crash', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/stale', 'main');
+
+    // Simulate a crash by leaving a stale directory in .astro/tmp-merge/
+    const staleDir = join(repo, '.astro', 'tmp-merge', 'merge-stale-crash');
+    mkdirSync(staleDir, { recursive: true });
+    writeFileSync(join(staleDir, 'leftover.txt'), 'crash artifact\n');
+
+    // Now do a real merge — should succeed despite the stale directory
+    git(repo, 'checkout', '-b', 'astro/stale-t1', 'astro/stale');
+    writeFileSync(join(repo, 'fresh.txt'), 'new content\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Fresh work');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/stale-t1', 'astro/stale', 'Fresh merge',
+    );
+
+    expect(result.merged).toBe(true);
+
+    // The stale directory should still be there (we don't clean others' mess),
+    // but the merge operation shouldn't be affected
+    const files = git(repo, 'ls-tree', '--name-only', 'astro/stale');
+    expect(files).toContain('fresh.txt');
+  });
+
+  it('task branch far behind project branch still merges cleanly (no conflict, different files)', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/farback', 'main');
+
+    // Merge 5 tasks into project branch to advance it far ahead
+    for (let i = 1; i <= 5; i++) {
+      git(repo, 'checkout', '-b', `astro/farback-t${i}`, 'astro/farback');
+      writeFileSync(join(repo, `file-${i}.txt`), `content ${i}\n`);
+      git(repo, 'add', '.');
+      git(repo, 'commit', '-m', `Task ${i}`);
+      git(repo, 'checkout', 'main');
+
+      const r = await localMergeIntoProjectBranch(
+        repo, `astro/farback-t${i}`, 'astro/farback', `Task ${i}`,
+      );
+      expect(r.merged).toBe(true);
+    }
+
+    // Now create a task from the ORIGINAL main (5 merges behind)
+    git(repo, 'checkout', '-b', 'astro/farback-late', 'main');
+    writeFileSync(join(repo, 'late-addition.txt'), 'I am late\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Late task');
+    git(repo, 'checkout', 'main');
+
+    // This should merge cleanly since it touches a different file
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/farback-late', 'astro/farback', 'Late merge',
+    );
+
+    expect(result.merged).toBe(true);
+
+    // All 6 files should be on the project branch
+    const files = git(repo, 'ls-tree', '--name-only', 'astro/farback');
+    for (let i = 1; i <= 5; i++) {
+      expect(files).toContain(`file-${i}.txt`);
+    }
+    expect(files).toContain('late-addition.txt');
+  });
+
+  it('large file (1MB+) merges without timeout', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/large', 'main');
+
+    git(repo, 'checkout', '-b', 'astro/large-t1', 'astro/large');
+    // Generate a ~1MB file
+    const largeContent = 'x'.repeat(1024 * 1024) + '\n';
+    writeFileSync(join(repo, 'big-file.txt'), largeContent);
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Add large file');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/large-t1', 'astro/large', 'Large file merge',
+    );
+
+    expect(result.merged).toBe(true);
+  });
+
+  it('many files in a single merge (100+ files)', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/many', 'main');
+
+    git(repo, 'checkout', '-b', 'astro/many-t1', 'astro/many');
+    const fileCount = 150;
+    for (let i = 0; i < fileCount; i++) {
+      writeFileSync(join(repo, `generated-${i.toString().padStart(3, '0')}.txt`), `content ${i}\n`);
+    }
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', `Add ${fileCount} files`);
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/many-t1', 'astro/many', 'Bulk file merge',
+    );
+
+    expect(result.merged).toBe(true);
+
+    const files = git(repo, 'ls-tree', '--name-only', 'astro/many');
+    const generatedFiles = files.split('\n').filter(f => f.startsWith('generated-'));
+    expect(generatedFiles.length).toBe(fileCount);
+  });
+
+  it('merge after project branch was manually advanced (simulating external changes)', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/ext', 'main');
+
+    // Externally advance the project branch (e.g., user manually committed)
+    git(repo, 'checkout', 'astro/ext');
+    writeFileSync(join(repo, 'manual.txt'), 'manually added\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Manual external change');
+    git(repo, 'checkout', 'main');
+
+    // Task branched from main (before external change)
+    git(repo, 'checkout', '-b', 'astro/ext-t1', 'main');
+    writeFileSync(join(repo, 'task.txt'), 'task output\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Task work');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/ext-t1', 'astro/ext', 'Task merge after external change',
+    );
+
+    expect(result.merged).toBe(true);
+
+    // Project branch should have BOTH the manual change and the task change
+    const files = git(repo, 'ls-tree', '--name-only', 'astro/ext');
+    expect(files).toContain('manual.txt');
+    expect(files).toContain('task.txt');
+  });
+
+  it('task that only deletes files produces a valid merge', async () => {
+    const repo = createLocalRepo();
+
+    // Add files to main
+    writeFileSync(join(repo, 'delete-me-1.txt'), 'goodbye 1\n');
+    writeFileSync(join(repo, 'delete-me-2.txt'), 'goodbye 2\n');
+    writeFileSync(join(repo, 'keep-me.txt'), 'stay\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Add files to delete');
+    git(repo, 'branch', 'astro/delonly', 'main');
+
+    // Task: only delete files, no additions
+    git(repo, 'checkout', '-b', 'astro/delonly-t1', 'astro/delonly');
+    git(repo, 'rm', 'delete-me-1.txt', 'delete-me-2.txt');
+    git(repo, 'commit', '-m', 'Delete files');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/delonly-t1', 'astro/delonly', 'Delete-only merge',
+    );
+
+    expect(result.merged).toBe(true);
+    const files = git(repo, 'ls-tree', '--name-only', 'astro/delonly');
+    expect(files).toContain('keep-me.txt');
+    expect(files).not.toContain('delete-me-1.txt');
+    expect(files).not.toContain('delete-me-2.txt');
+  });
+
+  it('three-way conflict: task A merged, task B conflicts, then task C merges cleanly', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/threeway', 'main');
+
+    // Task A: modify readme
+    git(repo, 'checkout', '-b', 'astro/threeway-a', 'main');
+    writeFileSync(join(repo, 'readme.txt'), 'version A\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'A');
+    git(repo, 'checkout', 'main');
+
+    const rA = await localMergeIntoProjectBranch(
+      repo, 'astro/threeway-a', 'astro/threeway', 'Task A',
+    );
+    expect(rA.merged).toBe(true);
+
+    // Task B: conflicts with A on the same file
+    git(repo, 'checkout', '-b', 'astro/threeway-b', 'main');
+    writeFileSync(join(repo, 'readme.txt'), 'version B\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'B');
+    git(repo, 'checkout', 'main');
+
+    const rB = await localMergeIntoProjectBranch(
+      repo, 'astro/threeway-b', 'astro/threeway', 'Task B',
+    );
+    expect(rB.merged).toBe(false);
+    expect(rB.conflict).toBe(true);
+
+    // Task C: different file, should merge cleanly despite B's conflict
+    git(repo, 'checkout', '-b', 'astro/threeway-c', 'main');
+    writeFileSync(join(repo, 'other.txt'), 'no conflict\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'C');
+    git(repo, 'checkout', 'main');
+
+    const rC = await localMergeIntoProjectBranch(
+      repo, 'astro/threeway-c', 'astro/threeway', 'Task C',
+    );
+    expect(rC.merged).toBe(true);
+
+    // Project branch should be clean: A's readme + C's other.txt
+    const files = git(repo, 'ls-tree', '--name-only', 'astro/threeway');
+    expect(files).toContain('other.txt');
+
+    // Verify readme has A's version (B was conflicted and rejected)
+    const content = git(repo, 'show', 'astro/threeway:readme.txt');
+    expect(content).toBe('version A');
+  });
+
+  it('deeply nested directory creation in merge', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/deep', 'main');
+
+    git(repo, 'checkout', '-b', 'astro/deep-t1', 'astro/deep');
+    const deepPath = join(repo, 'a', 'b', 'c', 'd', 'e', 'f');
+    mkdirSync(deepPath, { recursive: true });
+    writeFileSync(join(deepPath, 'deep.txt'), 'deep content\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Deep dir');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/deep-t1', 'astro/deep', 'Deep directory merge',
+    );
+
+    expect(result.merged).toBe(true);
+    const files = git(repo, 'ls-tree', '-r', '--name-only', 'astro/deep');
+    expect(files).toContain('a/b/c/d/e/f/deep.txt');
+  });
+
+  it('whitespace-only changes produce a valid merge', async () => {
+    const repo = createLocalRepo();
+
+    // Add a file with no trailing newline
+    writeFileSync(join(repo, 'code.ts'), 'const x = 1;');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Add code');
+    git(repo, 'branch', 'astro/ws', 'main');
+
+    // Task: only whitespace changes
+    git(repo, 'checkout', '-b', 'astro/ws-t1', 'astro/ws');
+    writeFileSync(join(repo, 'code.ts'), 'const x = 1;\n');  // add trailing newline
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Fix trailing newline');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/ws-t1', 'astro/ws', 'Whitespace fix',
+    );
+
+    expect(result.merged).toBe(true);
+    const content = git(repo, 'show', 'astro/ws:code.ts');
+    expect(content).toBe('const x = 1;');  // git show trims trailing newline
+  });
+
+  it('executable file mode changes merge correctly', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/chmod', 'main');
+
+    git(repo, 'checkout', '-b', 'astro/chmod-t1', 'astro/chmod');
+    writeFileSync(join(repo, 'script.sh'), '#!/bin/bash\necho hello\n');
+    const { chmodSync } = await import('node:fs');
+    chmodSync(join(repo, 'script.sh'), 0o755);
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Add executable script');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/chmod-t1', 'astro/chmod', 'Executable script merge',
+    );
+
+    expect(result.merged).toBe(true);
+
+    // Verify the file mode is preserved (100755 for executable)
+    const lsTree = git(repo, 'ls-tree', 'astro/chmod', 'script.sh');
+    expect(lsTree).toContain('100755');
+  });
+
+  it('merge returns different SHAs for different commits', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/sha', 'main');
+
+    // Task 1
+    git(repo, 'checkout', '-b', 'astro/sha-t1', 'astro/sha');
+    writeFileSync(join(repo, 'a.txt'), 'a\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'A');
+    git(repo, 'checkout', 'main');
+
+    const r1 = await localMergeIntoProjectBranch(
+      repo, 'astro/sha-t1', 'astro/sha', 'Task 1',
+    );
+
+    // Task 2
+    git(repo, 'checkout', '-b', 'astro/sha-t2', 'astro/sha');
+    writeFileSync(join(repo, 'b.txt'), 'b\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'B');
+    git(repo, 'checkout', 'main');
+
+    const r2 = await localMergeIntoProjectBranch(
+      repo, 'astro/sha-t2', 'astro/sha', 'Task 2',
+    );
+
+    expect(r1.merged).toBe(true);
+    expect(r2.merged).toBe(true);
+    expect(r1.commitSha).toBeDefined();
+    expect(r2.commitSha).toBeDefined();
+    // Each merge should produce a different SHA
+    expect(r1.commitSha).not.toBe(r2.commitSha);
+    // SHAs should be valid hex
+    expect(r1.commitSha).toMatch(/^[0-9a-f]{7,40}$/);
+    expect(r2.commitSha).toMatch(/^[0-9a-f]{7,40}$/);
+  });
+
+  it('nonexistent task branch returns structured error', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/noref', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/nonexistent-branch', 'astro/noref', 'Should fail',
+    );
+
+    // Should not throw — should return a structured error
+    expect(result.merged).toBe(false);
+    expect(result.error).toBeDefined();
+  });
+
+  it('nonexistent project branch returns structured error', async () => {
+    const repo = createLocalRepo();
+
+    // Create a valid task branch but no project branch
+    git(repo, 'checkout', '-b', 'astro/orphan-task', 'main');
+    writeFileSync(join(repo, 'orphan.txt'), 'orphan\n');
+    git(repo, 'add', '.');
+    git(repo, 'commit', '-m', 'Orphan');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/orphan-task', 'astro/nonexistent-project', 'Should fail',
+    );
+
+    expect(result.merged).toBe(false);
+    expect(result.error).toBeDefined();
+  });
+
+  it('pre-commit hook failure returns Commit failed error (real hook)', async () => {
+    const repo = createLocalRepo();
+    git(repo, 'branch', 'astro/hook', 'main');
+
+    // Install a pre-commit hook that always fails
+    const hookDir = join(repo, '.git', 'hooks');
+    mkdirSync(hookDir, { recursive: true });
+    writeFileSync(join(hookDir, 'pre-commit'), '#!/bin/bash\necho "hook blocked"\nexit 1\n');
+    const { chmodSync } = await import('node:fs');
+    chmodSync(join(hookDir, 'pre-commit'), 0o755);
+
+    // Create task with changes
+    git(repo, 'checkout', '-b', 'astro/hook-t1', 'astro/hook');
+    writeFileSync(join(repo, 'hooked.txt'), 'will fail\n');
+    git(repo, 'add', '.');
+    // Commit on task branch bypasses the hook (--no-verify) so we can create the branch
+    git(repo, 'commit', '--no-verify', '-m', 'Add file');
+    git(repo, 'checkout', 'main');
+
+    const result = await localMergeIntoProjectBranch(
+      repo, 'astro/hook-t1', 'astro/hook', 'Should fail at commit',
+    );
+
+    // The merge --squash succeeds, but the commit should fail due to the hook
+    expect(result.merged).toBe(false);
+    expect(result.error).toBeDefined();
+    expect(result.error).toContain('Commit failed');
+  });
+});
+
 describe('ensureProjectBranch local mode (real git)', { timeout: 15_000 }, () => {
   it('does not attempt to push for a no-remote repo', async () => {
     const repo = createLocalRepo();

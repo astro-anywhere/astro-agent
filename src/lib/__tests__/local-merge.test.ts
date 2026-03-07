@@ -390,4 +390,62 @@ describe('localMergeIntoProjectBranch', () => {
 
     expect(result.merged).toBe(false);
   });
+
+  it('detects "nothing to commit" in stdout of error object (Node execFile behavior)', async () => {
+    // Node's promisify(execFile) puts git's actual output in error.stdout,
+    // while error.message is just "Command failed: git -C ...".
+    // This test verifies we check all three fields.
+    const err = new Error('Command failed: git -C /tmp/merge commit -m msg') as Error & { stdout: string; stderr: string };
+    err.stdout = 'On branch astro/proj\nnothing to commit, working tree clean\n';
+    err.stderr = '';
+
+    setGitResponses({
+      'diff --stat': { stdout: ' file.ts | 3 +-\n' },
+      'worktree add': { stdout: '' },
+      'merge --squash': { stdout: '' },
+      'commit -m': { error: err },
+      'worktree remove': { stdout: '' },
+    });
+
+    const result = await localMergeIntoProjectBranch('/repo', 'task', 'proj', 'msg');
+    expect(result.merged).toBe(false);
+    // Should NOT have an error — this is the "nothing to commit" case
+    expect(result.error).toBeUndefined();
+  });
+
+  it('detects "nothing added to commit" variant', async () => {
+    const err = new Error('Command failed: git commit') as Error & { stdout: string; stderr: string };
+    err.stdout = 'nothing added to commit (use "git add" and/or "git commit -a")\n';
+    err.stderr = '';
+
+    setGitResponses({
+      'diff --stat': { stdout: ' file.ts | 3 +-\n' },
+      'worktree add': { stdout: '' },
+      'merge --squash': { stdout: '' },
+      'commit -m': { error: err },
+      'worktree remove': { stdout: '' },
+    });
+
+    const result = await localMergeIntoProjectBranch('/repo', 'task', 'proj', 'msg');
+    expect(result.merged).toBe(false);
+    expect(result.error).toBeUndefined();
+  });
+
+  it('real commit error (not nothing-to-commit) surfaces the error', async () => {
+    const err = new Error('Command failed: git commit') as Error & { stdout: string; stderr: string };
+    err.stdout = '';
+    err.stderr = 'error: gpg failed to sign the data\nfatal: failed to write commit object\n';
+
+    setGitResponses({
+      'diff --stat': { stdout: ' file.ts | 3 +-\n' },
+      'worktree add': { stdout: '' },
+      'merge --squash': { stdout: '' },
+      'commit -m': { error: err },
+      'worktree remove': { stdout: '' },
+    });
+
+    const result = await localMergeIntoProjectBranch('/repo', 'task', 'proj', 'msg');
+    expect(result.merged).toBe(false);
+    expect(result.error).toContain('Commit failed');
+  });
 });
