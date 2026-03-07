@@ -1,9 +1,10 @@
 /**
- * Per-branch async mutex for serializing worktree creation.
+ * Per-project async mutex for serializing merge operations.
  *
- * When multiple tasks share the same branch (same project), they must
- * create worktrees sequentially to avoid "branch already exists" errors.
- * Tasks on different branches run in parallel without contention.
+ * Tasks in the same project execute in parallel but serialize at merge
+ * time via this lock. The short-held merge lock ensures only one task
+ * squash-merges into the project branch at a time. Tasks on different
+ * projects run without contention.
  */
 
 import { resolve } from 'node:path';
@@ -28,9 +29,10 @@ export class BranchLockManager {
   /**
    * Derive a lock key scoped to the **project** level.
    *
-   * All tasks in the same project share one lock so they serialize.
-   * This is required because each task's auto-merge into the project branch
-   * must complete before the next task can branch from the updated tip.
+   * All tasks in the same project share one merge lock so they serialize
+   * **at merge time**. Task execution runs in parallel; only the
+   * squash-merge into the project branch is serialized so each task
+   * merges onto the current project branch tip.
    *
    * Key format: `{canonicalWorkdir}::{shortProjectId}`
    * Fallback:   `{canonicalWorkdir}::{taskId}`
