@@ -52,4 +52,3 @@ export { createProviderAdapter, getAvailableAdapters } from './providers/index.j
 export type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './providers/base-adapter.js';
 export { ClaudeCodeAdapter } from './providers/claude-code-adapter.js';
 export { CodexAdapter } from './providers/codex-adapter.js';
-export { SlurmAdapter } from './providers/slurm-adapter.js';

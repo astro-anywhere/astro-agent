@@ -226,25 +226,6 @@ export function formatNoProvidersWarning(): string {
   ].join('\n');
 }
 
-// ── Compact summary for background mode ──────────────────────────────
-
-export function formatBackgroundSummary(
-  providers: ProviderInfo[],
-  hostCount: number,
-  runnerId: string,
-): string {
-  const provNames = providers.length > 0
-    ? providers.map(p => p.name).join(', ')
-    : 'none';
-  const lines: string[] = [];
-  lines.push(chalk.dim(`  Providers: ${provNames}`));
-  if (hostCount > 0) {
-    lines.push(chalk.dim(`  Remote hosts: ${hostCount}`));
-  }
-  lines.push(chalk.dim(`  Runner ID: ${runnerId.slice(0, 8)}…`));
-  return lines.join('\n');
-}
-
 // ── Box separator for visual grouping ────────────────────────────────
 
 export { boxSeparator, renderBox };

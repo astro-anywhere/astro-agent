@@ -54,13 +54,6 @@ export function createProviderAdapter(type: ProviderType | ExtendedProviderType,
 }
 
 /**
- * Create a CLI-only provider adapter (for fallback when SDK is unavailable)
- */
-export function createCliProviderAdapter(): ProviderAdapter {
-  return new ClaudeCodeAdapter();
-}
-
-/**
  * Get all available provider adapters
  */
 export async function getAvailableAdapters(): Promise<ProviderAdapter[]> {

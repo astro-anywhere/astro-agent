@@ -64,19 +64,6 @@ export async function checkRemoteNode(
   return { available: false, version: null };
 }
 
-/**
- * Check whether agent-runner is already running on a remote host.
- * Uses the bracket trick in the regex to avoid pgrep matching itself.
- */
-export async function checkRemoteAgentRunning(host: DiscoveredHost): Promise<boolean> {
-  try {
-    const { stdout } = await sshExec(host, 'pgrep -f "[a]stro-agent start" 2>/dev/null');
-    return stdout.trim().length > 0;
-  } catch {
-    return false;
-  }
-}
-
 // ============================================================================
 // Pack & Install
 // ============================================================================
