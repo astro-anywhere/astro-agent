@@ -344,9 +344,8 @@ async function ensureProjectBranch(
       if (msg.includes('already exists')) {
         console.log(`[worktree] Project branch ${projectBranch} created by another task (race OK)`);
       } else {
-        console.warn(`[worktree] Failed to create project branch: ${msg}`);
+        throw new Error(`Failed to create project branch ${projectBranch}: ${msg}`);
       }
-      // Branch may exist (created by another task) — still try to push below.
     }
     // Push to origin (idempotent — if another task already pushed, this is a no-op).
     try {
@@ -357,9 +356,8 @@ async function ensureProjectBranch(
       );
       console.log(`[worktree] Pushed project branch ${projectBranch} to origin`);
     } catch {
-      // Non-fatal: push may fail if another task already pushed, or if
-      // branch creation failed above for a real reason. Either way, the
-      // worktree creation will fail cleanly if the branch doesn't exist.
+      // Non-fatal: push may fail if another task already pushed (race).
+      // The branch exists locally either way, so worktree creation proceeds.
     }
   } else {
     // --- Local mode (no remote): create branch locally only ---
