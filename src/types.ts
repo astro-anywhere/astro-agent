@@ -291,6 +291,8 @@ export type WSMessageType =
   | 'task_safety_response'
   | 'resource_update'
   | 'file_list_response'
+  | 'file_content_response'
+  | 'file_upload_response'
   | 'directory_list_response'
   | 'create_directory_response'
   | 'slash_commands_response'
@@ -312,6 +314,9 @@ export type WSMessageType =
   | 'task_safety_decision'
   | 'config_update'
   | 'file_list_request'
+  | 'file_content_request'
+  | 'file_upload_request'
+  | 'file_upload_chunk'
   | 'directory_list_request'
   | 'create_directory_request'
   | 'repo_setup_request'
@@ -605,6 +610,62 @@ export interface DirectoryListResponseMessage extends WSMessage {
     }>;
     error?: string;
     homeDirectory?: string;
+  };
+}
+
+export interface FileContentRequestMessage extends WSMessage {
+  type: 'file_content_request';
+  payload: {
+    path: string;
+    correlationId: string;
+  };
+}
+
+export interface FileContentResponseMessage extends WSMessage {
+  type: 'file_content_response';
+  payload: {
+    correlationId: string;
+    path: string;
+    content?: string;
+    encoding?: 'utf-8' | 'base64';
+    mimeType?: string;
+    size?: number;
+    chunked?: boolean;
+    chunkIndex?: number;
+    totalChunks?: number;
+    error?: string;
+  };
+}
+
+export interface FileUploadRequestMessage extends WSMessage {
+  type: 'file_upload_request';
+  payload: {
+    correlationId: string;
+    destinationPath: string;
+    fileName: string;
+    size: number;
+    totalChunks: number;
+    overwrite: boolean;
+  };
+}
+
+export interface FileUploadChunkMessage extends WSMessage {
+  type: 'file_upload_chunk';
+  payload: {
+    correlationId: string;
+    chunkIndex: number;
+    encoding: 'utf-8' | 'base64';
+    content: string;
+  };
+}
+
+export interface FileUploadResponseMessage extends WSMessage {
+  type: 'file_upload_response';
+  payload: {
+    correlationId: string;
+    success: boolean;
+    path?: string;
+    error?: string;
   };
 }
 
