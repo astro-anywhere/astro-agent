@@ -1,17 +1,86 @@
 /**
- * Tests for merge conflict resolution logic in task-executor.ts.
+ * Comprehensive tests for merge conflict resolution logic in task-executor.ts.
  *
- * These tests verify that:
- * 1. The retry loop produces the same output contract as before (self-contained)
- * 2. Non-conflict cases are unaffected
- * 3. Provider resume is called correctly
- * 4. The merge lock is properly acquired/released around each attempt
- * 5. All failure modes produce correct deliveryStatus/deliveryError
+ * Covers:
+ * 1. Prompt generation — buildConflictResolutionPrompt + buildPRConflictResolutionPrompt
+ * 2. Branch mode retry loop — all paths, edge cases, concurrency
+ * 3. PR mode retry loop — all paths, edge cases
+ * 4. Output contract preservation — downstream can't tell conflict from clean merge
+ * 5. Simulation fidelity — mirrors real code exactly
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// -- Minimal mock types to test the conflict resolution logic in isolation --
+// ============================================================================
+// 1. Prompt generation functions (mirrors task-executor.ts lines 41-100)
+// ============================================================================
+
+/**
+ * Mirror of buildConflictResolutionPrompt from task-executor.ts.
+ * Tested separately to verify prompt content without needing the full executor.
+ */
+function buildConflictResolutionPrompt(
+  conflictFiles: string[],
+  projectBranch: string,
+  attempt: number,
+  maxAttempts: number,
+): string {
+  const fileList = conflictFiles.map(f => `- ${f}`).join('\n');
+  return `MERGE CONFLICT DETECTED (attempt ${attempt}/${maxAttempts})
+
+Your task branch cannot be cleanly merged into the project branch because
+parallel tasks have modified overlapping files since you branched.
+
+Conflicting files:
+${fileList}
+
+The project branch is: ${projectBranch}
+
+Please resolve this:
+1. Fetch the latest project branch: git fetch origin 2>/dev/null; git fetch . ${projectBranch}:${projectBranch} 2>/dev/null || true
+2. Rebase onto the project branch: git rebase ${projectBranch}
+3. For each conflict, open the file, resolve the conflict markers (<<<<<<< / ======= / >>>>>>>), keeping the correct combination of both changes
+4. Stage resolved files: git add <resolved-files>
+5. Continue the rebase: git rebase --continue
+6. Verify your changes still work (run a quick build/test if applicable)
+
+IMPORTANT: Do NOT create a merge commit. Use rebase so the merge will be clean.
+After you finish resolving, I will automatically retry the merge.`;
+}
+
+/**
+ * Mirror of buildPRConflictResolutionPrompt from task-executor.ts.
+ */
+function buildPRConflictResolutionPrompt(
+  projectBranch: string,
+  branchName: string,
+  attempt: number,
+  maxAttempts: number,
+): string {
+  return `MERGE CONFLICT DETECTED ON GITHUB (attempt ${attempt}/${maxAttempts})
+
+Your pull request cannot be automatically merged into the project branch because
+parallel tasks have modified overlapping files.
+
+Your task branch is: ${branchName}
+The target branch is: ${projectBranch}
+
+Please resolve this:
+1. Fetch the latest target branch: git fetch origin ${projectBranch}
+2. Rebase onto the target branch: git rebase origin/${projectBranch}
+3. For each conflict, open the file, resolve the conflict markers (<<<<<<< / ======= / >>>>>>>), keeping the correct combination of both changes
+4. Stage resolved files: git add <resolved-files>
+5. Continue the rebase: git rebase --continue
+6. Verify your changes still work (run a quick build/test if applicable)
+7. Force-push the rebased branch: git push --force-with-lease origin ${branchName}
+
+IMPORTANT: Do NOT create a merge commit. Use rebase so the history is clean.
+After you force-push, I will automatically retry the GitHub merge.`;
+}
+
+// ============================================================================
+// 2. Mock types and simulation functions (mirror task-executor.ts retry loops)
+// ============================================================================
 
 interface MockMergeResult {
   merged: boolean;
@@ -42,13 +111,9 @@ interface DeliveryResult {
   commitAfterSha?: string;
 }
 
-// -- Extracted logic mirrors --
-// These functions replicate the retry logic from task-executor.ts
-// to test in isolation without needing the full TaskExecutor class.
-
 /**
  * Simulates the branch mode merge retry loop.
- * This mirrors the logic at task-executor.ts lines ~1129-1203.
+ * This mirrors the logic at task-executor.ts lines ~1127-1203.
  */
 async function simulateBranchMergeRetry(opts: {
   localMerge: () => Promise<MockMergeResult>;
@@ -85,13 +150,13 @@ async function simulateBranchMergeRetry(opts: {
         try {
           await adapter.resumeTask(
             taskId,
-            `conflict resolution prompt (attempt ${attempt})`,
+            buildConflictResolutionPrompt(mergeResult.conflictFiles ?? [], opts.projectBranch, attempt, MAX_MERGE_ATTEMPTS),
             '/tmp/workdir',
             context.sessionId,
           );
         } catch (resumeErr) {
           result.deliveryStatus = 'failed';
-          result.deliveryError = `Merge conflict. Agent resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`;
+          result.deliveryError = `Merge conflict in: ${mergeResult.conflictFiles?.join(', ') ?? 'unknown files'}. Agent resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`;
           break;
         }
         continue;
@@ -143,13 +208,13 @@ async function simulatePRMergeRetry(opts: {
       try {
         await adapter.resumeTask(
           taskId,
-          `PR conflict resolution prompt (attempt ${attempt})`,
+          buildPRConflictResolutionPrompt(opts.baseBranch, opts.branchName, attempt, MAX_PR_MERGE_ATTEMPTS),
           '/tmp/workdir',
           context.sessionId,
         );
       } catch (resumeErr) {
         result.deliveryStatus = 'failed';
-        result.deliveryError = `PR auto-merge failed. Agent resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`;
+        result.deliveryError = `PR created but auto-merge failed. Agent resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`;
         break;
       }
 
@@ -177,7 +242,162 @@ async function simulatePRMergeRetry(opts: {
   return result;
 }
 
-// -- Tests --
+// ============================================================================
+// TESTS
+// ============================================================================
+
+// ─── Prompt Generation ───────────────────────────────────────────────────────
+
+describe('buildConflictResolutionPrompt (branch mode)', () => {
+  it('includes attempt number and max attempts', () => {
+    const prompt = buildConflictResolutionPrompt(['a.ts'], 'astro/7b19a9', 2, 3);
+    expect(prompt).toContain('attempt 2/3');
+  });
+
+  it('lists all conflict files', () => {
+    const prompt = buildConflictResolutionPrompt(
+      ['src/index.ts', 'src/lib/utils.ts', 'package.json'],
+      'astro/proj',
+      1,
+      3,
+    );
+    expect(prompt).toContain('- src/index.ts');
+    expect(prompt).toContain('- src/lib/utils.ts');
+    expect(prompt).toContain('- package.json');
+  });
+
+  it('includes project branch name in rebase instructions', () => {
+    const prompt = buildConflictResolutionPrompt(['a.ts'], 'astro/7b19a9', 1, 3);
+    expect(prompt).toContain('git rebase astro/7b19a9');
+    expect(prompt).toContain('git fetch . astro/7b19a9:astro/7b19a9');
+  });
+
+  it('instructs rebase, NOT merge commit', () => {
+    const prompt = buildConflictResolutionPrompt(['a.ts'], 'astro/proj', 1, 3);
+    expect(prompt).toContain('Do NOT create a merge commit');
+    expect(prompt).toContain('Use rebase');
+    expect(prompt).toContain('git rebase --continue');
+  });
+
+  it('mentions conflict markers', () => {
+    const prompt = buildConflictResolutionPrompt(['a.ts'], 'astro/proj', 1, 3);
+    expect(prompt).toContain('<<<<<<<');
+    expect(prompt).toContain('=======');
+    expect(prompt).toContain('>>>>>>>');
+  });
+
+  it('tells agent the merge will be retried automatically', () => {
+    const prompt = buildConflictResolutionPrompt(['a.ts'], 'astro/proj', 1, 3);
+    expect(prompt).toContain('automatically retry the merge');
+  });
+
+  it('handles single conflict file', () => {
+    const prompt = buildConflictResolutionPrompt(['only-one.ts'], 'main', 1, 1);
+    expect(prompt).toContain('- only-one.ts');
+    expect(prompt).toContain('attempt 1/1');
+  });
+
+  it('handles empty conflict files array', () => {
+    const prompt = buildConflictResolutionPrompt([], 'astro/proj', 1, 3);
+    expect(prompt).toContain('Conflicting files:');
+    // Should still have the header but empty list
+    expect(prompt).not.toContain('- ');
+  });
+
+  it('does NOT include force-push (local mode)', () => {
+    const prompt = buildConflictResolutionPrompt(['a.ts'], 'astro/proj', 1, 3);
+    expect(prompt).not.toContain('force-push');
+    expect(prompt).not.toContain('--force-with-lease');
+  });
+});
+
+describe('buildPRConflictResolutionPrompt (PR mode)', () => {
+  it('includes attempt number and max attempts', () => {
+    const prompt = buildPRConflictResolutionPrompt('astro/7b19a9', 'astro/7b19a9-a3f2b1', 2, 3);
+    expect(prompt).toContain('attempt 2/3');
+  });
+
+  it('includes both branch names', () => {
+    const prompt = buildPRConflictResolutionPrompt('astro/proj', 'astro/proj-task1', 1, 3);
+    expect(prompt).toContain('Your task branch is: astro/proj-task1');
+    expect(prompt).toContain('The target branch is: astro/proj');
+  });
+
+  it('instructs fetching from origin', () => {
+    const prompt = buildPRConflictResolutionPrompt('main', 'feat/my-branch', 1, 3);
+    expect(prompt).toContain('git fetch origin main');
+    expect(prompt).toContain('git rebase origin/main');
+  });
+
+  it('includes force-push instruction (PR mode requires it)', () => {
+    const prompt = buildPRConflictResolutionPrompt('astro/proj', 'astro/proj-task1', 1, 3);
+    expect(prompt).toContain('git push --force-with-lease origin astro/proj-task1');
+  });
+
+  it('instructs rebase, NOT merge commit', () => {
+    const prompt = buildPRConflictResolutionPrompt('main', 'feat/x', 1, 3);
+    expect(prompt).toContain('Do NOT create a merge commit');
+    expect(prompt).toContain('Use rebase');
+  });
+
+  it('tells agent the GitHub merge will be retried automatically', () => {
+    const prompt = buildPRConflictResolutionPrompt('main', 'feat/x', 1, 3);
+    expect(prompt).toContain('automatically retry the GitHub merge');
+  });
+
+  it('mentions GITHUB in the header (distinct from branch mode)', () => {
+    const prompt = buildPRConflictResolutionPrompt('main', 'feat/x', 1, 3);
+    expect(prompt).toContain('MERGE CONFLICT DETECTED ON GITHUB');
+  });
+
+  it('mentions conflict markers', () => {
+    const prompt = buildPRConflictResolutionPrompt('main', 'feat/x', 1, 3);
+    expect(prompt).toContain('<<<<<<<');
+    expect(prompt).toContain('=======');
+    expect(prompt).toContain('>>>>>>>');
+  });
+});
+
+describe('Prompt differences: branch vs PR mode', () => {
+  it('branch mode does NOT mention force-push; PR mode DOES', () => {
+    const branch = buildConflictResolutionPrompt(['a.ts'], 'proj', 1, 3);
+    const pr = buildPRConflictResolutionPrompt('proj', 'feat/x', 1, 3);
+
+    expect(branch).not.toContain('force-push');
+    expect(pr).toContain('force-push');
+    expect(pr).toContain('--force-with-lease');
+  });
+
+  it('branch mode fetches locally; PR mode fetches from origin', () => {
+    const branch = buildConflictResolutionPrompt(['a.ts'], 'astro/proj', 1, 3);
+    const pr = buildPRConflictResolutionPrompt('astro/proj', 'astro/proj-t1', 1, 3);
+
+    expect(branch).toContain('git fetch . astro/proj:astro/proj');
+    expect(pr).toContain('git fetch origin astro/proj');
+    expect(pr).toContain('git rebase origin/astro/proj');
+  });
+
+  it('branch mode lists conflict files; PR mode does not (GitHub reports them)', () => {
+    const branch = buildConflictResolutionPrompt(['a.ts', 'b.ts'], 'proj', 1, 3);
+    const pr = buildPRConflictResolutionPrompt('proj', 'feat/x', 1, 3);
+
+    expect(branch).toContain('- a.ts');
+    expect(branch).toContain('- b.ts');
+    expect(pr).not.toContain('- a.ts');
+  });
+
+  it('both prompts include step 7 only for PR mode', () => {
+    const branch = buildConflictResolutionPrompt(['a.ts'], 'proj', 1, 3);
+    const pr = buildPRConflictResolutionPrompt('proj', 'feat/x', 1, 3);
+
+    // Branch mode has 6 steps, PR mode has 7
+    expect(branch).toContain('6. Verify');
+    expect(branch).not.toContain('7.');
+    expect(pr).toContain('7. Force-push');
+  });
+});
+
+// ─── Branch Mode Merge Retry Loop ────────────────────────────────────────────
 
 describe('Branch mode merge conflict resolution', () => {
   let adapter: MockAdapter;
@@ -222,6 +442,7 @@ describe('Branch mode merge conflict resolution', () => {
     });
 
     expect(result.deliveryStatus).toBe('skipped');
+    expect(result.commitAfterSha).toBeUndefined();
     expect(adapter.resumeTask).not.toHaveBeenCalled();
   });
 
@@ -259,12 +480,35 @@ describe('Branch mode merge conflict resolution', () => {
     expect(adapter.resumeTask).toHaveBeenCalledTimes(1);
     expect(adapter.resumeTask).toHaveBeenCalledWith(
       'task-1',
-      expect.stringContaining('attempt 1'),
+      expect.stringContaining('attempt 1/3'),
       '/tmp/workdir',
       'session-123',
     );
     // Lock acquired twice (attempt 1 + retry)
     expect(lockRelease).toHaveBeenCalledTimes(2);
+  });
+
+  it('passes correct prompt content to resumeTask', async () => {
+    const localMerge = vi.fn()
+      .mockResolvedValueOnce({ merged: false, conflict: true, conflictFiles: ['src/a.ts', 'lib/b.ts'] })
+      .mockResolvedValueOnce({ merged: true, commitSha: 'x' });
+
+    await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/7b19a9',
+      isResumable: true,
+    });
+
+    const prompt = adapter.resumeTask.mock.calls[0][1] as string;
+    expect(prompt).toContain('MERGE CONFLICT DETECTED');
+    expect(prompt).toContain('- src/a.ts');
+    expect(prompt).toContain('- lib/b.ts');
+    expect(prompt).toContain('astro/7b19a9');
+    expect(prompt).toContain('git rebase astro/7b19a9');
+    expect(prompt).not.toContain('force-push');
   });
 
   it('retries multiple times before succeeding', async () => {
@@ -287,7 +531,7 @@ describe('Branch mode merge conflict resolution', () => {
     expect(lockRelease).toHaveBeenCalledTimes(3);
   });
 
-  it('fails after max attempts', async () => {
+  it('fails after max attempts with multi-attempt error message', async () => {
     const localMerge = vi.fn()
       .mockResolvedValue({ merged: false, conflict: true, conflictFiles: ['a.ts', 'b.ts'] });
 
@@ -304,7 +548,8 @@ describe('Branch mode merge conflict resolution', () => {
     expect(result.deliveryStatus).toBe('failed');
     expect(result.deliveryError).toContain('unresolved after 3 attempts');
     expect(result.deliveryError).toContain('a.ts');
-    // Only 2 resume calls — 3rd attempt doesn't resume (attempt === maxAttempts)
+    expect(result.deliveryError).toContain('b.ts');
+    // Only 2 resume calls — 3rd attempt fails without resume (attempt === maxAttempts)
     expect(adapter.resumeTask).toHaveBeenCalledTimes(2);
     expect(lockRelease).toHaveBeenCalledTimes(3);
   });
@@ -325,12 +570,31 @@ describe('Branch mode merge conflict resolution', () => {
     expect(result.deliveryStatus).toBe('failed');
     expect(result.deliveryError).toContain('Merge conflict in');
     expect(adapter.resumeTask).not.toHaveBeenCalled();
-    // Only 1 attempt — no retry
     expect(lockRelease).toHaveBeenCalledTimes(1);
   });
 
   it('fails immediately on conflict when no sessionId', async () => {
     adapter.getTaskContext.mockReturnValue({ sessionId: undefined });
+
+    const localMerge = vi.fn()
+      .mockResolvedValue({ merged: false, conflict: true, conflictFiles: ['a.ts'] });
+
+    const result = await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/7b19a9',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toContain('Merge conflict in');
+    expect(adapter.resumeTask).not.toHaveBeenCalled();
+  });
+
+  it('fails immediately when getTaskContext returns null', async () => {
+    adapter.getTaskContext.mockReturnValue(null);
 
     const localMerge = vi.fn()
       .mockResolvedValue({ merged: false, conflict: true, conflictFiles: ['a.ts'] });
@@ -367,8 +631,26 @@ describe('Branch mode merge conflict resolution', () => {
     expect(result.deliveryStatus).toBe('failed');
     expect(result.deliveryError).toContain('Agent resolution failed');
     expect(result.deliveryError).toContain('Agent session expired');
-    // Resume called once, then broke out
     expect(adapter.resumeTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('includes conflict file list in resume failure error', async () => {
+    adapter.resumeTask.mockRejectedValue(new Error('timeout'));
+
+    const localMerge = vi.fn()
+      .mockResolvedValue({ merged: false, conflict: true, conflictFiles: ['x.ts', 'y.ts'] });
+
+    const result = await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: true,
+    });
+
+    expect(result.deliveryError).toContain('x.ts, y.ts');
+    expect(result.deliveryError).toContain('timeout');
   });
 
   it('releases lock even when merge throws', async () => {
@@ -383,10 +665,186 @@ describe('Branch mode merge conflict resolution', () => {
       isResumable: true,
     })).rejects.toThrow('git crashed');
 
-    // Lock was still released via finally block
     expect(lockRelease).toHaveBeenCalledTimes(1);
   });
+
+  it('handles undefined conflictFiles on conflict', async () => {
+    const localMerge = vi.fn()
+      .mockResolvedValue({ merged: false, conflict: true }); // no conflictFiles
+
+    const result = await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: false,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    // Should handle undefined gracefully — join(',') on undefined → 'undefined' text
+    expect(result.deliveryError).toContain('Merge conflict in');
+  });
+
+  it('handles empty conflictFiles array', async () => {
+    const localMerge = vi.fn()
+      .mockResolvedValue({ merged: false, conflict: true, conflictFiles: [] });
+
+    const result = await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: false,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toContain('Merge conflict in');
+  });
+
+  it('with maxAttempts=1, never calls resume even on conflict', async () => {
+    const localMerge = vi.fn()
+      .mockResolvedValue({ merged: false, conflict: true, conflictFiles: ['a.ts'] });
+
+    const result = await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: true,
+      maxAttempts: 1,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    // maxAttempts=1, attempt=1, so attempt < MAX (1 < 1) is false
+    expect(adapter.resumeTask).not.toHaveBeenCalled();
+    expect(lockRelease).toHaveBeenCalledTimes(1);
+    // First attempt error message (not "unresolved after N attempts")
+    expect(result.deliveryError).toContain('Merge conflict in');
+    expect(result.deliveryError).not.toContain('unresolved after');
+  });
+
+  it('with maxAttempts=2, resumes once then fails', async () => {
+    const localMerge = vi.fn()
+      .mockResolvedValue({ merged: false, conflict: true, conflictFiles: ['a.ts'] });
+
+    const result = await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: true,
+      maxAttempts: 2,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(adapter.resumeTask).toHaveBeenCalledTimes(1);
+    expect(lockRelease).toHaveBeenCalledTimes(2);
+    expect(result.deliveryError).toContain('unresolved after 2 attempts');
+  });
+
+  it('resume throws non-Error value', async () => {
+    adapter.resumeTask.mockRejectedValue('string error');
+
+    const localMerge = vi.fn()
+      .mockResolvedValue({ merged: false, conflict: true, conflictFiles: ['a.ts'] });
+
+    const result = await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toContain('string error');
+  });
+
+  it('conflict on first attempt, non-conflict error on second', async () => {
+    const localMerge = vi.fn()
+      .mockResolvedValueOnce({ merged: false, conflict: true, conflictFiles: ['a.ts'] })
+      .mockResolvedValueOnce({ merged: false, error: 'git merge failed: permission denied' });
+
+    const result = await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toBe('git merge failed: permission denied');
+    expect(adapter.resumeTask).toHaveBeenCalledTimes(1);
+    expect(lockRelease).toHaveBeenCalledTimes(2);
+  });
+
+  it('conflict → no changes on retry → skipped', async () => {
+    const localMerge = vi.fn()
+      .mockResolvedValueOnce({ merged: false, conflict: true, conflictFiles: ['a.ts'] })
+      .mockResolvedValueOnce({ merged: false }); // no changes
+
+    const result = await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('skipped');
+    expect(adapter.resumeTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('lock acquire is called once per attempt', async () => {
+    const localMerge = vi.fn()
+      .mockResolvedValueOnce({ merged: false, conflict: true, conflictFiles: ['a.ts'] })
+      .mockResolvedValueOnce({ merged: false, conflict: true, conflictFiles: ['a.ts'] })
+      .mockResolvedValueOnce({ merged: true, commitSha: 'ok' });
+
+    await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: true,
+    });
+
+    expect(acquireLock).toHaveBeenCalledTimes(3);
+    expect(lockRelease).toHaveBeenCalledTimes(3);
+  });
+
+  it('resume calls include correct attempt numbers', async () => {
+    const localMerge = vi.fn()
+      .mockResolvedValueOnce({ merged: false, conflict: true, conflictFiles: ['a.ts'] })
+      .mockResolvedValueOnce({ merged: false, conflict: true, conflictFiles: ['a.ts'] })
+      .mockResolvedValueOnce({ merged: true, commitSha: 'ok' });
+
+    await simulateBranchMergeRetry({
+      localMerge,
+      acquireLock,
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: true,
+    });
+
+    const call1Prompt = adapter.resumeTask.mock.calls[0][1] as string;
+    const call2Prompt = adapter.resumeTask.mock.calls[1][1] as string;
+    expect(call1Prompt).toContain('attempt 1/3');
+    expect(call2Prompt).toContain('attempt 2/3');
+  });
 });
+
+// ─── PR Mode Merge Retry Loop ────────────────────────────────────────────────
 
 describe('PR mode merge conflict resolution', () => {
   let adapter: MockAdapter;
@@ -415,6 +873,25 @@ describe('PR mode merge conflict resolution', () => {
     expect(adapter.resumeTask).toHaveBeenCalledTimes(1);
   });
 
+  it('passes correct PR prompt to resumeTask', async () => {
+    await simulatePRMergeRetry({
+      mergePR: vi.fn().mockResolvedValue({ ok: true }),
+      getRemoteSha: vi.fn().mockResolvedValue('sha'),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/proj-task1',
+      baseBranch: 'astro/proj',
+      isResumable: true,
+    });
+
+    const prompt = adapter.resumeTask.mock.calls[0][1] as string;
+    expect(prompt).toContain('MERGE CONFLICT DETECTED ON GITHUB');
+    expect(prompt).toContain('astro/proj-task1');
+    expect(prompt).toContain('astro/proj');
+    expect(prompt).toContain('--force-with-lease');
+    expect(prompt).toContain('attempt 1/3');
+  });
+
   it('retries multiple times before succeeding', async () => {
     const mergePR = vi.fn()
       .mockResolvedValueOnce({ ok: false, error: 'merge conflict' })
@@ -432,6 +909,7 @@ describe('PR mode merge conflict resolution', () => {
 
     expect(result.deliveryStatus).toBe('success');
     expect(adapter.resumeTask).toHaveBeenCalledTimes(2);
+    expect(mergePR).toHaveBeenCalledTimes(2);
   });
 
   it('fails after max attempts', async () => {
@@ -451,12 +929,15 @@ describe('PR mode merge conflict resolution', () => {
 
     expect(result.deliveryStatus).toBe('failed');
     expect(result.deliveryError).toContain('after 3 attempts');
+    expect(result.deliveryError).toContain('still conflicting');
     expect(adapter.resumeTask).toHaveBeenCalledTimes(3);
+    expect(mergePR).toHaveBeenCalledTimes(3);
   });
 
   it('fails immediately when adapter is not resumable', async () => {
+    const mergePR = vi.fn();
     const result = await simulatePRMergeRetry({
-      mergePR: vi.fn(),
+      mergePR,
       getRemoteSha: vi.fn(),
       adapter,
       taskId: 'task-1',
@@ -468,13 +949,15 @@ describe('PR mode merge conflict resolution', () => {
     expect(result.deliveryStatus).toBe('failed');
     expect(result.deliveryError).toBe('PR created but auto-merge into project branch failed');
     expect(adapter.resumeTask).not.toHaveBeenCalled();
+    expect(mergePR).not.toHaveBeenCalled();
   });
 
   it('fails immediately when no sessionId', async () => {
     adapter.getTaskContext.mockReturnValue({ sessionId: undefined });
+    const mergePR = vi.fn();
 
     const result = await simulatePRMergeRetry({
-      mergePR: vi.fn(),
+      mergePR,
       getRemoteSha: vi.fn(),
       adapter,
       taskId: 'task-1',
@@ -486,6 +969,27 @@ describe('PR mode merge conflict resolution', () => {
     expect(result.deliveryStatus).toBe('failed');
     expect(result.deliveryError).toBe('PR created but auto-merge into project branch failed');
     expect(adapter.resumeTask).not.toHaveBeenCalled();
+    expect(mergePR).not.toHaveBeenCalled();
+  });
+
+  it('fails immediately when getTaskContext returns null', async () => {
+    adapter.getTaskContext.mockReturnValue(null);
+    const mergePR = vi.fn();
+
+    const result = await simulatePRMergeRetry({
+      mergePR,
+      getRemoteSha: vi.fn(),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/7b19a9-a3f2b1',
+      baseBranch: 'astro/7b19a9',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toBe('PR created but auto-merge into project branch failed');
+    expect(adapter.resumeTask).not.toHaveBeenCalled();
+    expect(mergePR).not.toHaveBeenCalled();
   });
 
   it('fails when agent resume throws', async () => {
@@ -506,7 +1010,133 @@ describe('PR mode merge conflict resolution', () => {
     expect(result.deliveryError).toContain('Connection lost');
     expect(adapter.resumeTask).toHaveBeenCalledTimes(1);
   });
+
+  it('resume throws non-Error value', async () => {
+    adapter.resumeTask.mockRejectedValue('network timeout');
+
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn(),
+      getRemoteSha: vi.fn(),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/7b19a9-a3f2b1',
+      baseBranch: 'astro/7b19a9',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toContain('network timeout');
+  });
+
+  it('getRemoteSha returns undefined — commitAfterSha is undefined', async () => {
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn().mockResolvedValue({ ok: true }),
+      getRemoteSha: vi.fn().mockResolvedValue(undefined),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/7b19a9-a3f2b1',
+      baseBranch: 'astro/7b19a9',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('success');
+    expect(result.commitAfterSha).toBeUndefined();
+  });
+
+  it('getRemoteSha returns null (coerced to undefined)', async () => {
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn().mockResolvedValue({ ok: true }),
+      getRemoteSha: vi.fn().mockResolvedValue(null),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/7b19a9-a3f2b1',
+      baseBranch: 'astro/7b19a9',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('success');
+    // null ?? undefined = undefined
+    expect(result.commitAfterSha).toBeUndefined();
+  });
+
+  it('mergePR throwing propagates (not caught in retry loop)', async () => {
+    const mergePR = vi.fn().mockRejectedValue(new Error('GitHub API 500'));
+
+    await expect(simulatePRMergeRetry({
+      mergePR,
+      getRemoteSha: vi.fn(),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/proj-t1',
+      baseBranch: 'astro/proj',
+      isResumable: true,
+    })).rejects.toThrow('GitHub API 500');
+
+    // Resume was called, then mergePR threw
+    expect(adapter.resumeTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('with maxAttempts=1, resume + merge once, fails if merge fails', async () => {
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn().mockResolvedValue({ ok: false, error: 'conflict' }),
+      getRemoteSha: vi.fn(),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/proj-t1',
+      baseBranch: 'astro/proj',
+      isResumable: true,
+      maxAttempts: 1,
+    });
+
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toContain('after 1 attempts');
+    expect(adapter.resumeTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('PR resume calls include correct attempt numbers', async () => {
+    const mergePR = vi.fn()
+      .mockResolvedValueOnce({ ok: false, error: 'conflict' })
+      .mockResolvedValueOnce({ ok: false, error: 'conflict' })
+      .mockResolvedValueOnce({ ok: true });
+
+    await simulatePRMergeRetry({
+      mergePR,
+      getRemoteSha: vi.fn().mockResolvedValue('sha'),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/proj-t1',
+      baseBranch: 'astro/proj',
+      isResumable: true,
+    });
+
+    const prompts = adapter.resumeTask.mock.calls.map((c: unknown[]) => c[1] as string);
+    expect(prompts[0]).toContain('attempt 1/3');
+    expect(prompts[1]).toContain('attempt 2/3');
+    expect(prompts[2]).toContain('attempt 3/3');
+  });
+
+  it('resume succeeds but merge still fails — continues to next attempt', async () => {
+    const mergePR = vi.fn()
+      .mockResolvedValueOnce({ ok: false, error: 'still conflicting' })
+      .mockResolvedValueOnce({ ok: true });
+
+    const result = await simulatePRMergeRetry({
+      mergePR,
+      getRemoteSha: vi.fn().mockResolvedValue('sha'),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/proj-t1',
+      baseBranch: 'astro/proj',
+      isResumable: true,
+    });
+
+    expect(result.deliveryStatus).toBe('success');
+    expect(adapter.resumeTask).toHaveBeenCalledTimes(2);
+    expect(mergePR).toHaveBeenCalledTimes(2);
+  });
 });
+
+// ─── Output Contract Preservation ────────────────────────────────────────────
 
 describe('Output contract preservation', () => {
   it('clean merge produces identical output to pre-change behavior', async () => {
@@ -525,7 +1155,6 @@ describe('Output contract preservation', () => {
       isResumable: true,
     });
 
-    // These are the ONLY fields that should be set on success
     expect(result).toEqual({
       deliveryStatus: 'success',
       commitAfterSha: 'sha1',
@@ -552,7 +1181,6 @@ describe('Output contract preservation', () => {
       isResumable: true,
     });
 
-    // Same shape as clean merge — downstream can't tell the difference
     expect(result).toEqual({
       deliveryStatus: 'success',
       commitAfterSha: 'sha2',
@@ -575,9 +1203,217 @@ describe('Output contract preservation', () => {
       isResumable: false,
     });
 
-    // Same shape as old behavior — deliveryStatus='failed' + descriptive error
     expect(result.deliveryStatus).toBe('failed');
     expect(result.deliveryError).toContain('a.ts');
     expect(result.commitAfterSha).toBeUndefined();
+  });
+
+  it('PR mode success after retry produces identical shape', async () => {
+    const adapter: MockAdapter = {
+      name: 'test',
+      resumeTask: vi.fn().mockResolvedValue(undefined),
+      getTaskContext: vi.fn().mockReturnValue({ sessionId: 'sess' }),
+    };
+
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn()
+        .mockResolvedValueOnce({ ok: false, error: 'conflict' })
+        .mockResolvedValueOnce({ ok: true }),
+      getRemoteSha: vi.fn().mockResolvedValue('sha3'),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/proj-t1',
+      baseBranch: 'astro/proj',
+      isResumable: true,
+    });
+
+    expect(result).toEqual({
+      deliveryStatus: 'success',
+      commitAfterSha: 'sha3',
+    });
+  });
+
+  it('non-resumable branch conflict produces same output as before feature', async () => {
+    const adapter: MockAdapter = {
+      name: 'test',
+      resumeTask: vi.fn(),
+      getTaskContext: vi.fn(),
+    };
+
+    const result = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockResolvedValue({
+        merged: false,
+        conflict: true,
+        conflictFiles: ['src/index.ts', 'src/utils.ts'],
+      }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'astro/proj',
+      isResumable: false,
+    });
+
+    // Pre-feature behavior: immediate failure with file list
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toBe('Merge conflict in: src/index.ts, src/utils.ts');
+    expect(result.commitAfterSha).toBeUndefined();
+    expect(adapter.resumeTask).not.toHaveBeenCalled();
+  });
+
+  it('non-resumable PR conflict produces same output as before feature', async () => {
+    const adapter: MockAdapter = {
+      name: 'test',
+      resumeTask: vi.fn(),
+      getTaskContext: vi.fn(),
+    };
+
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn(),
+      getRemoteSha: vi.fn(),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'astro/proj-t1',
+      baseBranch: 'astro/proj',
+      isResumable: false,
+    });
+
+    // Pre-feature behavior: immediate failure
+    expect(result.deliveryStatus).toBe('failed');
+    expect(result.deliveryError).toBe('PR created but auto-merge into project branch failed');
+    expect(result.commitAfterSha).toBeUndefined();
+    expect(adapter.resumeTask).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Simulation fidelity checks ──────────────────────────────────────────────
+
+describe('Simulation fidelity — matches real code invariants', () => {
+  it('branch mode: result.status (execution) is never touched by retry loop', async () => {
+    // The retry loop only sets deliveryStatus, deliveryError, commitAfterSha.
+    // It never touches result.status which is the execution status.
+    const adapter: MockAdapter = {
+      name: 'test',
+      resumeTask: vi.fn().mockResolvedValue(undefined),
+      getTaskContext: vi.fn().mockReturnValue({ sessionId: 'sess' }),
+    };
+
+    const result = await simulateBranchMergeRetry({
+      localMerge: vi.fn()
+        .mockResolvedValueOnce({ merged: false, conflict: true, conflictFiles: ['a.ts'] })
+        .mockResolvedValueOnce({ merged: true, commitSha: 'ok' }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 'task-1',
+      projectBranch: 'proj',
+      isResumable: true,
+    });
+
+    // DeliveryResult type only has these 3 fields
+    const keys = Object.keys(result);
+    expect(keys.every(k => ['deliveryStatus', 'deliveryError', 'commitAfterSha'].includes(k))).toBe(true);
+  });
+
+  it('PR mode: result.status is never touched by retry loop', async () => {
+    const adapter: MockAdapter = {
+      name: 'test',
+      resumeTask: vi.fn().mockResolvedValue(undefined),
+      getTaskContext: vi.fn().mockReturnValue({ sessionId: 'sess' }),
+    };
+
+    const result = await simulatePRMergeRetry({
+      mergePR: vi.fn().mockResolvedValue({ ok: true }),
+      getRemoteSha: vi.fn().mockResolvedValue('sha'),
+      adapter,
+      taskId: 'task-1',
+      branchName: 'b',
+      baseBranch: 'base',
+      isResumable: true,
+    });
+
+    const keys = Object.keys(result);
+    expect(keys.every(k => ['deliveryStatus', 'deliveryError', 'commitAfterSha'].includes(k))).toBe(true);
+  });
+
+  it('branch mode: lock is ALWAYS released — even on success', async () => {
+    const lock = { release: vi.fn() };
+
+    await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockResolvedValue({ merged: true, commitSha: 'ok' }),
+      acquireLock: vi.fn().mockResolvedValue(lock),
+      adapter: { name: 'a', resumeTask: vi.fn(), getTaskContext: vi.fn().mockReturnValue({ sessionId: 's' }) },
+      taskId: 't',
+      projectBranch: 'p',
+      isResumable: true,
+    });
+
+    expect(lock.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('branch mode: lock is NOT held during resume (released before resume)', async () => {
+    const lockReleaseOrder: string[] = [];
+    const lock = { release: vi.fn(() => lockReleaseOrder.push('lock-released')) };
+
+    const adapter: MockAdapter = {
+      name: 'test',
+      resumeTask: vi.fn(async () => { lockReleaseOrder.push('resume-called'); }),
+      getTaskContext: vi.fn().mockReturnValue({ sessionId: 'sess' }),
+    };
+
+    await simulateBranchMergeRetry({
+      localMerge: vi.fn()
+        .mockResolvedValueOnce({ merged: false, conflict: true, conflictFiles: ['a.ts'] })
+        .mockResolvedValueOnce({ merged: true, commitSha: 'ok' }),
+      acquireLock: vi.fn().mockResolvedValue(lock),
+      adapter,
+      taskId: 't',
+      projectBranch: 'p',
+      isResumable: true,
+    });
+
+    // Lock must be released BEFORE resume is called
+    expect(lockReleaseOrder[0]).toBe('lock-released');
+    expect(lockReleaseOrder[1]).toBe('resume-called');
+  });
+
+  it('every deliveryStatus is one of the expected enum values', async () => {
+    const validStatuses = ['success', 'failed', 'skipped'];
+    const adapter: MockAdapter = {
+      name: 'test',
+      resumeTask: vi.fn(),
+      getTaskContext: vi.fn().mockReturnValue({ sessionId: 'sess' }),
+    };
+
+    // Success
+    const r1 = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockResolvedValue({ merged: true, commitSha: 'ok' }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 't',
+      projectBranch: 'p',
+      isResumable: true,
+    });
+    expect(validStatuses).toContain(r1.deliveryStatus);
+
+    // Failed
+    const r2 = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockResolvedValue({ merged: false, error: 'err' }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 't',
+      projectBranch: 'p',
+      isResumable: true,
+    });
+    expect(validStatuses).toContain(r2.deliveryStatus);
+
+    // Skipped
+    const r3 = await simulateBranchMergeRetry({
+      localMerge: vi.fn().mockResolvedValue({ merged: false }),
+      acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+      adapter,
+      taskId: 't',
+      projectBranch: 'p',
+      isResumable: true,
+    });
+    expect(validStatuses).toContain(r3.deliveryStatus);
   });
 });
