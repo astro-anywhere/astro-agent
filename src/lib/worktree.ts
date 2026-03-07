@@ -365,6 +365,12 @@ async function ensureProjectBranch(
       console.log(`[worktree] Created local project branch ${projectBranch}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // Handle race condition: if parallel tasks both try to create the branch,
+      // the second one fails with "already exists" — that's fine, not an error.
+      if (msg.includes('already exists')) {
+        console.log(`[worktree] Project branch ${projectBranch} created by another task (race OK)`);
+        return;
+      }
       throw new Error(`Failed to create local project branch ${projectBranch}: ${msg}`);
     }
   }

@@ -17,7 +17,7 @@ import { OpenClawAdapter } from '../providers/openclaw-adapter.js';
 import { OpenCodeAdapter } from '../providers/opencode-adapter.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree } from './worktree.js';
-import { BranchLockManager, type BranchLockHandle } from './branch-lock.js';
+import { BranchLockManager } from './branch-lock.js';
 import { pushAndCreatePR } from './git-pr.js';
 import { localMergeIntoProjectBranch } from './local-merge.js';
 import {
@@ -823,20 +823,6 @@ export class TaskExecutor {
     return tasks ? tasks.size : 0;
   }
 
-  /**
-   * Determine whether a task will create a git worktree.
-   * Used to decide if the branch lock should be acquired.
-   */
-  private taskWillCreateWorktree(task: Task): boolean {
-    const isTextOnly = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan';
-    if (isTextOnly) return false;
-    if (task.useWorktree === false) return false;
-    if (!this.useWorktree) return false;
-    if (task.deliveryMode === 'direct') return false;
-    if (task.deliveryMode === 'copy') return false;
-    return true;
-  }
-
   private async executeTask(task: Task, useSandbox = false): Promise<void> {
     console.log(`[executor] Task ${task.id}: workingDirectory=${task.workingDirectory} sandbox=${useSandbox}`);
 
@@ -937,33 +923,6 @@ export class TaskExecutor {
     this.runningTasks.set(normalizedTask.id, runningTask);
     this.wsClient.addActiveTask(normalizedTask.id);
 
-    // Acquire per-branch lock to prevent concurrent worktree creation on the same branch.
-    // Tasks sharing a branch (same project) serialize; different branches run in parallel.
-    let branchLock: BranchLockHandle | undefined;
-    if (this.taskWillCreateWorktree(normalizedTask)) {
-      const lockKey = BranchLockManager.computeLockKey(
-        normalizedTask.workingDirectory,
-        normalizedTask.shortProjectId,
-        normalizedTask.shortNodeId,
-        normalizedTask.id,
-      );
-      const queueLength = this.branchLockManager.getQueueLength(lockKey);
-      if (queueLength > 0 || this.branchLockManager.isLocked(lockKey)) {
-        console.log(`[executor] Task ${task.id}: waiting for branch lock (${queueLength} ahead)`);
-        this.wsClient.sendTaskStatus(normalizedTask.id, 'running', 0, 'Waiting for branch lock...');
-      }
-      branchLock = await this.branchLockManager.acquire(lockKey, normalizedTask.id);
-      // If task was cancelled while waiting for the lock, bail out early
-      if (abortController.signal.aborted) {
-        branchLock.release();
-        this.runningTasks.delete(normalizedTask.id);
-        this.wsClient.removeActiveTask(normalizedTask.id);
-        this.untrackTaskDirectory(task);
-        this.processQueue();
-        return;
-      }
-    }
-
     // Text-only tasks (plan/chat/summarize) without a working directory skip workspace prep
     const isTextOnly = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan';
     let prepared: Awaited<ReturnType<typeof this.prepareTaskWorkspace>>;
@@ -972,11 +931,6 @@ export class TaskExecutor {
         ? { workingDirectory: '', cleanup: async () => {} }
         : await this.prepareTaskWorkspace(normalizedTask, stream);
     } catch (prepErr) {
-      // Release branch lock on workspace preparation failure to avoid deadlocking
-      // subsequent tasks in the same project (fix from PR #26).
-      // Note: processQueue() is NOT called here — the finally block in the outer
-      // try-catch handles queue draining for all exit paths, avoiding double-dequeue.
-      if (branchLock) branchLock.release();
       this.runningTasks.delete(normalizedTask.id);
       this.wsClient.removeActiveTask(normalizedTask.id);
       this.untrackTaskDirectory(task);
@@ -1084,36 +1038,54 @@ export class TaskExecutor {
             // Copy mode: worktree preserved, no git operations
             console.log(`[executor] Task ${task.id}: copy mode, worktree preserved at ${prepared.workingDirectory}`);
           } else if (deliveryMode === 'branch') {
-            // Branch mode: commit locally, merge into project branch if available
+            // Branch mode: commit locally, merge into project branch if available.
+            // The merge lock is held only during the squash-merge (seconds, not minutes),
+            // allowing tasks to execute in parallel. The squash merge naturally handles
+            // the case where the project branch moved forward (another task merged first)
+            // because it computes the diff from the merge-base and applies it on the
+            // current project branch tip.
             result.branchName = prepared.branchName;
             keepBranch = true;
 
             if (prepared.gitRoot && prepared.projectBranch && prepared.branchName) {
-              // Local merge: squash-merge task branch into project accumulation branch
-              this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Merging into project branch...');
-              console.log(`[executor] Task ${task.id}: branch mode, merging ${prepared.branchName} → ${prepared.projectBranch}`);
-              const mergeResult = await localMergeIntoProjectBranch(
+              // Acquire merge lock — serializes only the squash-merge phase, not execution.
+              const mergeLockKey = BranchLockManager.computeLockKey(
                 prepared.gitRoot,
-                prepared.branchName,
-                prepared.projectBranch,
-                `[${task.shortProjectId ?? 'astro'}/${task.shortNodeId ?? task.id.slice(0, 6)}] ${rawTitle}`,
+                task.shortProjectId,
+                task.shortNodeId,
+                task.id,
               );
-              if (mergeResult.merged) {
-                result.deliveryStatus = 'success';
-                result.commitAfterSha = mergeResult.commitSha;
-                console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
-              } else if (mergeResult.conflict) {
-                result.deliveryStatus = 'failed';
-                result.deliveryError = `Merge conflict in: ${mergeResult.conflictFiles?.join(', ')}`;
-                console.error(`[executor] Task ${task.id}: merge conflict — ${mergeResult.conflictFiles?.join(', ')}`);
-              } else if (mergeResult.error) {
-                result.deliveryStatus = 'failed';
-                result.deliveryError = mergeResult.error;
-                console.error(`[executor] Task ${task.id}: merge failed — ${mergeResult.error}`);
-              } else {
-                // No changes to merge
-                result.deliveryStatus = 'skipped';
-                console.log(`[executor] Task ${task.id}: no changes to merge`);
+              this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Waiting for merge lock...');
+              console.log(`[executor] Task ${task.id}: branch mode, acquiring merge lock for ${prepared.branchName} → ${prepared.projectBranch}`);
+              const mergeLock = await this.branchLockManager.acquire(mergeLockKey, task.id);
+              try {
+                this.wsClient.sendTaskStatus(task.id, 'running', 96, 'Merging into project branch...');
+                const mergeResult = await localMergeIntoProjectBranch(
+                  prepared.gitRoot,
+                  prepared.branchName,
+                  prepared.projectBranch,
+                  `[${task.shortProjectId ?? 'astro'}/${task.shortNodeId ?? task.id.slice(0, 6)}] ${rawTitle}`,
+                );
+                if (mergeResult.merged) {
+                  result.deliveryStatus = 'success';
+                  result.commitAfterSha = mergeResult.commitSha;
+                  console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
+                } else if (mergeResult.conflict) {
+                  result.deliveryStatus = 'failed';
+                  result.deliveryError = `Merge conflict in: ${mergeResult.conflictFiles?.join(', ')}`;
+                  console.error(`[executor] Task ${task.id}: merge conflict — ${mergeResult.conflictFiles?.join(', ')}`);
+                } else if (mergeResult.error) {
+                  result.deliveryStatus = 'failed';
+                  result.deliveryError = mergeResult.error;
+                  console.error(`[executor] Task ${task.id}: merge failed — ${mergeResult.error}`);
+                } else {
+                  // No changes to merge
+                  result.deliveryStatus = 'skipped';
+                  console.log(`[executor] Task ${task.id}: no changes to merge`);
+                }
+              } finally {
+                mergeLock.release();
+                console.log(`[executor] Task ${task.id}: merge lock released`);
               }
             } else if (prepared.projectBranch) {
               console.warn(`[executor] Task ${task.id}: projectBranch=${prepared.projectBranch} but gitRoot=${prepared.gitRoot}, branchName=${prepared.branchName} — skipping local merge`);
@@ -1265,14 +1237,6 @@ export class TaskExecutor {
         }
         console.log(`[executor] Task ${task.id}: cleaning up sandbox`);
         await sandbox.cleanup();
-      }
-
-      // Release branch lock after execution + delivery (auto-merge) completes.
-      // The accumulative model requires the lock to be held through auto-merge
-      // so the next task branches from the updated project branch tip.
-      if (branchLock) {
-        branchLock.release();
-        console.log(`[executor] Task ${task.id}: branch lock released after delivery`);
       }
 
       // Untrack task from directory
