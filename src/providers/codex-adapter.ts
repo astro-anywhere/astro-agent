@@ -370,6 +370,14 @@ export class CodexAdapter implements ProviderAdapter {
         ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
         : task.prompt;
 
+      // Prepend conversation history if available (fallback for multi-turn)
+      if (task.messages && task.messages.length > 0) {
+        const conversationContext = task.messages
+          .map(m => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
+          .join('\n\n');
+        effectivePrompt = `${conversationContext}\n\nHuman: ${effectivePrompt}`;
+      }
+
       // Add image references if images were written to disk.
       // The --image flag may not be available in all Codex CLI versions,
       // so we also reference files in the prompt text as a fallback.

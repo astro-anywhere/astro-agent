@@ -114,6 +114,25 @@ export class OpenClawAdapter implements ProviderAdapter {
     const startedAt = new Date().toISOString();
 
     try {
+      // For plan generation with outputFormat, use the llm-task HTTP endpoint
+      if (task.type === 'plan' && task.outputFormat) {
+        try {
+          const result = await this.runLlmTask(task, stream, signal);
+          return {
+            taskId: task.id,
+            status: result.error ? 'failed' : 'completed',
+            output: result.output,
+            error: result.error,
+            startedAt,
+            completedAt: new Date().toISOString(),
+            metrics: result.metrics,
+          };
+        } catch (err) {
+          // Fall through to runViaGateway() agent mode
+          console.warn('[openclaw] llm-task failed, falling back to agent mode:', err);
+        }
+      }
+
       stream.status('running', 0, 'Connecting to OpenClaw gateway');
       const sessionKey = `astro:task:${task.id}`;
       const result = await this.runViaGateway(task, stream, signal);
@@ -206,9 +225,11 @@ export class OpenClawAdapter implements ProviderAdapter {
       }
     }
 
-    // Use the preserved session key, or construct one from the original taskId (keyed by taskId)
+    // Use the preserved session key, or resolve from the provider sessionId.
+    // The sessionId may already be a valid session key (e.g. 'astro:task:...' or
+    // 'agent:main:astro:task:...'), so don't blindly wrap it in 'astro:task:'.
     const session = this.preservedSessions.get(taskId);
-    const sessionKey = session?.sessionKey || `astro:task:${sessionId}`;
+    const sessionKey = session?.sessionKey || this.resolveSessionKey(sessionId);
 
     this.activeTasks++;
     let ws: WebSocket | undefined;
@@ -272,6 +293,20 @@ export class OpenClawAdapter implements ProviderAdapter {
         this.preservedSessions.delete(key);
       }
     }
+  }
+
+  /**
+   * Resolve a provider session ID to a valid OpenClaw session key.
+   * The sessionId from the frontend may be:
+   *   - 'astro:task:{taskId}' (direct)
+   *   - 'agent:main:astro:task:{taskId}' (gateway-prefixed)
+   * Avoid double-wrapping by checking for existing prefixes.
+   */
+  private resolveSessionKey(sessionId: string): string {
+    if (sessionId.startsWith('astro:task:')) return sessionId;
+    const stripped = sessionId.replace(/^agent:main:/, '');
+    if (stripped.startsWith('astro:task:')) return stripped;
+    return `astro:task:${sessionId}`;
   }
 
   // ─── Gateway Config Discovery ────────────────────────────────────
@@ -650,9 +685,18 @@ export class OpenClawAdapter implements ProviderAdapter {
       });
 
       // Build the prompt
-      const effectivePrompt = task.systemPrompt
+      let effectivePrompt = task.systemPrompt
         ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
         : task.prompt;
+
+      // Prepend conversation history if available (fallback for multi-turn when
+      // session resume isn't used or preservedSessions lookup failed)
+      if (task.messages && task.messages.length > 0) {
+        const conversationContext = task.messages
+          .map(m => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
+          .join('\n\n');
+        effectivePrompt = `${conversationContext}\n\nHuman: ${effectivePrompt}`;
+      }
 
       // Send chat.send
       try {
@@ -807,5 +851,98 @@ export class OpenClawAdapter implements ProviderAdapter {
         finish(`Failed to send chat.send: ${err instanceof Error ? err.message : String(err)}`);
       }
     });
+  }
+
+  // ─── LLM Task (Structured JSON via HTTP) ──────────────────────────
+
+  /**
+   * Use the Gateway's HTTP `POST /tools/invoke` endpoint for structured JSON
+   * plan generation. The `llm-task` tool supports JSON Schema validation,
+   * guaranteeing well-formed output without prompt engineering.
+   */
+  private async runLlmTask(
+    task: Task,
+    stream: TaskOutputStream,
+    signal: AbortSignal,
+  ): Promise<{
+    output: string;
+    error?: string;
+    metrics?: TaskResult['metrics'];
+  }> {
+    const config = this.gatewayConfig;
+    if (!config) {
+      throw new Error('Gateway config not available');
+    }
+
+    // Derive HTTP URL from the WebSocket URL (same host:port)
+    const httpUrl = config.url.replace(/^ws:\/\//, 'http://').replace(/^wss:\/\//, 'https://');
+    const invokeUrl = `${httpUrl}/tools/invoke`;
+
+    const effectivePrompt = task.systemPrompt
+      ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
+      : task.prompt;
+
+    stream.status('running', 0, 'Generating structured plan via llm-task');
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (config.token) {
+      headers['Authorization'] = `Bearer ${config.token}`;
+    }
+
+    const body = JSON.stringify({
+      tool: 'llm-task',
+      action: 'json',
+      args: {
+        prompt: effectivePrompt,
+        schema: task.outputFormat!.schema,
+        ...(task.model ? { model: task.model } : {}),
+      },
+    });
+
+    const response = await fetch(invokeUrl, {
+      method: 'POST',
+      headers,
+      body,
+      signal,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text().catch(() => 'unknown error');
+      throw new Error(`llm-task HTTP ${response.status}: ${errorText}`);
+    }
+
+    const result = await response.json() as {
+      ok?: boolean;
+      result?: unknown;
+      error?: string;
+      usage?: { input_tokens?: number; output_tokens?: number };
+      cost_usd?: number;
+      model?: string;
+    };
+
+    if (result.error || result.ok === false) {
+      return {
+        output: '',
+        error: result.error || 'llm-task returned failure',
+      };
+    }
+
+    const outputJson = typeof result.result === 'string'
+      ? result.result
+      : JSON.stringify(result.result);
+
+    stream.text(outputJson);
+
+    return {
+      output: outputJson,
+      metrics: (result.usage || result.cost_usd !== undefined) ? {
+        inputTokens: result.usage?.input_tokens,
+        outputTokens: result.usage?.output_tokens,
+        totalCost: result.cost_usd,
+        model: result.model,
+      } : undefined,
+    };
   }
 }

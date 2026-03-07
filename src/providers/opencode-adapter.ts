@@ -257,9 +257,17 @@ export class OpenCodeAdapter implements ProviderAdapter {
     signal: AbortSignal
   ): Promise<{ exitCode: number; output: string; error?: string; artifacts?: TaskArtifact[] }> {
     const model = task.model || this.configModel;
-    const effectivePrompt = task.systemPrompt
+    let effectivePrompt = task.systemPrompt
       ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
       : task.prompt;
+
+    // Prepend conversation history if available (fallback for multi-turn)
+    if (task.messages && task.messages.length > 0) {
+      const conversationContext = task.messages
+        .map(m => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
+        .join('\n\n');
+      effectivePrompt = `${conversationContext}\n\nHuman: ${effectivePrompt}`;
+    }
 
     const args = [
       'run',
