@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { applyWorktreeInclude } from './worktree-include.js';
 import { runSetupScript } from './worktree-setup.js';
+import { repoHasRemote } from './workdir-safety.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,6 +36,10 @@ export interface WorktreeSetup {
   baseBranch: string;
   /** Git SHA of the start point before this task's work */
   commitBeforeSha?: string;
+  /** Absolute path to the git root directory (for local merge operations) */
+  gitRoot: string;
+  /** Project accumulation branch name, if applicable (e.g., 'astro/7b19a9') */
+  projectBranch?: string;
   cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
 }
 
@@ -100,15 +105,18 @@ export async function createWorktree(
   // failures when re-executing a task whose previous branch was already pushed
   await deleteRemoteBranch(gitRoot, taskBranchName);
 
-  // Fetch latest so we branch from up-to-date origin
-  try {
-    await execFileAsync(
-      'git',
-      ['-C', gitRoot, '-c', 'core.hooksPath=/dev/null', 'fetch', 'origin'],
-      { env: withGitEnv(), timeout: 30_000 }
-    );
-  } catch {
-    // Non-fatal: proceed with potentially stale refs
+  // Fetch latest so we branch from up-to-date origin (skip for local-only repos)
+  const hasRemote = await repoHasRemote(gitRoot);
+  if (hasRemote) {
+    try {
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, '-c', 'core.hooksPath=/dev/null', 'fetch', 'origin'],
+        { env: withGitEnv(), timeout: 30_000 }
+      );
+    } catch {
+      // Non-fatal: proceed with potentially stale refs
+    }
   }
 
   // Detect the repo's default branch (main/master/develop) for fallback
@@ -215,6 +223,8 @@ export async function createWorktree(
     branchName: taskBranchName,
     baseBranch: effectiveBase,
     commitBeforeSha,
+    gitRoot,
+    projectBranch: projectBranchName,
     cleanup: async (options?: { keepBranch?: boolean }) => {
       await cleanupWorktree(gitRoot, worktreePath, taskBranchName, options?.keepBranch);
     },
@@ -276,8 +286,11 @@ export async function removeLingeringWorktrees(gitRoot: string, branchName: stri
 }
 
 /**
- * Ensure the project-level accumulation branch exists on origin.
- * If it doesn't exist, create it from origin/{defaultBranch} and push.
+ * Ensure the project-level accumulation branch exists.
+ *
+ * For repos WITH a remote: create on origin and push.
+ * For repos WITHOUT a remote: create locally only (no push).
+ *
  * Idempotent — safe to call on every task dispatch.
  *
  * Note: In practice, concurrent calls for the same project are prevented by
@@ -290,50 +303,70 @@ async function ensureProjectBranch(
   projectBranch: string,
   defaultBranch: string,
 ): Promise<void> {
-  // Check if the project branch already exists on origin
-  const remoteRef = `origin/${projectBranch}`;
-  if (await refExists(gitRoot, remoteRef)) {
-    console.log(`[worktree] Project branch ${projectBranch} exists on origin`);
-    return;
-  }
+  const hasRemote = await repoHasRemote(gitRoot);
 
-  // Check if it exists locally (e.g., created but not yet pushed)
-  if (await refExists(gitRoot, `refs/heads/${projectBranch}`)) {
-    console.log(`[worktree] Project branch ${projectBranch} exists locally, pushing...`);
+  if (hasRemote) {
+    // --- Remote mode: check origin, push if needed ---
+    const remoteRef = `origin/${projectBranch}`;
+    if (await refExists(gitRoot, remoteRef)) {
+      console.log(`[worktree] Project branch ${projectBranch} exists on origin`);
+      return;
+    }
+
+    if (await refExists(gitRoot, `refs/heads/${projectBranch}`)) {
+      console.log(`[worktree] Project branch ${projectBranch} exists locally, pushing...`);
+      try {
+        await execFileAsync(
+          'git',
+          ['-C', gitRoot, 'push', '-u', 'origin', projectBranch],
+          { env: withGitEnv(), timeout: 30_000 }
+        );
+      } catch {
+        // Non-fatal: the branch exists locally even if push fails
+      }
+      return;
+    }
+
+    const defaultRemoteRef = `origin/${defaultBranch}`;
+    const hasDefaultRemote = await refExists(gitRoot, defaultRemoteRef);
+    const startPoint = hasDefaultRemote ? defaultRemoteRef : defaultBranch;
+
+    console.log(`[worktree] Creating project branch ${projectBranch} from ${startPoint}`);
     try {
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, 'branch', projectBranch, startPoint],
+        { env: withGitEnv(), timeout: 10_000 }
+      );
       await execFileAsync(
         'git',
         ['-C', gitRoot, 'push', '-u', 'origin', projectBranch],
         { env: withGitEnv(), timeout: 30_000 }
       );
-    } catch {
-      // Non-fatal: the branch exists locally even if push fails
+      console.log(`[worktree] Created and pushed project branch ${projectBranch}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[worktree] Failed to create/push project branch: ${msg}`);
     }
-    return;
-  }
+  } else {
+    // --- Local mode (no remote): create branch locally only ---
+    if (await refExists(gitRoot, `refs/heads/${projectBranch}`)) {
+      console.log(`[worktree] Project branch ${projectBranch} exists locally (no remote)`);
+      return;
+    }
 
-  // Create from origin/{defaultBranch} (or local defaultBranch as fallback)
-  const defaultRemoteRef = `origin/${defaultBranch}`;
-  const hasDefaultRemote = await refExists(gitRoot, defaultRemoteRef);
-  const startPoint = hasDefaultRemote ? defaultRemoteRef : defaultBranch;
-
-  console.log(`[worktree] Creating project branch ${projectBranch} from ${startPoint}`);
-  try {
-    await execFileAsync(
-      'git',
-      ['-C', gitRoot, 'branch', projectBranch, startPoint],
-      { env: withGitEnv(), timeout: 10_000 }
-    );
-    await execFileAsync(
-      'git',
-      ['-C', gitRoot, 'push', '-u', 'origin', projectBranch],
-      { env: withGitEnv(), timeout: 30_000 }
-    );
-    console.log(`[worktree] Created and pushed project branch ${projectBranch}`);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[worktree] Failed to create/push project branch: ${msg}`);
-    // Non-fatal: worktree creation will still work from whatever ref is available
+    console.log(`[worktree] Creating local project branch ${projectBranch} from ${defaultBranch}`);
+    try {
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, 'branch', projectBranch, defaultBranch],
+        { env: withGitEnv(), timeout: 10_000 }
+      );
+      console.log(`[worktree] Created local project branch ${projectBranch}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`Failed to create local project branch ${projectBranch}: ${msg}`);
+    }
   }
 }
 
@@ -357,7 +390,7 @@ async function deleteRemoteBranch(gitRoot: string, branchName: string): Promise<
 
 /**
  * Detect the default branch for the repo.
- * Priority: .astro/config.json baseBranch → origin/HEAD → origin/main or master → 'main'.
+ * Priority: .astro/config.json baseBranch → origin/HEAD → origin/main or master → local HEAD → 'main'.
  */
 async function getDefaultBranch(gitRoot: string): Promise<string> {
   // 1. Check .astro/config.json for user-configured baseBranch
@@ -366,16 +399,28 @@ async function getDefaultBranch(gitRoot: string): Promise<string> {
     const content = await readFile(configPath, 'utf-8');
     const config = JSON.parse(content);
     if (config.baseBranch && typeof config.baseBranch === 'string') {
-      // Validate it exists as a remote branch
+      // Validate it exists (remote or local)
+      const remoteRef = `refs/remotes/origin/${config.baseBranch}`;
+      const localRef = `refs/heads/${config.baseBranch}`;
       try {
         await execFileAsync(
           'git',
-          ['-C', gitRoot, 'rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}`],
+          ['-C', gitRoot, 'rev-parse', '--verify', remoteRef],
           { env: withGitEnv(), timeout: 5_000 }
         );
         return config.baseBranch;
       } catch {
-        // Branch doesn't exist on remote, fall through to auto-detection
+        // No remote ref — check local
+        try {
+          await execFileAsync(
+            'git',
+            ['-C', gitRoot, 'rev-parse', '--verify', localRef],
+            { env: withGitEnv(), timeout: 5_000 }
+          );
+          return config.baseBranch;
+        } catch {
+          // Branch doesn't exist anywhere, fall through to auto-detection
+        }
       }
     }
   } catch {
@@ -405,6 +450,33 @@ async function getDefaultBranch(gitRoot: string): Promise<string> {
     const branches = stdout.trim().split('\n').map((b) => b.trim());
     if (branches.includes('origin/main')) return 'main';
     if (branches.includes('origin/master')) return 'master';
+  } catch {
+    // Fallback
+  }
+
+  // 4. No remote — check local branches for main/master
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', gitRoot, 'branch', '--list', 'main', 'master'],
+      { env: withGitEnv(), timeout: 5_000 }
+    );
+    const branches = stdout.trim().split('\n').map((b) => b.replace(/^\*?\s*/, '').trim());
+    if (branches.includes('main')) return 'main';
+    if (branches.includes('master')) return 'master';
+  } catch {
+    // Fallback
+  }
+
+  // 5. Last resort: use HEAD's current branch name
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', gitRoot, 'rev-parse', '--abbrev-ref', 'HEAD'],
+      { env: withGitEnv(), timeout: 5_000 }
+    );
+    const branch = stdout.trim();
+    if (branch && branch !== 'HEAD') return branch;
   } catch {
     // Fallback
   }

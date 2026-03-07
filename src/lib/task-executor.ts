@@ -19,6 +19,7 @@ import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree } from './worktree.js';
 import { BranchLockManager, type BranchLockHandle } from './branch-lock.js';
 import { pushAndCreatePR } from './git-pr.js';
+import { localMergeIntoProjectBranch } from './local-merge.js';
 import {
   checkWorkdirSafety,
   isGitAvailable,
@@ -1083,10 +1084,42 @@ export class TaskExecutor {
             // Copy mode: worktree preserved, no git operations
             console.log(`[executor] Task ${task.id}: copy mode, worktree preserved at ${prepared.workingDirectory}`);
           } else if (deliveryMode === 'branch') {
-            // Auto-commit but don't push — branch stays local
-            console.log(`[executor] Task ${task.id}: branch mode, committing locally`);
+            // Branch mode: commit locally, merge into project branch if available
             result.branchName = prepared.branchName;
             keepBranch = true;
+
+            if (prepared.gitRoot && prepared.projectBranch && prepared.branchName) {
+              // Local merge: squash-merge task branch into project accumulation branch
+              this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Merging into project branch...');
+              console.log(`[executor] Task ${task.id}: branch mode, merging ${prepared.branchName} → ${prepared.projectBranch}`);
+              const mergeResult = await localMergeIntoProjectBranch(
+                prepared.gitRoot,
+                prepared.branchName,
+                prepared.projectBranch,
+                `[${task.shortProjectId ?? 'astro'}/${task.shortNodeId ?? task.id.slice(0, 6)}] ${rawTitle}`,
+              );
+              if (mergeResult.merged) {
+                result.deliveryStatus = 'success';
+                result.commitAfterSha = mergeResult.commitSha;
+                console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
+              } else if (mergeResult.conflict) {
+                result.deliveryStatus = 'failed';
+                result.deliveryError = `Merge conflict in: ${mergeResult.conflictFiles?.join(', ')}`;
+                console.error(`[executor] Task ${task.id}: merge conflict — ${mergeResult.conflictFiles?.join(', ')}`);
+              } else if (mergeResult.error) {
+                result.deliveryStatus = 'failed';
+                result.deliveryError = mergeResult.error;
+                console.error(`[executor] Task ${task.id}: merge failed — ${mergeResult.error}`);
+              } else {
+                // No changes to merge
+                result.deliveryStatus = 'skipped';
+                console.log(`[executor] Task ${task.id}: no changes to merge`);
+              }
+            } else if (prepared.projectBranch) {
+              console.warn(`[executor] Task ${task.id}: projectBranch=${prepared.projectBranch} but gitRoot=${prepared.gitRoot}, branchName=${prepared.branchName} — skipping local merge`);
+            } else {
+              console.log(`[executor] Task ${task.id}: branch mode, committing locally (no project branch)`);
+            }
           } else if (deliveryMode === 'push') {
             // Push branch to remote, but don't create a PR — user creates PR manually
             this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Pushing branch...');
@@ -1259,6 +1292,8 @@ export class TaskExecutor {
     branchName?: string;
     baseBranch?: string;
     commitBeforeSha?: string;
+    gitRoot?: string;
+    projectBranch?: string;
     cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
   }> {
     // Per-task explicit opt-out: user consciously chose to skip worktree
