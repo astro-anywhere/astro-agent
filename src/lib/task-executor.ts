@@ -18,7 +18,7 @@ import { OpenCodeAdapter } from '../providers/opencode-adapter.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree } from './worktree.js';
 import { BranchLockManager } from './branch-lock.js';
-import { pushAndCreatePR } from './git-pr.js';
+import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha } from './git-pr.js';
 import { localMergeIntoProjectBranch } from './local-merge.js';
 import {
   checkWorkdirSafety,
@@ -32,6 +32,121 @@ import {
 } from './workdir-safety.js';
 
 const execFileAsync = promisify(execFileCb);
+
+/**
+ * Sanitize a git ref name for embedding in prompt shell commands.
+ * Strips characters that could enable command injection (;, $, `, |, &, etc.)
+ * while preserving valid git ref characters (alphanumeric, /, -, _, .).
+ */
+function sanitizeGitRef(ref: string): string {
+  return ref.replace(/[^a-zA-Z0-9/_.\-]/g, '');
+}
+
+/**
+ * Build a prompt instructing the agent to resolve merge conflicts.
+ * The agent's worktree has the task branch checked out; it needs to
+ * rebase onto the project branch to resolve conflicts, then commit.
+ */
+function buildConflictResolutionPrompt(
+  conflictFiles: string[],
+  projectBranch: string,
+  attempt: number,
+  maxAttempts: number,
+): string {
+  const safeBranch = sanitizeGitRef(projectBranch);
+  const fileList = conflictFiles.map(f => `- ${f}`).join('\n');
+  return `MERGE CONFLICT DETECTED (attempt ${attempt}/${maxAttempts})
+
+Your task branch cannot be cleanly merged into the project branch because
+parallel tasks have modified overlapping files since you branched.
+
+Conflicting files:
+${fileList}
+
+The project branch is: ${safeBranch}
+
+Please resolve this:
+1. Fetch the latest project branch: git fetch origin 2>/dev/null; git fetch . ${safeBranch}:${safeBranch} 2>/dev/null || true
+2. Rebase onto the project branch: git rebase ${safeBranch}
+3. For each conflict, open the file, resolve the conflict markers (<<<<<<< / ======= / >>>>>>>), keeping the correct combination of both changes
+4. Stage resolved files: git add <resolved-files>
+5. Continue the rebase: git rebase --continue
+6. Verify your changes still work (run a quick build/test if applicable)
+
+IMPORTANT: Do NOT create a merge commit. Use rebase so the merge will be clean.
+After you finish resolving, I will automatically retry the merge.`;
+}
+
+/**
+ * Build a prompt for PR mode conflict resolution.
+ * Similar to local mode, but the agent must also force-push after rebasing
+ * because the merge happens via GitHub API (gh pr merge), not locally.
+ */
+function buildPRConflictResolutionPrompt(
+  projectBranch: string,
+  branchName: string,
+  attempt: number,
+  maxAttempts: number,
+): string {
+  const safeBranch = sanitizeGitRef(projectBranch);
+  const safeTaskBranch = sanitizeGitRef(branchName);
+  return `MERGE CONFLICT DETECTED ON GITHUB (attempt ${attempt}/${maxAttempts})
+
+Your pull request cannot be automatically merged into the project branch because
+parallel tasks have modified overlapping files.
+
+Your task branch is: ${safeTaskBranch}
+The target branch is: ${safeBranch}
+
+Please resolve this:
+1. Fetch the latest target branch: git fetch origin ${safeBranch}
+2. Rebase onto the target branch: git rebase origin/${safeBranch}
+3. For each conflict, open the file, resolve the conflict markers (<<<<<<< / ======= / >>>>>>>), keeping the correct combination of both changes
+4. Stage resolved files: git add <resolved-files>
+5. Continue the rebase: git rebase --continue
+6. Verify your changes still work (run a quick build/test if applicable)
+7. Force-push the rebased branch: git push --force-with-lease origin ${safeTaskBranch}
+
+IMPORTANT: Do NOT create a merge commit. Use rebase so the history is clean.
+After you force-push, I will automatically retry the GitHub merge.`;
+}
+
+/**
+ * Best-effort pre-merge rebase: if the project branch has moved forward
+ * (another task merged), rebase the task branch onto the latest tip before
+ * attempting the squash merge. This avoids conflicts in the common case
+ * where changes don't overlap. On any failure, silently aborts — the
+ * existing merge retry loop handles real conflicts.
+ */
+async function tryPreMergeRebase(
+  workdir: string,
+  targetBranch: string,
+  isRemote: boolean,
+): Promise<{ rebased: boolean; skipped?: boolean }> {
+  try {
+    const rebaseTarget = isRemote ? `origin/${targetBranch}` : targetBranch;
+
+    if (isRemote) {
+      await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: workdir, timeout: 30_000 });
+    }
+
+    // Check if rebase is needed (target branch moved since we branched)
+    const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', 'HEAD', rebaseTarget], { cwd: workdir });
+    const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: workdir });
+
+    if (mergeBase.trim() === targetTip.trim()) {
+      return { rebased: false, skipped: true }; // Already up to date
+    }
+
+    // Try automatic rebase — timeout after 60s (should be fast for non-conflicting changes)
+    await execFileAsync('git', ['rebase', rebaseTarget], { cwd: workdir, timeout: 60_000 });
+    return { rebased: true };
+  } catch {
+    // Abort on failure — existing retry loop will handle conflicts
+    await execFileAsync('git', ['rebase', '--abort'], { cwd: workdir }).catch(() => {});
+    return { rebased: false };
+  }
+}
 
 interface RunningTask {
   task: Task;
@@ -1044,48 +1159,107 @@ export class TaskExecutor {
             // the case where the project branch moved forward (another task merged first)
             // because it computes the diff from the merge-base and applies it on the
             // current project branch tip.
+            //
+            // On conflict: if the provider supports session resume (Claude SDK), we
+            // resume the agent session to let it resolve the conflict, then retry.
             result.branchName = prepared.branchName;
             keepBranch = true;
 
             if (prepared.gitRoot && prepared.projectBranch && prepared.branchName) {
-              // Acquire merge lock — serializes only the squash-merge phase, not execution.
+              // Pre-merge rebase: if the project branch moved forward (another task
+              // merged), rebase our task branch first. Avoids conflicts when changes
+              // don't overlap, and saves one retry cycle when they do.
+              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.projectBranch, false);
+              if (preRebase.rebased) {
+                console.log(`[executor] Task ${task.id}: pre-merge rebase onto ${prepared.projectBranch} succeeded`);
+              } else if (!preRebase.skipped) {
+                console.log(`[executor] Task ${task.id}: pre-merge rebase had conflicts, falling back to merge retry loop`);
+              }
+
               const mergeLockKey = BranchLockManager.computeLockKey(
                 prepared.gitRoot,
                 task.shortProjectId,
                 task.shortNodeId,
                 task.id,
               );
-              this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Waiting for merge lock...');
-              console.log(`[executor] Task ${task.id}: branch mode, acquiring merge lock for ${prepared.branchName} → ${prepared.projectBranch}`);
-              const mergeLock = await this.branchLockManager.acquire(mergeLockKey, task.id);
-              try {
-                this.wsClient.sendTaskStatus(task.id, 'running', 96, 'Merging into project branch...');
-                const mergeResult = await localMergeIntoProjectBranch(
-                  prepared.gitRoot,
-                  prepared.branchName,
-                  prepared.projectBranch,
-                  `[${task.shortProjectId ?? 'astro'}/${task.shortNodeId ?? task.id.slice(0, 6)}] ${rawTitle}`,
-                );
+              const commitMessage = `[${task.shortProjectId ?? 'astro'}/${task.shortNodeId ?? task.id.slice(0, 6)}] ${rawTitle}`;
+              const MAX_MERGE_ATTEMPTS = 3;
+
+              for (let attempt = 1; attempt <= MAX_MERGE_ATTEMPTS; attempt++) {
+                // Acquire merge lock — held only during the squash-merge (seconds).
+                this.wsClient.sendTaskStatus(task.id, 'running', 95, attempt === 1 ? 'Waiting for merge lock...' : `Retrying merge (attempt ${attempt}/${MAX_MERGE_ATTEMPTS})...`);
+                const mergeLock = await this.branchLockManager.acquire(mergeLockKey, task.id);
+                let mergeResult;
+                try {
+                  this.wsClient.sendTaskStatus(task.id, 'running', 96, 'Merging into project branch...');
+                  mergeResult = await localMergeIntoProjectBranch(
+                    prepared.gitRoot,
+                    prepared.branchName,
+                    prepared.projectBranch,
+                    commitMessage,
+                  );
+                } finally {
+                  mergeLock.release();
+                  console.log(`[executor] Task ${task.id}: merge lock released (attempt ${attempt})`);
+                }
+
                 if (mergeResult.merged) {
                   result.deliveryStatus = 'success';
                   result.commitAfterSha = mergeResult.commitSha;
                   console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
+                  break;
                 } else if (mergeResult.conflict) {
+                  // Can the agent resolve this? Check if adapter supports session resume.
+                  // Get context once; isResumableAdapter narrows adapter type for resumeTask().
+                  const taskContext = this.isResumableAdapter(adapter)
+                    ? adapter.getTaskContext(task.id)
+                    : null;
+
+                  if (taskContext?.sessionId && this.isResumableAdapter(adapter) && attempt < MAX_MERGE_ATTEMPTS) {
+                    const conflictFiles = mergeResult.conflictFiles?.join(', ') ?? 'unknown files';
+                    console.log(`[executor] Task ${task.id}: merge conflict (attempt ${attempt}), resuming ${adapter.name} to resolve: ${conflictFiles}`);
+                    this.wsClient.sendTaskStatus(task.id, 'running', 97, `Merge conflict — agent resolving (attempt ${attempt})...`);
+
+                    // Resume agent session with conflict resolution instructions.
+                    // No merge lock held during this — agent may take minutes.
+                    try {
+                      await adapter.resumeTask(
+                        task.id,
+                        buildConflictResolutionPrompt(mergeResult.conflictFiles ?? [], prepared.projectBranch, attempt, MAX_MERGE_ATTEMPTS),
+                        prepared.workingDirectory,
+                        taskContext.sessionId,
+                        stream,
+                        abortController.signal,
+                      );
+                      console.log(`[executor] Task ${task.id}: agent conflict resolution session completed (attempt ${attempt})`);
+                    } catch (resumeErr) {
+                      console.error(`[executor] Task ${task.id}: agent conflict resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`);
+                      result.deliveryStatus = 'failed';
+                      result.deliveryError = `Merge conflict in: ${mergeResult.conflictFiles?.join(', ') ?? 'unknown files'}. Agent resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`;
+                      break;
+                    }
+                    // Loop continues — will retry merge
+                    continue;
+                  }
+
+                  // No resume capability or final attempt — fail
                   result.deliveryStatus = 'failed';
-                  result.deliveryError = `Merge conflict in: ${mergeResult.conflictFiles?.join(', ')}`;
-                  console.error(`[executor] Task ${task.id}: merge conflict — ${mergeResult.conflictFiles?.join(', ')}`);
+                  result.deliveryError = attempt > 1
+                    ? `Merge conflict unresolved after ${attempt} attempts: ${mergeResult.conflictFiles?.join(', ')}`
+                    : `Merge conflict in: ${mergeResult.conflictFiles?.join(', ')}`;
+                  console.error(`[executor] Task ${task.id}: merge conflict — ${result.deliveryError}`);
+                  break;
                 } else if (mergeResult.error) {
                   result.deliveryStatus = 'failed';
                   result.deliveryError = mergeResult.error;
                   console.error(`[executor] Task ${task.id}: merge failed — ${mergeResult.error}`);
+                  break;
                 } else {
                   // No changes to merge
                   result.deliveryStatus = 'skipped';
                   console.log(`[executor] Task ${task.id}: no changes to merge`);
+                  break;
                 }
-              } finally {
-                mergeLock.release();
-                console.log(`[executor] Task ${task.id}: merge lock released`);
               }
             } else if (prepared.projectBranch) {
               console.warn(`[executor] Task ${task.id}: projectBranch=${prepared.projectBranch} but gitRoot=${prepared.gitRoot}, branchName=${prepared.branchName} — skipping local merge`);
@@ -1119,6 +1293,19 @@ export class TaskExecutor {
             }
           } else {
             // 'pr' — push + create PR, auto-merge into project branch if applicable
+            this.wsClient.sendTaskStatus(task.id, 'running', 94, 'Rebasing before push...');
+            // Pre-push rebase: if the target branch moved forward, rebase our task
+            // branch so the PR will be cleanly mergeable. The branch hasn't been
+            // pushed yet, so no force-push is needed.
+            if (prepared.baseBranch) {
+              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.baseBranch, true);
+              if (preRebase.rebased) {
+                console.log(`[executor] Task ${task.id}: pre-push rebase onto origin/${prepared.baseBranch} succeeded`);
+              } else if (!preRebase.skipped) {
+                console.log(`[executor] Task ${task.id}: pre-push rebase had conflicts, proceeding without rebase`);
+              }
+            }
+
             this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Creating pull request...');
             console.log(`[executor] Task ${task.id}: pr mode, attempting PR creation for branch ${prepared.branchName}`);
             const hasProjectBranch = !!task.projectBranch;
@@ -1138,12 +1325,71 @@ export class TaskExecutor {
               result.commitBeforeSha = prResult.commitBeforeSha;
               result.commitAfterSha = prResult.commitAfterSha;
               keepBranch = true;
+
               if (prResult.autoMergeFailed) {
-                // PR was created but auto-merge into project branch failed —
-                // subsequent tasks won't see this task's changes
-                result.deliveryStatus = 'failed';
-                result.deliveryError = 'PR created but auto-merge into project branch failed';
-                console.error(`[executor] Task ${task.id}: PR created at ${prResult.prUrl} but auto-merge failed`);
+                // PR was created but auto-merge failed (likely conflict).
+                // If the adapter supports session resume, ask the agent to
+                // rebase and force-push, then retry the GitHub merge.
+                const MAX_PR_MERGE_ATTEMPTS = 3;
+                let prMergeResolved = false;
+
+                const prTaskContext = this.isResumableAdapter(adapter)
+                  ? adapter.getTaskContext(task.id)
+                  : null;
+
+                if (prTaskContext?.sessionId && this.isResumableAdapter(adapter) && hasProjectBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
+                  for (let attempt = 1; attempt <= MAX_PR_MERGE_ATTEMPTS; attempt++) {
+                    console.log(`[executor] Task ${task.id}: PR auto-merge failed (attempt ${attempt}), resuming ${adapter.name} to resolve`);
+                    this.wsClient.sendTaskStatus(task.id, 'running', 97, `PR merge conflict — agent resolving (attempt ${attempt})...`);
+
+                    // Resume agent session — agent rebases and force-pushes.
+                    try {
+                      await adapter.resumeTask(
+                        task.id,
+                        buildPRConflictResolutionPrompt(prepared.baseBranch, prepared.branchName, attempt, MAX_PR_MERGE_ATTEMPTS),
+                        prepared.workingDirectory,
+                        prTaskContext.sessionId,
+                        stream,
+                        abortController.signal,
+                      );
+                      console.log(`[executor] Task ${task.id}: agent PR conflict resolution completed (attempt ${attempt})`);
+                    } catch (resumeErr) {
+                      console.error(`[executor] Task ${task.id}: agent PR conflict resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`);
+                      result.deliveryStatus = 'failed';
+                      result.deliveryError = `PR created but auto-merge failed. Agent resolution failed: ${resumeErr instanceof Error ? resumeErr.message : resumeErr}`;
+                      break;
+                    }
+
+                    // Retry the GitHub merge
+                    this.wsClient.sendTaskStatus(task.id, 'running', 98, `Retrying PR merge (attempt ${attempt})...`);
+                    const retryMerge = await mergePullRequest(prepared.workingDirectory, prResult.prNumber, {
+                      method: 'squash',
+                      deleteBranch: true,
+                    });
+
+                    if (retryMerge.ok) {
+                      result.commitAfterSha = await getRemoteBranchSha(prepared.gitRoot, prepared.baseBranch) ?? undefined;
+                      result.deliveryStatus = 'success';
+                      prMergeResolved = true;
+                      console.log(`[executor] Task ${task.id}: PR merged on retry (attempt ${attempt}), commitAfterSha=${result.commitAfterSha}`);
+                      break;
+                    }
+
+                    if (attempt === MAX_PR_MERGE_ATTEMPTS) {
+                      result.deliveryStatus = 'failed';
+                      result.deliveryError = `PR created but auto-merge failed after ${attempt} attempts: ${retryMerge.error ?? 'merge conflict'}`;
+                      console.error(`[executor] Task ${task.id}: PR merge failed after ${attempt} attempts`);
+                    }
+                    // Loop continues — agent will try again
+                  }
+                }
+
+                if (!prMergeResolved && !result.deliveryError) {
+                  // No resume capability or not applicable — original failure
+                  result.deliveryStatus = 'failed';
+                  result.deliveryError = 'PR created but auto-merge into project branch failed';
+                  console.error(`[executor] Task ${task.id}: PR created at ${prResult.prUrl} but auto-merge failed (no resume capability)`);
+                }
               } else {
                 result.deliveryStatus = 'success';
                 console.log(`[executor] Task ${task.id}: PR created at ${prResult.prUrl}`);
