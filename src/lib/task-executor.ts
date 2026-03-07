@@ -1198,23 +1198,24 @@ export class TaskExecutor {
                   break;
                 } else if (mergeResult.conflict) {
                   // Can the agent resolve this? Check if adapter supports session resume.
-                  const resumable = this.isResumableAdapter(adapter)
-                    && !!adapter.getTaskContext(task.id)?.sessionId;
+                  // Get context once; isResumableAdapter narrows adapter type for resumeTask().
+                  const taskContext = this.isResumableAdapter(adapter)
+                    ? adapter.getTaskContext(task.id)
+                    : null;
 
-                  if (resumable && attempt < MAX_MERGE_ATTEMPTS) {
+                  if (taskContext?.sessionId && this.isResumableAdapter(adapter) && attempt < MAX_MERGE_ATTEMPTS) {
                     const conflictFiles = mergeResult.conflictFiles?.join(', ') ?? 'unknown files';
                     console.log(`[executor] Task ${task.id}: merge conflict (attempt ${attempt}), resuming ${adapter.name} to resolve: ${conflictFiles}`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `Merge conflict — agent resolving (attempt ${attempt})...`);
 
                     // Resume agent session with conflict resolution instructions.
                     // No merge lock held during this — agent may take minutes.
-                    const context = adapter.getTaskContext(task.id)!;
                     try {
                       await adapter.resumeTask(
                         task.id,
                         buildConflictResolutionPrompt(mergeResult.conflictFiles ?? [], prepared.projectBranch, attempt, MAX_MERGE_ATTEMPTS),
                         prepared.workingDirectory,
-                        context.sessionId,
+                        taskContext.sessionId,
                         stream,
                         abortController.signal,
                       );
@@ -1320,22 +1321,22 @@ export class TaskExecutor {
                 const MAX_PR_MERGE_ATTEMPTS = 3;
                 let prMergeResolved = false;
 
-                const resumable = this.isResumableAdapter(adapter)
-                  && !!adapter.getTaskContext(task.id)?.sessionId;
+                const prTaskContext = this.isResumableAdapter(adapter)
+                  ? adapter.getTaskContext(task.id)
+                  : null;
 
-                if (resumable && hasProjectBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
+                if (prTaskContext?.sessionId && this.isResumableAdapter(adapter) && hasProjectBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
                   for (let attempt = 1; attempt <= MAX_PR_MERGE_ATTEMPTS; attempt++) {
                     console.log(`[executor] Task ${task.id}: PR auto-merge failed (attempt ${attempt}), resuming ${adapter.name} to resolve`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `PR merge conflict — agent resolving (attempt ${attempt})...`);
 
                     // Resume agent session — agent rebases and force-pushes.
-                    const context = adapter.getTaskContext(task.id)!;
                     try {
                       await adapter.resumeTask(
                         task.id,
                         buildPRConflictResolutionPrompt(prepared.baseBranch, prepared.branchName, attempt, MAX_PR_MERGE_ATTEMPTS),
                         prepared.workingDirectory,
-                        context.sessionId,
+                        prTaskContext.sessionId,
                         stream,
                         abortController.signal,
                       );
