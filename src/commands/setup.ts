@@ -90,6 +90,56 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
     detectedProviders = [];
   }
 
+  // Step 2b: Detect GitHub CLI (gh) — needed for PR delivery mode
+  const ghSpinner = ora('Checking GitHub CLI (gh)...').start();
+  let ghAvailable = false;
+  try {
+    const { isGhAvailable } = await import('../lib/git-pr.js');
+    // First check: is gh installed at all?
+    let ghInstalled = false;
+    try {
+      await execFile('which', ['gh'], { timeout: 5_000 });
+      ghInstalled = true;
+    } catch { /* not in PATH */ }
+
+    if (ghInstalled) {
+      // gh exists — check if authenticated
+      ghAvailable = await isGhAvailable();
+      if (ghAvailable) {
+        ghSpinner.succeed('GitHub CLI (gh) installed and authenticated');
+      } else {
+        ghSpinner.warn('GitHub CLI (gh) installed but not authenticated');
+        console.log(chalk.yellow('  Run `gh auth login` to also create PRs automatically'));
+        console.log(chalk.dim('  Astro works without it — tasks will merge branches locally'));
+      }
+    } else {
+      ghSpinner.warn('GitHub CLI (gh) not installed');
+      // macOS: attempt auto-install via brew
+      if (process.platform === 'darwin') {
+        console.log(chalk.yellow('  Attempting to install gh via Homebrew...'));
+        const installed = await tryInstallGh(verbose);
+        if (installed) {
+          ghAvailable = await isGhAvailable();
+          if (ghAvailable) {
+            console.log(chalk.green('  ✓ gh installed and authenticated'));
+          } else {
+            console.log(chalk.green('  ✓ gh installed'));
+            console.log(chalk.yellow('  Run `gh auth login` to enable PR creation'));
+          }
+        } else {
+          showGhInstallRecommendation();
+        }
+      } else {
+        // Linux / other: manual install required (adding GitHub's apt repo is too fragile)
+        showGhInstallRecommendation();
+      }
+    }
+    console.log();
+  } catch {
+    ghSpinner.info('GitHub CLI check skipped');
+    console.log();
+  }
+
   // Step 3: Discover SSH hosts (only if --with-ssh-config flag is set)
   let discoveredHosts: DiscoveredHost[] = [];
   if (options.withSshConfig) {
@@ -799,6 +849,61 @@ async function selectHostsInteractive(hosts: DiscoveredHost[]): Promise<string[]
       // Keep cursor on the same host
       cursorIndex = hosts.findIndex((h) => h.name === choice);
     }
+  }
+}
+
+/**
+ * Attempt to install GitHub CLI (gh) via the system package manager.
+ * Returns true if the `gh` binary is available after the attempt.
+ */
+function showGhInstallRecommendation(): void {
+  const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
+  const W = 62;
+  const line = (s: string) => {
+    const visible = s.replace(/\x1b\[[0-9;]*m/g, '');
+    return `  ${chalk.cyan(B.v)} ${s}${' '.repeat(Math.max(0, W - visible.length))} ${chalk.cyan(B.v)}`;
+  };
+  console.log();
+  console.log(`  ${chalk.cyan(B.tl + B.h.repeat(W + 2) + B.tr)}`);
+  console.log(line(chalk.cyan.bold('GitHub CLI (gh) — optional, recommended')));
+  console.log(line(''));
+  console.log(line(`Astro works great without gh! It can edit files,`));
+  console.log(line(`run tasks, and merge branches — all locally.`));
+  console.log(line(''));
+  console.log(line(`To also create GitHub PRs automatically, install gh:`));
+  console.log(line(''));
+  console.log(line(`  ${chalk.white('macOS')}   ${chalk.dim('brew install gh')}`));
+  console.log(line(`  ${chalk.white('Linux')}   ${chalk.dim('https://cli.github.com')}`));
+  console.log(line(`  ${chalk.white('Then')}    ${chalk.dim('gh auth login')}`));
+  console.log(`  ${chalk.cyan(B.bl + B.h.repeat(W + 2) + B.br)}`);
+  console.log();
+}
+
+/**
+ * Attempt to install GitHub CLI (gh) via Homebrew on macOS.
+ * Linux distros require adding GitHub's apt/dnf repo first, which is too
+ * fragile to automate — we show manual instructions instead.
+ */
+async function tryInstallGh(verbose?: boolean): Promise<boolean> {
+  if (process.platform !== 'darwin') return false;
+
+  // macOS: try Homebrew
+  try {
+    await execFile('which', ['brew'], { timeout: 5_000 });
+  } catch {
+    if (verbose) console.log(chalk.dim('  Homebrew not found, skipping auto-install'));
+    return false;
+  }
+
+  try {
+    if (verbose) console.log(chalk.dim('  Trying: brew install gh'));
+    await execFile('brew', ['install', 'gh'], { timeout: 120_000 });
+    // Verify gh is now in PATH
+    await execFile('which', ['gh'], { timeout: 5_000 });
+    return true;
+  } catch (err) {
+    if (verbose) console.log(chalk.dim(`  brew install gh failed: ${err instanceof Error ? err.message : String(err)}`));
+    return false;
   }
 }
 
