@@ -4,14 +4,15 @@
  * Executes tasks using the Codex CLI
  */
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, execSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary } from '../types.js';
-import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream } from './base-adapter.js';
+import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream, getApprovalServerPath } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
+import { config } from '../lib/config.js';
 
 /** Metrics shape extracted from TaskResult (non-optional) */
 interface CodexMetrics {
@@ -55,14 +56,54 @@ export class CodexAdapter implements ProviderAdapter {
   /** Active sessions per task ID for steering/resume */
   private activeSessions = new Map<string, ActiveSession>();
 
+  /** Whether the approval MCP server has been registered with Codex */
+  private static mcpRegistered = false;
+
   async isAvailable(): Promise<boolean> {
     const provider = await getProvider('codex');
     if (provider?.available) {
       this.codexPath = provider.path;
       this.configModel = this.readConfigModel();
+      this.ensureApprovalMcpRegistered();
       return true;
     }
     return false;
+  }
+
+  /**
+   * Register the approval MCP server with Codex (one-time, idempotent).
+   * The server provides only `ask_user_question` for user approval flow.
+   * ASTRO_EXECUTION_ID is inherited from the Codex process env at runtime.
+   */
+  private ensureApprovalMcpRegistered(): void {
+    if (CodexAdapter.mcpRegistered) return;
+    try {
+      // Check if already registered
+      const existing = execSync(`${this.codexPath} mcp get astro-approval 2>&1`, {
+        encoding: 'utf-8',
+        timeout: 5000,
+      });
+      if (existing && !existing.includes('not found') && !existing.includes('error')) {
+        CodexAdapter.mcpRegistered = true;
+        console.log('[codex] Approval MCP server already registered');
+        return;
+      }
+    } catch {
+      // Not registered yet — proceed to add
+    }
+
+    try {
+      const serverPath = getApprovalServerPath();
+      const apiUrl = config.getConfig().apiUrl || 'http://localhost:3001';
+      execSync(
+        `${this.codexPath} mcp add astro-approval --env ASTRO_SERVER_URL=${apiUrl} -- node ${serverPath}`,
+        { encoding: 'utf-8', timeout: 10000 },
+      );
+      CodexAdapter.mcpRegistered = true;
+      console.log(`[codex] Registered approval MCP server: node ${serverPath}`);
+    } catch (err) {
+      console.warn('[codex] Failed to register approval MCP server:', err instanceof Error ? err.message : err);
+    }
   }
 
   /**
@@ -257,7 +298,10 @@ export class CodexAdapter implements ProviderAdapter {
       try {
         proc = spawn(this.codexPath!, args, {
           cwd: workingDirectory || undefined,
-          env: process.env,
+          env: {
+            ...process.env,
+            ASTRO_EXECUTION_ID: taskId,
+          },
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (error) {
@@ -471,6 +515,8 @@ export class CodexAdapter implements ProviderAdapter {
       const env = {
         ...process.env,
         ...task.environment,
+        // Inject execution ID so the approval MCP server can route approvals
+        ASTRO_EXECUTION_ID: task.id,
       };
 
       let proc: ChildProcess;

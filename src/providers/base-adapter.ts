@@ -2,6 +2,8 @@
  * Base adapter interface for agent providers
  */
 
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import type { Task, TaskResult, TaskStatus, ExecutionSummary } from '../types.js';
 
 export interface TaskOutputStream {
@@ -141,4 +143,14 @@ export interface ProviderStatus {
   activeTasks: number;
   maxTasks: number;
   lastError?: string;
+}
+
+/**
+ * Resolve the path to the approval MCP server script (compiled JS).
+ * Used by Codex and OpenCode adapters to spawn the server as a subprocess.
+ */
+export function getApprovalServerPath(): string {
+  const thisFile = fileURLToPath(import.meta.url);
+  // From dist/providers/base-adapter.js → dist/mcp/approval-server.js
+  return join(dirname(thisFile), '..', 'mcp', 'approval-server.js');
 }
