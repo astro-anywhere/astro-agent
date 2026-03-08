@@ -18,7 +18,7 @@ import { OpenCodeAdapter } from '../providers/opencode-adapter.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree, syncProjectWorktree } from './worktree.js';
 import { BranchLockManager } from './branch-lock.js';
-import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha } from './git-pr.js';
+import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha, isGhAvailable } from './git-pr.js';
 import { localMergeIntoProjectBranch } from './local-merge.js';
 import {
   checkWorkdirSafety,
@@ -1077,7 +1077,14 @@ export class TaskExecutor {
       }
 
       // Delivery-mode-aware result handling
-      const deliveryMode = task.deliveryMode ?? 'pr';
+      // If pr mode is requested but gh is unavailable, fall back to branch mode
+      // so the work is still merged locally into the project branch.
+      let deliveryMode = task.deliveryMode ?? 'pr';
+      if (deliveryMode === 'pr' && !(await isGhAvailable())) {
+        console.log(`[executor] Task ${task.id}: gh CLI not available, falling back from 'pr' to 'branch' mode`);
+        this.wsClient.sendTaskStatus(task.id, 'running', 90, 'GitHub CLI (gh) not available — falling back to local branch merge');
+        deliveryMode = 'branch';
+      }
       // Build PR title: prefer summary.workCompleted (agent knows what it did),
       // fall back to static task title
       const summary = result.summary;

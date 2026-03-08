@@ -90,6 +90,36 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
     detectedProviders = [];
   }
 
+  // Step 2b: Detect GitHub CLI (gh) — needed for PR delivery mode
+  const ghSpinner = ora('Checking GitHub CLI (gh)...').start();
+  let ghAvailable = false;
+  try {
+    const { isGhAvailable } = await import('../lib/git-pr.js');
+    ghAvailable = await isGhAvailable();
+    if (ghAvailable) {
+      ghSpinner.succeed('GitHub CLI (gh) authenticated');
+    } else {
+      ghSpinner.warn('GitHub CLI (gh) not found or not authenticated');
+      console.log(chalk.yellow('  PR delivery mode requires gh. Attempting to install...'));
+      const installed = await tryInstallGh(verbose);
+      if (installed) {
+        ghAvailable = await isGhAvailable();
+        if (ghAvailable) {
+          console.log(chalk.green('  ✓ gh installed and authenticated'));
+        } else {
+          console.log(chalk.yellow('  gh installed but not authenticated. Run: gh auth login'));
+        }
+      } else {
+        console.log(chalk.dim('  Install manually: https://cli.github.com'));
+        console.log(chalk.dim('  Without gh, tasks fall back to local branch merge (no PRs created)'));
+      }
+    }
+    console.log();
+  } catch {
+    ghSpinner.info('GitHub CLI check skipped');
+    console.log();
+  }
+
   // Step 3: Discover SSH hosts (only if --with-ssh-config flag is set)
   let discoveredHosts: DiscoveredHost[] = [];
   if (options.withSshConfig) {
@@ -800,6 +830,42 @@ async function selectHostsInteractive(hosts: DiscoveredHost[]): Promise<string[]
       cursorIndex = hosts.findIndex((h) => h.name === choice);
     }
   }
+}
+
+/**
+ * Attempt to install GitHub CLI (gh) via the system package manager.
+ * Returns true if the binary is available after the attempt.
+ */
+async function tryInstallGh(verbose?: boolean): Promise<boolean> {
+  const platform = process.platform;
+  try {
+    if (platform === 'darwin') {
+      // macOS: try Homebrew
+      if (verbose) console.log(chalk.dim('  Trying: brew install gh'));
+      await execFile('brew', ['install', 'gh'], { timeout: 120_000 });
+      return true;
+    } else if (platform === 'linux') {
+      // Linux: try common package managers in order
+      for (const [cmd, args] of [
+        ['conda', ['install', '-y', '-c', 'conda-forge', 'gh']],
+        ['apt-get', ['install', '-y', 'gh']],
+        ['dnf', ['install', '-y', 'gh']],
+        ['yum', ['install', '-y', 'gh']],
+      ] as const) {
+        try {
+          await execFile('which', [cmd], { timeout: 5_000 });
+          if (verbose) console.log(chalk.dim(`  Trying: ${cmd} ${args.join(' ')}`));
+          await execFile(cmd, [...args], { timeout: 120_000 });
+          return true;
+        } catch {
+          continue;
+        }
+      }
+    }
+  } catch (err) {
+    if (verbose) console.log(chalk.dim(`  Install failed: ${err instanceof Error ? err.message : String(err)}`));
+  }
+  return false;
 }
 
 function tryOpenUrl(url: string): void {
