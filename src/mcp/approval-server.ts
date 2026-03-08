@@ -19,7 +19,6 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 const serverUrl = process.env.ASTRO_SERVER_URL || 'http://localhost:3001';
-const executionId = process.env.ASTRO_EXECUTION_ID || '';
 
 const server = new Server(
   { name: 'astro-approval', version: '1.0.0' },
@@ -77,6 +76,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
+
+  // Read execution ID at call time — not at init — so the value stays
+  // correct even if the MCP server process is reused across tasks.
+  const executionId = process.env.ASTRO_EXECUTION_ID || '';
   if (!executionId) {
     return {
       content: [{ type: 'text', text: 'ASTRO_EXECUTION_ID not set — cannot route approval' }],

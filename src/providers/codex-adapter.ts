@@ -64,7 +64,6 @@ export class CodexAdapter implements ProviderAdapter {
     if (provider?.available) {
       this.codexPath = provider.path;
       this.configModel = this.readConfigModel();
-      this.ensureApprovalMcpRegistered();
       return true;
     }
     return false;
@@ -78,17 +77,16 @@ export class CodexAdapter implements ProviderAdapter {
   private ensureApprovalMcpRegistered(): void {
     if (CodexAdapter.mcpRegistered) return;
     try {
-      // Check if already registered (execFileSync avoids shell injection)
-      const existing = execFileSync(this.codexPath!, ['mcp', 'get', 'astro-approval'], {
+      // If `codex mcp get` exits 0, the server is already registered.
+      // Non-zero exit (thrown as error) means not registered — proceed to add.
+      execFileSync(this.codexPath!, ['mcp', 'get', 'astro-approval'], {
         encoding: 'utf-8',
         timeout: 5000,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
-      if (existing && !existing.includes('not found') && !existing.includes('error')) {
-        CodexAdapter.mcpRegistered = true;
-        console.log('[codex] Approval MCP server already registered');
-        return;
-      }
+      CodexAdapter.mcpRegistered = true;
+      console.log('[codex] Approval MCP server already registered');
+      return;
     } catch {
       // Not registered yet — proceed to add
     }
@@ -141,6 +139,7 @@ export class CodexAdapter implements ProviderAdapter {
 
     this.activeTasks++;
     this.cleanupExpiredSessions();
+    this.ensureApprovalMcpRegistered();
     const execState: ExecutionState = { turnCount: 0 };
     const startedAt = new Date().toISOString();
 
