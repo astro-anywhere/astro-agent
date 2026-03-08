@@ -120,7 +120,7 @@ async function detectClaudeCli(): Promise<ProviderInfo | null> {
     const version = await getCommandVersion('claude', '--version');
 
     return {
-      type: 'claude-sdk' as ProviderType,
+      type: 'claude-sdk',
       name: 'Claude Agent SDK',
       version,
       path: path ?? 'claude',
@@ -143,7 +143,7 @@ async function detectClaudeCli(): Promise<ProviderInfo | null> {
       const version = await getCommandVersion(claudePath, '--version');
 
       return {
-        type: 'claude-sdk' as ProviderType,
+        type: 'claude-sdk',
         name: 'Claude Agent SDK',
         version,
         path: claudePath,
@@ -511,7 +511,7 @@ async function detectClaudeSdk(): Promise<ProviderInfo | null> {
     // Try dynamic import to check if SDK is available
     await import('@anthropic-ai/claude-agent-sdk');
     return {
-      type: 'claude-sdk' as ProviderType,
+      type: 'claude-sdk',
       name: 'Claude Agent SDK',
       version: null,
       path: '@anthropic-ai/claude-agent-sdk',
