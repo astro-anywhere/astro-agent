@@ -11,12 +11,13 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary } from '../types.js';
-import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream } from './base-adapter.js';
+import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream, getApprovalServerPath } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
+import { config } from '../lib/config.js';
 
 /** Preserved session info for multi-turn resume */
 interface PreservedSession {
@@ -91,6 +92,11 @@ export class OpenCodeAdapter implements ProviderAdapter {
     try {
       stream.status('running', 0, 'Starting OpenCode');
 
+      // Ensure approval MCP server is configured in the working directory
+      if (task.workingDirectory) {
+        this.ensureApprovalMcpConfig(task.workingDirectory);
+      }
+
       this.lastResultMetrics = undefined;
       this.lastSessionId = undefined;
       this.toolIdToName.clear();
@@ -163,6 +169,10 @@ export class OpenCodeAdapter implements ProviderAdapter {
       };
     } finally {
       this.activeTasks--;
+      // Clean up injected opencode.json to avoid polluting the working directory
+      if (task.workingDirectory) {
+        this.cleanupInjectedConfig(task.workingDirectory);
+      }
     }
   }
 
@@ -217,7 +227,10 @@ export class OpenCodeAdapter implements ProviderAdapter {
         message,
       ];
 
-      const result = await this.spawnAndStream(args, workingDirectory, stream, signal);
+      const result = await this.spawnAndStream(
+        args, workingDirectory, stream, signal,
+        { ASTRO_EXECUTION_ID: taskId },
+      );
 
       // Update preserved session with new session ID if available
       if (this.lastSessionId && session) {
@@ -328,6 +341,71 @@ export class OpenCodeAdapter implements ProviderAdapter {
     }
   }
 
+  /** Tracks opencode.json files we created (not pre-existing) for cleanup */
+  private injectedConfigPaths = new Set<string>();
+
+  /**
+   * Ensure the approval MCP server is configured in the working directory's
+   * opencode.json so the agent can call `ask_user_question` during execution.
+   * Merges with any existing config; idempotent. Skips if existing file is corrupt.
+   */
+  private ensureApprovalMcpConfig(workingDirectory: string): void {
+    const configPath = join(workingDirectory, 'opencode.json');
+    const preExisted = existsSync(configPath);
+    let existing: Record<string, unknown> = {};
+    try {
+      if (preExisted) {
+        existing = JSON.parse(readFileSync(configPath, 'utf-8'));
+      }
+    } catch {
+      // Existing file has invalid JSON — don't overwrite it
+      console.warn(`[opencode] Existing ${configPath} has invalid JSON — skipping MCP config injection`);
+      return;
+    }
+
+    const mcp = (existing.mcp || {}) as Record<string, unknown>;
+    if (mcp['astro-approval']) return; // Already configured
+
+    const serverPath = getApprovalServerPath();
+    const apiUrl = config.getConfig().apiUrl || 'http://localhost:3001';
+
+    mcp['astro-approval'] = {
+      type: 'local',
+      command: ['node', serverPath],
+      environment: {
+        ASTRO_SERVER_URL: apiUrl,
+      },
+    };
+
+    const updated = { ...existing, mcp };
+    try {
+      writeFileSync(configPath, JSON.stringify(updated, null, 2));
+      // Track for cleanup only if we created the file (don't delete user's pre-existing config)
+      if (!preExisted) {
+        this.injectedConfigPaths.add(configPath);
+      }
+      console.log(`[opencode] Wrote approval MCP config to ${configPath}`);
+    } catch (err) {
+      console.warn(`[opencode] Failed to write MCP config:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  /**
+   * Remove opencode.json files we created (not pre-existing) to avoid polluting
+   * the user's working directory / git worktree.
+   */
+  private cleanupInjectedConfig(workingDirectory: string): void {
+    const configPath = join(workingDirectory, 'opencode.json');
+    if (this.injectedConfigPaths.has(configPath)) {
+      try {
+        unlinkSync(configPath);
+        this.injectedConfigPaths.delete(configPath);
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  }
+
   // ─── CLI Execution ────────────────────────────────────────────
 
   private runOpenCode(
@@ -361,7 +439,11 @@ export class OpenCodeAdapter implements ProviderAdapter {
       task.workingDirectory,
       stream,
       signal,
-      task.environment,
+      {
+        ...task.environment,
+        // Inject execution ID so the approval MCP server can route approvals
+        ASTRO_EXECUTION_ID: task.id,
+      },
       task.timeout,
     );
   }
