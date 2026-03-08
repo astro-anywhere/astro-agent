@@ -458,6 +458,12 @@ export async function createProjectWorktree(
  * forward. This updates the detached HEAD in the project worktree so the
  * files on disk reflect the latest state.
  *
+ * Ref selection:
+ * - Branch mode (no remote): localMergeIntoProjectBranch() advances
+ *   refs/heads/{projectBranch} directly → use the local ref.
+ * - PR mode (has remote): GitHub merge advances origin/{projectBranch},
+ *   but refs/heads/ is stale (no local commit) → fetch then use remote ref.
+ *
  * Non-fatal — sync failure doesn't affect task completion.
  */
 export async function syncProjectWorktree(
@@ -469,8 +475,12 @@ export async function syncProjectWorktree(
     return;
   }
 
-  // For remote repos, fetch the latest project branch so the local ref is current
+  // Determine the correct ref to checkout:
+  // - Remote repos (PR mode): fetch, then use origin/ (remote has the merged state)
+  // - Local repos (branch mode): use refs/heads/ (local merge updated it directly)
   const hasRemote = await repoHasRemote(gitRoot);
+  let checkoutRef = `refs/heads/${projectBranch}`;
+
   if (hasRemote) {
     try {
       await execFileAsync(
@@ -478,18 +488,19 @@ export async function syncProjectWorktree(
         ['-C', gitRoot, 'fetch', 'origin', projectBranch],
         { env: withGitEnv(), timeout: 15_000 }
       );
+      checkoutRef = `origin/${projectBranch}`;
     } catch {
-      // Non-fatal: proceed with local ref
+      // Fetch failed — fall back to local ref (best effort)
     }
   }
 
   try {
     await execFileAsync(
       'git',
-      ['-C', projectWorktreePath, 'checkout', '--detach', `refs/heads/${projectBranch}`],
+      ['-C', projectWorktreePath, 'checkout', '--detach', checkoutRef],
       { env: withGitEnv(), timeout: 10_000 }
     );
-    console.log(`[worktree] Synced project worktree at ${projectWorktreePath} to ${projectBranch} tip`);
+    console.log(`[worktree] Synced project worktree at ${projectWorktreePath} to ${checkoutRef}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[worktree] Failed to sync project worktree: ${msg}`);

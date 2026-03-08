@@ -268,6 +268,57 @@ describe('syncProjectWorktree (real git)', { timeout: 30_000 }, () => {
 });
 
 // =============================================================================
+// 2b. syncProjectWorktree — remote mode (simulates PR merge on GitHub)
+// =============================================================================
+
+describe('syncProjectWorktree remote mode (real git)', { timeout: 30_000 }, () => {
+  it('uses origin/ ref after fetch when remote is ahead (PR mode)', async () => {
+    const { repoDir, bareDir } = createRepoWithRemote();
+    const projectBranch = 'astro/prsync';
+
+    // Create project branch and push to origin
+    git(repoDir, 'branch', projectBranch, 'main');
+    git(repoDir, 'push', 'origin', projectBranch);
+
+    const baseRoot = join(repoDir, '.astro', 'worktrees');
+    mkdirSync(baseRoot, { recursive: true });
+    const wtPath = (await createProjectWorktree(repoDir, projectBranch, baseRoot, 'prsync'))!;
+
+    // Simulate a PR merge on "GitHub" (the bare remote):
+    // Clone the bare repo, make a commit on the project branch, push back.
+    // This advances origin/{projectBranch} without touching refs/heads/ in repoDir.
+    const cloneDir = realpathSync(mkdtempSync(join(tmpdir(), 'astro-pwt-clone-')));
+    tmpDirs.push(cloneDir);
+    git(cloneDir, 'clone', bareDir, '.');
+    git(cloneDir, 'config', 'user.email', 'test@test.com');
+    git(cloneDir, 'config', 'user.name', 'Test');
+    git(cloneDir, 'checkout', projectBranch);
+    writeFileSync(join(cloneDir, 'pr-merged.txt'), 'merged via PR\n');
+    git(cloneDir, 'add', '.');
+    git(cloneDir, 'commit', '-m', 'PR merge commit');
+    git(cloneDir, 'push', 'origin', projectBranch);
+
+    // At this point: origin/{projectBranch} is ahead, local refs/heads/ is stale
+    // Verify the local ref is indeed stale
+    const localSha = git(repoDir, 'rev-parse', `refs/heads/${projectBranch}`);
+    git(repoDir, 'fetch', 'origin', projectBranch);
+    const remoteSha = git(repoDir, 'rev-parse', `origin/${projectBranch}`);
+    expect(localSha).not.toBe(remoteSha); // local is stale
+
+    // Before sync: project worktree doesn't have the PR file
+    expect(existsSync(join(wtPath, 'pr-merged.txt'))).toBe(false);
+
+    // Sync — should fetch and checkout from origin/ (not stale refs/heads/)
+    await syncProjectWorktree(wtPath, projectBranch, repoDir);
+
+    // After sync: project worktree has the PR-merged file
+    expect(existsSync(join(wtPath, 'pr-merged.txt'))).toBe(true);
+    expect(readFileSync(join(wtPath, 'pr-merged.txt'), 'utf-8')).toBe('merged via PR\n');
+    expect(isDetached(wtPath)).toBe(true);
+  });
+});
+
+// =============================================================================
 // 3. cleanupProjectWorktree
 // =============================================================================
 
