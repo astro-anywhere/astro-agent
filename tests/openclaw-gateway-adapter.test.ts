@@ -230,9 +230,14 @@ describe('OpenClaw Gateway Adapter', () => {
       const stream = createMockStream()
       const controller = new AbortController()
       let capturedMessage = ''
+      let callCount = 0
 
       gateway.onChatSend = (params, ws) => {
-        capturedMessage = params.message as string
+        callCount++
+        // Capture only the first chat.send (the task prompt), not follow-up summary
+        if (callCount === 1) {
+          capturedMessage = params.message as string
+        }
         const sessionKey = params.sessionKey as string
         const runId = 'run-test'
 
