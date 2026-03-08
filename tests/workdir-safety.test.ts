@@ -227,7 +227,7 @@ function createTask(overrides: Partial<Task> = {}): Task {
     id: `task-${Date.now()}`,
     projectId: 'proj-1',
     planNodeId: 'node-1',
-    provider: 'claude-code' as any,
+    provider: 'claude-sdk',
     prompt: 'Do something',
     workingDirectory: '/tmp/test',
     createdAt: new Date().toISOString(),

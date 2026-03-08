@@ -219,7 +219,7 @@ export function formatNoProvidersWarning(): string {
   return [
     chalk.yellow('  No AI providers detected.'),
     chalk.dim('  Install one of the following to get started:'),
-    chalk.dim(`    • Claude Code    ${chalk.white('npm i -g @anthropic-ai/claude-code')}`),
+    chalk.dim(`    • Claude (SDK)   ${chalk.white('npm i -g @anthropic-ai/claude-code')}`),
     chalk.dim(`    • OpenAI Codex   ${chalk.white('npm i -g @openai/codex')}`),
     chalk.dim(`    • OpenClaw       ${chalk.white('npm i -g openclaw')}`),
     chalk.dim(`    • OpenCode       ${chalk.white('bun i -g opencode')}`),

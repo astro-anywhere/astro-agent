@@ -50,5 +50,5 @@ export type { SlurmTaskInput, SlurmExecuteOptions, SlurmExecuteResult } from './
 // Provider adapters
 export { createProviderAdapter, getAvailableAdapters } from './providers/index.js';
 export type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './providers/base-adapter.js';
-export { ClaudeCodeAdapter } from './providers/claude-code-adapter.js';
+export { ClaudeSdkAdapter } from './providers/claude-sdk-adapter.js';
 export { CodexAdapter } from './providers/codex-adapter.js';
