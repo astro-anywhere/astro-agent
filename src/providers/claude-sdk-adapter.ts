@@ -40,7 +40,7 @@ function resolveClaudeExecutable(): string | undefined {
 const claudeExecutablePath = resolveClaudeExecutable();
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
-import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
+import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse } from './base-adapter.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
 import { config } from '../lib/config.js';
@@ -519,9 +519,9 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
    * it returns errors with no structured_output. Instead, we embed the JSON format
    * in the prompt and parse the text response.
    */
-  private async generateSummary(
+  async generateSummary(
     taskId: string,
-    workingDirectory: string | undefined,
+    workingDirectory?: string,
   ): Promise<ExecutionSummary | undefined> {
     const sessionContext = this.activeQueries.get(taskId);
     if (!sessionContext?.sessionId) {
@@ -530,7 +530,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     }
 
     const summaryAbort = new AbortController();
-    const summaryTimeout = setTimeout(() => summaryAbort.abort(), 30_000);
+    const summaryTimeout = setTimeout(() => summaryAbort.abort(), SUMMARY_TIMEOUT_MS);
 
     try {
       // Ensure CLAUDE_CONFIG_DIR is set
@@ -549,22 +549,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       // Resume the execution session so the model has full context
       (options as Record<string, unknown>).resume = sessionContext.sessionId;
 
-      const summaryPrompt = `Produce a structured JSON summary of the work you just completed. Respond with ONLY a JSON object (no markdown fences, no extra text) matching this exact schema:
-
-{
-  "status": "success" | "partial" | "failure",
-  "workCompleted": "1-2 sentence summary of what was accomplished",
-  "executiveSummary": "1-2 paragraph executive summary for the PR description: what was done, the approach taken, key design decisions, and any trade-offs. Write in a professional tone suitable for code reviewers.",
-  "keyFindings": ["2-5 concise bullet points (under 100 chars each)"],
-  "filesChanged": ["list of file paths that were created, modified, or deleted"],
-  "followUps": ["suggested follow-up actions if any, or empty array"],
-  "prUrl": "full URL of the pull request if you created one, or null",
-  "prNumber": 123 or null,
-  "branchName": "git branch name you worked on, or null"
-}`;
-
       const gen = query({
-        prompt: summaryPrompt,
+        prompt: SUMMARY_PROMPT,
         options,
       });
 
@@ -590,27 +576,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         }
       }
 
-      if (!textOutput) {
-        console.warn(`[claude-sdk] Task ${taskId}: no text output from summary generation`);
-        return undefined;
-      }
-
-      // Strip markdown code fences if present
-      let jsonText = textOutput.trim();
-      if (jsonText.startsWith('```')) {
-        jsonText = jsonText.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
-      }
-
-      try {
-        const parsed = JSON.parse(jsonText) as ExecutionSummary;
-        if (!parsed.executiveSummary) {
-          console.warn(`[claude-sdk] Task ${taskId}: summary generated but executiveSummary is missing. Keys: ${Object.keys(parsed).join(', ')}`);
-        }
-        return parsed;
-      } catch {
-        console.warn(`[claude-sdk] Task ${taskId}: summary text was not valid JSON. Text: ${jsonText.slice(0, 300)}`);
-        return undefined;
-      }
+      return parseSummaryResponse(textOutput, `[claude-sdk] Task ${taskId}`);
     } finally {
       clearTimeout(summaryTimeout);
     }
