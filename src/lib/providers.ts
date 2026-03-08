@@ -108,9 +108,11 @@ function getClaudeCodePaths(): string[] {
 }
 
 /**
- * Detect Claude Code installation
+ * Detect Claude Code CLI installation.
+ * Reports as 'claude-sdk' type — the CLI binary is only used for auth/config
+ * detection; all execution goes through ClaudeSdkAdapter.
  */
-async function detectClaudeCode(): Promise<ProviderInfo | null> {
+async function detectClaudeCli(): Promise<ProviderInfo | null> {
   // First, check if 'claude' is in PATH
   const existsInPath = await commandExists('claude');
   if (existsInPath) {
@@ -118,8 +120,8 @@ async function detectClaudeCode(): Promise<ProviderInfo | null> {
     const version = await getCommandVersion('claude', '--version');
 
     return {
-      type: 'claude-code',
-      name: 'Claude Code',
+      type: 'claude-sdk' as ProviderType,
+      name: 'Claude Agent SDK',
       version,
       path: path ?? 'claude',
       available: true,
@@ -127,7 +129,7 @@ async function detectClaudeCode(): Promise<ProviderInfo | null> {
         streaming: true,
         tools: true,
         multiTurn: true,
-        maxConcurrentTasks: 1, // Claude Code runs one task at a time per instance
+        maxConcurrentTasks: 4,
       },
     };
   }
@@ -138,12 +140,11 @@ async function detectClaudeCode(): Promise<ProviderInfo | null> {
   for (const claudePath of commonPaths) {
     const isExecutable = await fileExecutable(claudePath);
     if (isExecutable) {
-      // Found Claude Code at this path, get version
       const version = await getCommandVersion(claudePath, '--version');
 
       return {
-        type: 'claude-code',
-        name: 'Claude Code',
+        type: 'claude-sdk' as ProviderType,
+        name: 'Claude Agent SDK',
         version,
         path: claudePath,
         available: true,
@@ -151,7 +152,7 @@ async function detectClaudeCode(): Promise<ProviderInfo | null> {
           streaming: true,
           tools: true,
           multiTurn: true,
-          maxConcurrentTasks: 1,
+          maxConcurrentTasks: 4,
         },
       };
     }
@@ -535,7 +536,7 @@ async function detectClaudeSdk(): Promise<ProviderInfo | null> {
 export async function detectProviders(): Promise<ProviderInfo[]> {
   const detectionResults = await Promise.all([
     detectClaudeSdk(),
-    detectClaudeCode(),
+    detectClaudeCli(),
     detectCodex(),
     detectOpenClaw(),
     detectOpenCode(),
@@ -545,19 +546,20 @@ export async function detectProviders(): Promise<ProviderInfo[]> {
 
   const providers: ProviderInfo[] = [];
 
-  const [claudeSdk, claudeCode, codex, openclaw, opencode, hpcCapability, customProviders] = detectionResults;
+  const [claudeSdk, claudeCli, codex, openclaw, opencode, hpcCapability, customProviders] = detectionResults;
 
-  // Add Claude provider (SDK preferred over CLI — runs in-process with lower overhead)
+  // Add Claude provider — SDK import preferred over CLI binary detection.
+  // Both report as 'claude-sdk'; SDK import gives more reliable availability signal.
   if (claudeSdk) {
     if (hpcCapability) {
       claudeSdk.hpcCapability = hpcCapability;
     }
     providers.push(claudeSdk);
-  } else if (claudeCode) {
+  } else if (claudeCli) {
     if (hpcCapability) {
-      claudeCode.hpcCapability = hpcCapability;
+      claudeCli.hpcCapability = hpcCapability;
     }
-    providers.push(claudeCode);
+    providers.push(claudeCli);
   }
 
   if (codex) {

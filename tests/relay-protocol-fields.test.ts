@@ -131,7 +131,7 @@ describe('Agent runner Task type (packages/agent-runner/src/types.ts)', () => {
       id: 'task-legacy',
       projectId: 'proj-1',
       planNodeId: 'node-1',
-      provider: 'claude-code',
+      provider: 'claude-sdk',
       prompt: 'Fix the bug',
       workingDirectory: '/tmp/test',
       createdAt: new Date().toISOString(),

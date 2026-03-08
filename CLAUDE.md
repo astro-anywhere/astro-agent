@@ -20,7 +20,7 @@ npx tsc --noEmit       # Type check only
 
 Provider adapters run on user machines and bridge CLI tool output to Astro's streaming protocol:
 
-- `src/providers/claude-code-adapter.ts` — Claude Code CLI
+- `src/providers/claude-sdk-adapter.ts` — Claude Agent SDK (in-process, supports steering + resume)
 - `src/providers/codex-adapter.ts` — OpenAI Codex CLI (JSONL stream)
 - `src/providers/openclaw-adapter.ts` — OpenClaw CLI
 - `src/providers/opencode-adapter.ts` — OpenCode CLI
@@ -52,7 +52,7 @@ Safety warning messages in `src/lib/workdir-safety.ts` must NOT contain emoji ch
 ```
 src/
 ├── commands/          # CLI commands (setup, start, stop, logs, status, mcp, plan)
-├── providers/         # Provider adapters (claude-code, codex, openclaw, opencode)
+├── providers/         # Provider adapters (claude-sdk, codex, openclaw, opencode)
 ├── lib/               # Core libraries (config, ssh-installer, ssh-discovery, providers, resources)
 └── types.ts           # Shared types (ProviderType, DiscoveredHost, Task, etc.)
 tests/                 # Vitest test files
