@@ -16,7 +16,7 @@ import { CodexAdapter } from '../providers/codex-adapter.js';
 import { OpenClawAdapter } from '../providers/openclaw-adapter.js';
 import { OpenCodeAdapter } from '../providers/opencode-adapter.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
-import { createWorktree } from './worktree.js';
+import { createWorktree, syncProjectWorktree } from './worktree.js';
 import { BranchLockManager } from './branch-lock.js';
 import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha } from './git-pr.js';
 import { localMergeIntoProjectBranch } from './local-merge.js';
@@ -1207,6 +1207,10 @@ export class TaskExecutor {
                   result.deliveryStatus = 'success';
                   result.commitAfterSha = mergeResult.commitSha;
                   console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
+                  // Sync project worktree to reflect the merged changes on disk
+                  if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
+                    await syncProjectWorktree(prepared.projectWorktreePath, prepared.projectBranch, prepared.gitRoot);
+                  }
                   break;
                 } else if (mergeResult.conflict) {
                   // Can the agent resolve this? Check if adapter supports session resume.
@@ -1372,6 +1376,9 @@ export class TaskExecutor {
                       result.deliveryStatus = 'success';
                       prMergeResolved = true;
                       console.log(`[executor] Task ${task.id}: PR merged on retry (attempt ${attempt}), commitAfterSha=${result.commitAfterSha}`);
+                      if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
+                        await syncProjectWorktree(prepared.projectWorktreePath, prepared.projectBranch, prepared.gitRoot);
+                      }
                       break;
                     }
 
@@ -1393,6 +1400,9 @@ export class TaskExecutor {
               } else {
                 result.deliveryStatus = 'success';
                 console.log(`[executor] Task ${task.id}: PR created at ${prResult.prUrl}`);
+                if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
+                  await syncProjectWorktree(prepared.projectWorktreePath, prepared.projectBranch, prepared.gitRoot);
+                }
               }
             } else if (prResult.error) {
               // Delivery failure — don't override execution status
@@ -1504,6 +1514,7 @@ export class TaskExecutor {
     commitBeforeSha?: string;
     gitRoot?: string;
     projectBranch?: string;
+    projectWorktreePath?: string;
     cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
   }> {
     // Per-task explicit opt-out: user consciously chose to skip worktree
