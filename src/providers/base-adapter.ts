@@ -2,7 +2,7 @@
  * Base adapter interface for agent providers
  */
 
-import type { Task, TaskResult, TaskStatus } from '../types.js';
+import type { Task, TaskResult, TaskStatus, ExecutionSummary } from '../types.js';
 
 export interface TaskOutputStream {
   stdout: (data: string) => void;
@@ -48,6 +48,91 @@ export interface ProviderAdapter {
    * Get provider status/health
    */
   getStatus(): Promise<ProviderStatus>;
+
+  /**
+   * Generate a structured execution summary by resuming the completed session.
+   * The resumed session has full context of the work just performed, enabling
+   * high-quality summaries without re-reading files or logs.
+   *
+   * Optional — adapters that don't support session resume can omit this.
+   */
+  generateSummary?(taskId: string, workingDirectory?: string): Promise<ExecutionSummary | undefined>;
+}
+
+/**
+ * Shared summary prompt used by all adapters to generate structured execution summaries.
+ * Sent as a follow-up turn to the same session, so the agent has full context.
+ *
+ * Intentionally domain-agnostic — works for coding tasks, research analyses,
+ * data processing, and any other task type Astro supports.
+ */
+export const SUMMARY_PROMPT = `Produce a structured JSON summary of the work you just completed. Respond with ONLY a JSON object (no markdown fences, no extra text) matching this exact schema:
+
+{
+  "status": "success" | "partial" | "failure",
+  "workCompleted": "1-2 sentence summary of what was accomplished",
+  "executiveSummary": "1-2 paragraph executive summary: what was done, the approach taken, key decisions, and any trade-offs. Write in a clear, professional tone.",
+  "keyFindings": ["2-5 concise bullet points of key outcomes or observations (under 100 chars each)"],
+  "filesChanged": ["list of file paths that were created, modified, or deleted, or empty array if none"],
+  "followUps": ["suggested follow-up actions if any, or empty array"],
+  "prUrl": "full URL of the pull request if one was created, or null",
+  "prNumber": 123 or null,
+  "branchName": "git branch name if one was used, or null"
+}`;
+
+/** Timeout for summary generation (30 seconds) */
+export const SUMMARY_TIMEOUT_MS = 30_000;
+
+/**
+ * Create a no-op TaskOutputStream for internal use (e.g., summary generation).
+ * All stream methods are silent; approvalRequest returns { answered: false }.
+ */
+export function createNoopStream(): TaskOutputStream {
+  return {
+    stdout: () => {},
+    stderr: () => {},
+    status: () => {},
+    toolTrace: () => {},
+    text: () => {},
+    toolUse: () => {},
+    toolResult: () => {},
+    fileChange: () => {},
+    sessionInit: () => {},
+    approvalRequest: () => Promise.resolve({ answered: false }),
+  };
+}
+
+/**
+ * Parse a summary JSON response, stripping markdown code fences if present.
+ * Returns undefined if the text is empty or not valid JSON.
+ */
+export function parseSummaryResponse(text: string, logPrefix: string): ExecutionSummary | undefined {
+  if (!text) {
+    console.warn(`${logPrefix}: no text output from summary generation`);
+    return undefined;
+  }
+
+  let jsonText = text.trim();
+  if (jsonText.startsWith('```')) {
+    jsonText = jsonText.replace(/^```(?:json)?\s*\n?/, '').replace(/\n?```\s*$/, '');
+  }
+
+  // Extract first JSON object if surrounded by other text
+  const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    jsonText = jsonMatch[0];
+  }
+
+  try {
+    const parsed = JSON.parse(jsonText) as ExecutionSummary;
+    if (!parsed.executiveSummary) {
+      console.warn(`${logPrefix}: summary generated but executiveSummary is missing. Keys: ${Object.keys(parsed).join(', ')}`);
+    }
+    return parsed;
+  } catch {
+    console.warn(`${logPrefix}: summary text was not valid JSON. Text: ${jsonText.slice(0, 300)}`);
+    return undefined;
+  }
 }
 
 export interface ProviderStatus {

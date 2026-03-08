@@ -9,8 +9,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
-import type { Task, TaskResult, TaskArtifact } from '../types.js';
-import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
+import type { Task, TaskResult, TaskArtifact, ExecutionSummary } from '../types.js';
+import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
 
 /** Metrics shape extracted from TaskResult (non-optional) */
@@ -39,8 +39,8 @@ interface ExecutionState {
   threadId?: string;
 }
 
-/** Session TTL: 30 minutes */
-const SESSION_TTL_MS = 30 * 60 * 1000;
+/** Session TTL: 10 minutes */
+const SESSION_TTL_MS = 10 * 60 * 1000;
 
 export class CodexAdapter implements ProviderAdapter {
   readonly type = 'codex';
@@ -119,6 +119,23 @@ export class CodexAdapter implements ProviderAdapter {
       // Build metrics from accumulated stream data + result model.
       const finalMetrics = this.buildFinalMetrics(result.model, startedAt, execState);
 
+      // Generate structured summary for execution tasks via a follow-up session resume.
+      let summary: ExecutionSummary | undefined;
+      const isExecutionTask = !task.type || task.type === 'execution';
+      if (isExecutionTask && result.exitCode === 0) {
+        try {
+          stream.status('running', 80, 'Generating summary');
+          summary = await this.generateSummary(task.id, task.workingDirectory);
+          if (summary) {
+            console.log(`[codex] Task ${task.id}: summary generated — status=${summary.status}, keyFindings=${summary.keyFindings?.length ?? 0}`);
+          } else {
+            console.warn(`[codex] Task ${task.id}: summary generation returned undefined`);
+          }
+        } catch (summaryError) {
+          console.warn(`[codex] Task ${task.id}: summary generation failed:`, summaryError);
+        }
+      }
+
       return {
         taskId: task.id,
         status: result.exitCode === 0 ? 'completed' : 'failed',
@@ -129,6 +146,7 @@ export class CodexAdapter implements ProviderAdapter {
         completedAt: new Date().toISOString(),
         artifacts: result.artifacts,
         metrics: finalMetrics,
+        summary,
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -321,6 +339,59 @@ export class CodexAdapter implements ProviderAdapter {
         });
       });
     });
+  }
+
+  /**
+   * Generate a structured execution summary by resuming the completed Codex session.
+   * Uses `codex exec resume <threadId> <summaryPrompt> --json` to ask for a JSON summary.
+   */
+  async generateSummary(taskId: string, workingDirectory?: string): Promise<ExecutionSummary | undefined> {
+    const session = this.activeSessions.get(taskId);
+    if (!session?.threadId) {
+      console.log(`[codex] No session to resume for summary (task ${taskId})`);
+      return undefined;
+    }
+
+    const summaryAbort = new AbortController();
+    const summaryTimeout = setTimeout(() => summaryAbort.abort(), SUMMARY_TIMEOUT_MS);
+
+    try {
+      const result = await this.resumeTask(
+        taskId,
+        SUMMARY_PROMPT,
+        workingDirectory || session.workingDirectory || '',
+        session.threadId,
+        createNoopStream(),
+        summaryAbort.signal as AbortSignal,
+      );
+
+      if (!result.success || !result.output) {
+        console.warn(`[codex] Task ${taskId}: summary resume failed — success=${result.success}, error=${result.error}`);
+        return undefined;
+      }
+
+      // Extract text content from JSONL output — look for agent_message items
+      let textContent = '';
+      for (const line of result.output.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line) as Record<string, unknown>;
+          if (event.type === 'item.completed') {
+            const item = event.item as Record<string, unknown> | undefined;
+            if (item?.type === 'agent_message' && typeof item.text === 'string') {
+              textContent += item.text;
+            }
+          }
+        } catch {
+          // Not JSON — could be raw text output
+          textContent += line;
+        }
+      }
+
+      return parseSummaryResponse(textContent || result.output, `[codex] Task ${taskId}`);
+    } finally {
+      clearTimeout(summaryTimeout);
+    }
   }
 
   private async runCodex(

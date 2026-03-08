@@ -14,8 +14,8 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import type { Task, TaskResult, TaskArtifact } from '../types.js';
-import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
+import type { Task, TaskResult, TaskArtifact, ExecutionSummary } from '../types.js';
+import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
 
 /** Preserved session info for multi-turn resume */
@@ -26,8 +26,8 @@ interface PreservedSession {
   createdAt: number;
 }
 
-/** TTL for preserved sessions (30 minutes) */
-const SESSION_TTL_MS = 30 * 60 * 1000;
+/** TTL for preserved sessions (10 minutes) */
+const SESSION_TTL_MS = 10 * 60 * 1000;
 
 export class OpenCodeAdapter implements ProviderAdapter {
   readonly type = 'opencode';
@@ -108,6 +108,26 @@ export class OpenCodeAdapter implements ProviderAdapter {
         });
       }
 
+      // Save metrics before summary generation (resumeTask resets this.lastResultMetrics)
+      const savedMetrics = this.lastResultMetrics;
+
+      // Generate structured summary for execution tasks via session resume
+      let summary: ExecutionSummary | undefined;
+      const isExecutionTask = !task.type || task.type === 'execution';
+      if (isExecutionTask && succeeded) {
+        try {
+          stream.status('running', 80, 'Generating summary');
+          summary = await this.generateSummary(task.id, task.workingDirectory);
+          if (summary) {
+            console.log(`[opencode] Task ${task.id}: summary generated — status=${summary.status}, keyFindings=${summary.keyFindings?.length ?? 0}`);
+          } else {
+            console.warn(`[opencode] Task ${task.id}: summary generation returned undefined`);
+          }
+        } catch (summaryError) {
+          console.warn(`[opencode] Task ${task.id}: summary generation failed:`, summaryError);
+        }
+      }
+
       return {
         taskId: task.id,
         status: succeeded ? 'completed' : 'failed',
@@ -117,7 +137,8 @@ export class OpenCodeAdapter implements ProviderAdapter {
         startedAt,
         completedAt: new Date().toISOString(),
         artifacts: result.artifacts,
-        metrics: this.lastResultMetrics,
+        metrics: savedMetrics,
+        summary,
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -246,6 +267,64 @@ export class OpenCodeAdapter implements ProviderAdapter {
       if (now - session.createdAt > SESSION_TTL_MS) {
         this.preservedSessions.delete(key);
       }
+    }
+  }
+
+  // ─── Summary Generation ──────────────────────────────────────
+
+  /**
+   * Generate a structured execution summary by resuming the completed OpenCode session.
+   * Uses `opencode run --session <id> --print --output-format json` with the summary prompt.
+   */
+  async generateSummary(taskId: string, workingDirectory?: string): Promise<ExecutionSummary | undefined> {
+    const session = this.preservedSessions.get(taskId);
+    if (!session?.sessionId) {
+      console.log(`[opencode] No session to resume for summary (task ${taskId})`);
+      return undefined;
+    }
+
+    const summaryAbort = new AbortController();
+    const summaryTimeout = setTimeout(() => summaryAbort.abort(), SUMMARY_TIMEOUT_MS);
+
+    try {
+      const result = await this.resumeTask(
+        taskId,
+        SUMMARY_PROMPT,
+        workingDirectory || session.workingDirectory || '',
+        session.sessionId,
+        createNoopStream(),
+        summaryAbort.signal,
+      );
+
+      if (!result.success || !result.output) {
+        console.warn(`[opencode] Task ${taskId}: summary resume failed — success=${result.success}, error=${result.error}`);
+        return undefined;
+      }
+
+      // Extract text from JSONL output — look for assistant text blocks
+      let textContent = '';
+      for (const line of result.output.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line) as Record<string, unknown>;
+          if (event.type === 'assistant') {
+            const content = (event.content || (event.message as Record<string, unknown>)?.content) as Array<{ type: string; text?: string }> | undefined;
+            if (content) {
+              for (const block of content) {
+                if (block.type === 'text' && block.text) {
+                  textContent += block.text;
+                }
+              }
+            }
+          }
+        } catch {
+          textContent += line;
+        }
+      }
+
+      return parseSummaryResponse(textContent || result.output, `[opencode] Task ${taskId}`);
+    } finally {
+      clearTimeout(summaryTimeout);
     }
   }
 

@@ -21,8 +21,8 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import WebSocket from 'ws';
-import type { Task, TaskResult, TaskArtifact } from '../types.js';
-import type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
+import type { Task, TaskResult, TaskArtifact, ExecutionSummary } from '../types.js';
+import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream } from './base-adapter.js';
 
 // ---------------------------------------------------------------------------
 // Types — OpenClaw Gateway Protocol v3
@@ -63,8 +63,8 @@ interface PreservedSession {
   createdAt: number;
 }
 
-/** TTL for preserved sessions (30 minutes) */
-const SESSION_TTL_MS = 30 * 60 * 1000;
+/** TTL for preserved sessions (10 minutes) */
+const SESSION_TTL_MS = 10 * 60 * 1000;
 
 export class OpenClawAdapter implements ProviderAdapter {
   readonly type = 'openclaw';
@@ -149,6 +149,24 @@ export class OpenClawAdapter implements ProviderAdapter {
         });
       }
 
+      // Generate structured summary for execution tasks via session resume
+      let summary: ExecutionSummary | undefined;
+      const isExecutionTask = !task.type || task.type === 'execution';
+      const succeeded = !isCancelled && !result.error;
+      if (isExecutionTask && succeeded) {
+        try {
+          stream.status('running', 80, 'Generating summary');
+          summary = await this.generateSummary(task.id, task.workingDirectory);
+          if (summary) {
+            console.log(`[openclaw] Task ${task.id}: summary generated — status=${summary.status}, keyFindings=${summary.keyFindings?.length ?? 0}`);
+          } else {
+            console.warn(`[openclaw] Task ${task.id}: summary generation returned undefined`);
+          }
+        } catch (summaryError) {
+          console.warn(`[openclaw] Task ${task.id}: summary generation failed:`, summaryError);
+        }
+      }
+
       return {
         taskId: task.id,
         status: isCancelled ? 'cancelled' : result.error ? 'failed' : 'completed',
@@ -158,6 +176,7 @@ export class OpenClawAdapter implements ProviderAdapter {
         completedAt: new Date().toISOString(),
         artifacts: result.artifacts,
         metrics: result.metrics,
+        summary,
       };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -292,6 +311,51 @@ export class OpenClawAdapter implements ProviderAdapter {
       if (now - session.createdAt > SESSION_TTL_MS) {
         this.preservedSessions.delete(key);
       }
+    }
+  }
+
+  // ─── Summary Generation ──────────────────────────────────────
+
+  /**
+   * Generate a structured execution summary by resuming the completed OpenClaw session.
+   * Sends the summary prompt to the same session key via chat.send.
+   */
+  async generateSummary(taskId: string, workingDirectory?: string): Promise<ExecutionSummary | undefined> {
+    const session = this.preservedSessions.get(taskId);
+    if (!session?.sessionKey) {
+      console.log(`[openclaw] No session to resume for summary (task ${taskId})`);
+      return undefined;
+    }
+
+    if (!this.gatewayConfig) {
+      const available = await this.isAvailable();
+      if (!available || !this.gatewayConfig) {
+        console.warn(`[openclaw] Gateway not available for summary generation (task ${taskId})`);
+        return undefined;
+      }
+    }
+
+    const summaryAbort = new AbortController();
+    const summaryTimeout = setTimeout(() => summaryAbort.abort(), SUMMARY_TIMEOUT_MS);
+
+    try {
+      const result = await this.resumeTask(
+        taskId,
+        SUMMARY_PROMPT,
+        workingDirectory || session.workingDirectory || '',
+        session.sessionKey,
+        createNoopStream(),
+        summaryAbort.signal,
+      );
+
+      if (!result.success || !result.output) {
+        console.warn(`[openclaw] Task ${taskId}: summary resume failed — success=${result.success}, error=${result.error}`);
+        return undefined;
+      }
+
+      return parseSummaryResponse(result.output, `[openclaw] Task ${taskId}`);
+    } finally {
+      clearTimeout(summaryTimeout);
     }
   }
 
