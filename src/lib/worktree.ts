@@ -509,7 +509,11 @@ export async function syncProjectWorktree(
 
 /**
  * Remove the persistent project worktree.
- * Called when the project branch is deleted or the project is removed.
+ *
+ * This is an exported utility for the astro platform to call when a project
+ * is deleted. The agent-runner does not manage project lifecycles — it only
+ * provides the building blocks. The integration point (calling this on
+ * project deletion) lives in the astro server, not here.
  */
 export async function cleanupProjectWorktree(
   gitRoot: string,

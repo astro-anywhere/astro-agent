@@ -80,17 +80,6 @@ function createRepoWithRemote(): { repoDir: string; bareDir: string } {
   return { repoDir, bareDir };
 }
 
-/** Get the HEAD commit message of a worktree/branch. */
-function headSha(cwd: string): string {
-  return git(cwd, 'rev-parse', 'HEAD');
-}
-
-/** Check if HEAD is detached in a worktree. */
-function isDetachedHead(cwd: string): boolean {
-  const result = git(cwd, 'symbolic-ref', '--short', 'HEAD').trim();
-  return false; // If this succeeds, HEAD is NOT detached
-}
-
 function isDetached(cwd: string): boolean {
   try {
     git(cwd, 'symbolic-ref', '--short', 'HEAD');
