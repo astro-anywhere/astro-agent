@@ -30,6 +30,7 @@ import {
   type SafetyCheckResult,
   type SandboxSetup,
 } from './workdir-safety.js';
+import { initializeGit } from './git-bootstrap.js';
 
 const execFileAsync = promisify(execFileCb);
 
@@ -245,7 +246,7 @@ export class TaskExecutor {
       // Still need to handle init-git if directory isn't a git repo.
       const needsGitInit = this.gitAvailable && !(await isGitRepo(normalizedTask.workingDirectory));
       if (needsGitInit) {
-        await this.initializeGit(normalizedTask.workingDirectory);
+        await initializeGit(normalizedTask.workingDirectory);
       }
       this.trackTaskDirectory(normalizedTask);
       if (this.runningTasks.size < this.maxConcurrentTasks) {
@@ -835,7 +836,7 @@ export class TaskExecutor {
       case 'init-git':
         // Initialize git and retry
         try {
-          await this.initializeGit(task.workingDirectory);
+          await initializeGit(task.workingDirectory);
           this.wsClient.sendTaskStatus(task.id, 'queued', 0, 'Git initialized, proceeding...');
           this.trackTaskDirectory(task);
           if (this.runningTasks.size < this.maxConcurrentTasks) {
@@ -865,33 +866,7 @@ export class TaskExecutor {
     }
   }
 
-  /**
-   * Initialize git repository in a directory.
-   * Creates .gitignore and CLAUDE.md if they don't exist before the initial commit.
-   */
-  private async initializeGit(workdir: string): Promise<void> {
-    const { execFile } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const { writeFile, access } = await import('node:fs/promises');
-    const { join } = await import('node:path');
-    const execFileAsync = promisify(execFile);
-
-    await execFileAsync('git', ['init', '-b', 'main'], { cwd: workdir, timeout: 10_000 });
-
-    // Bootstrap with .gitignore and CLAUDE.md if they don't exist
-    const gitignorePath = join(workdir, '.gitignore');
-    const claudeMdPath = join(workdir, 'CLAUDE.md');
-
-    try { await access(gitignorePath); } catch {
-      await writeFile(gitignorePath, '.astro\nnode_modules\n.env\n.env.local\n');
-    }
-    try { await access(claudeMdPath); } catch {
-      await writeFile(claudeMdPath, '# Project\n\nThis project is managed by Astro.\n');
-    }
-
-    await execFileAsync('git', ['add', '.'], { cwd: workdir, timeout: 10_000 });
-    await execFileAsync('git', ['commit', '-m', 'Initial commit'], { cwd: workdir, timeout: 10_000 });
-  }
+  // initializeGit() extracted to git-bootstrap.ts (shared with start.ts onGitInit)
 
   /**
    * Check if a git repo has any commits.
@@ -1572,15 +1547,15 @@ export class TaskExecutor {
     if (this.gitAvailable && await isUntrackedInParentRepo(task.workingDirectory)) {
       console.log(`[executor] Task ${task.id}: workdir is untracked in parent repo, bootstrapping local git`);
       stream.stdout(`[astro] Working directory is untracked in parent repo, initializing local git...\n`);
-      await this.initializeGit(task.workingDirectory);
+      await initializeGit(task.workingDirectory);
     }
 
-    // Zero-commit git repo: bootstrap with .gitignore + CLAUDE.md + initial commit
+    // Zero-commit git repo: bootstrap with .gitignore + initial commit
     // so that worktree creation and PR delivery work correctly.
     if (this.gitAvailable && !(await this.repoHasCommits(task.workingDirectory))) {
       console.log(`[executor] Task ${task.id}: git repo has no commits, bootstrapping...`);
       stream.stdout(`[astro] Bootstrapping empty git repo with initial commit...\n`);
-      await this.initializeGit(task.workingDirectory);
+      await initializeGit(task.workingDirectory);
     }
 
     // Git worktree path — worktree creation must succeed or fail the task.

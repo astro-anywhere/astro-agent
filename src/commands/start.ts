@@ -17,6 +17,7 @@ import { getMachineResources } from '../lib/resources.js';
 import { WebSocketClient } from '../lib/websocket-client.js';
 import { TaskExecutor } from '../lib/task-executor.js';
 import { localRepoSetup } from '../lib/repo-utils.js';
+import { initializeGit } from '../lib/git-bootstrap.js';
 import { executionStrategyRegistry } from '../execution/index.js';
 import {
   formatLaunchBanner,
@@ -993,32 +994,11 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         });
       }
     },
-    onGitInit: (payload: GitInitRequestMessage['payload']) => {
-      const { correlationId, workingDirectory, projectName } = payload;
+    onGitInit: async (payload: GitInitRequestMessage['payload']) => {
+      const { correlationId, workingDirectory } = payload;
       log('info', `Git init request: dir=${workingDirectory}`, logLevel);
       try {
-        // Initialize git, create .gitignore, initial commit
-        execFileSync('git', ['init'], { cwd: workingDirectory, stdio: 'pipe', timeout: 10_000 });
-        execFileSync('git', ['config', 'user.name', 'Astro Agent'], { cwd: workingDirectory, stdio: 'pipe', timeout: 5_000 });
-        execFileSync('git', ['config', 'user.email', 'agent@astro.local'], { cwd: workingDirectory, stdio: 'pipe', timeout: 5_000 });
-
-        // Generate basic .gitignore if missing
-        const gitignorePath = join(workingDirectory, '.gitignore');
-        if (!existsSync(gitignorePath)) {
-          writeFileSync(gitignorePath, 'node_modules/\n.env\n.DS_Store\n*.log\n');
-        }
-
-        // Initial commit
-        try {
-          execFileSync('git', ['add', '-A'], { cwd: workingDirectory, stdio: 'pipe', timeout: 10_000 });
-          execFileSync('git', ['commit', '-m', `Initial commit for ${projectName}`, '--allow-empty'], {
-            cwd: workingDirectory,
-            stdio: 'pipe',
-            timeout: 10_000,
-          });
-        } catch {
-          // Non-fatal: might be empty directory
-        }
+        await initializeGit(workingDirectory);
 
         // Get file tree after init
         let fileTree: string[] = [];
