@@ -109,8 +109,8 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
         ghSpinner.succeed('GitHub CLI (gh) installed and authenticated');
       } else {
         ghSpinner.warn('GitHub CLI (gh) installed but not authenticated');
-        console.log(chalk.yellow('  Run `gh auth login` to enable PR creation'));
-        console.log(chalk.dim('  Without authentication, tasks will use local branch merge instead of PRs'));
+        console.log(chalk.yellow('  Run `gh auth login` to also create PRs automatically'));
+        console.log(chalk.dim('  Astro works without it — tasks will merge branches locally'));
       }
     } else {
       ghSpinner.warn('GitHub CLI (gh) not installed');
@@ -857,14 +857,26 @@ async function selectHostsInteractive(hosts: DiscoveredHost[]): Promise<string[]
  * Returns true if the `gh` binary is available after the attempt.
  */
 function showGhInstallRecommendation(): void {
+  const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
+  const W = 62;
+  const line = (s: string) => {
+    const visible = s.replace(/\x1b\[[0-9;]*m/g, '');
+    return `  ${chalk.cyan(B.v)} ${s}${' '.repeat(Math.max(0, W - visible.length))} ${chalk.cyan(B.v)}`;
+  };
   console.log();
-  console.log(chalk.yellow('  Recommended: install GitHub CLI for PR delivery'));
-  console.log(chalk.dim('    macOS:  brew install gh'));
-  console.log(chalk.dim('    Linux:  https://github.com/cli/cli/blob/trunk/docs/install_linux.md'));
-  console.log(chalk.dim('    Then:   gh auth login'));
+  console.log(`  ${chalk.cyan(B.tl + B.h.repeat(W + 2) + B.tr)}`);
+  console.log(line(chalk.cyan.bold('GitHub CLI (gh) — optional, recommended')));
+  console.log(line(''));
+  console.log(line(`Astro works great without gh! Local mode edits files`));
+  console.log(line(`directly and merges branches locally.`));
+  console.log(line(''));
+  console.log(line(`To also create GitHub PRs automatically, install gh:`));
+  console.log(line(''));
+  console.log(line(`  ${chalk.white('macOS')}   ${chalk.dim('brew install gh')}`));
+  console.log(line(`  ${chalk.white('Linux')}   ${chalk.dim('https://cli.github.com')}`));
+  console.log(line(`  ${chalk.white('Then')}    ${chalk.dim('gh auth login')}`));
+  console.log(`  ${chalk.cyan(B.bl + B.h.repeat(W + 2) + B.br)}`);
   console.log();
-  console.log(chalk.dim('  Without gh, tasks will use local branch merge instead of creating PRs.'));
-  console.log(chalk.dim('  All work is still saved — you can create PRs manually later.'));
 }
 
 /**
