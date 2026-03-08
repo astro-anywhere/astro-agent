@@ -4,7 +4,7 @@
  * Executes tasks using the Codex CLI
  */
 
-import { spawn, execSync, type ChildProcess } from 'node:child_process';
+import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
@@ -78,10 +78,11 @@ export class CodexAdapter implements ProviderAdapter {
   private ensureApprovalMcpRegistered(): void {
     if (CodexAdapter.mcpRegistered) return;
     try {
-      // Check if already registered
-      const existing = execSync(`${this.codexPath} mcp get astro-approval 2>&1`, {
+      // Check if already registered (execFileSync avoids shell injection)
+      const existing = execFileSync(this.codexPath!, ['mcp', 'get', 'astro-approval'], {
         encoding: 'utf-8',
         timeout: 5000,
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
       if (existing && !existing.includes('not found') && !existing.includes('error')) {
         CodexAdapter.mcpRegistered = true;
@@ -95,10 +96,12 @@ export class CodexAdapter implements ProviderAdapter {
     try {
       const serverPath = getApprovalServerPath();
       const apiUrl = config.getConfig().apiUrl || 'http://localhost:3001';
-      execSync(
-        `${this.codexPath} mcp add astro-approval --env ASTRO_SERVER_URL=${apiUrl} -- node ${serverPath}`,
-        { encoding: 'utf-8', timeout: 10000 },
-      );
+      // Use execFileSync with array args to prevent shell injection
+      execFileSync(this.codexPath!, [
+        'mcp', 'add', 'astro-approval',
+        '--env', `ASTRO_SERVER_URL=${apiUrl}`,
+        '--', 'node', serverPath,
+      ], { encoding: 'utf-8', timeout: 10000 });
       CodexAdapter.mcpRegistered = true;
       console.log(`[codex] Registered approval MCP server: node ${serverPath}`);
     } catch (err) {

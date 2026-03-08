@@ -85,11 +85,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   try {
-    const response = await fetch(`${serverUrl}/api/dispatch/request-dynamic-approval`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ executionId, question, options }),
-    });
+    // 5-minute timeout — approval blocks until the user responds, but guard against
+    // a completely unreachable server. Users typically respond within seconds/minutes.
+    const abortCtl = new AbortController();
+    const timeout = setTimeout(() => abortCtl.abort(), 5 * 60 * 1000);
+    let response: Response;
+    try {
+      response = await fetch(`${serverUrl}/api/dispatch/request-dynamic-approval`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ executionId, question, options }),
+        signal: abortCtl.signal,
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({ error: 'Unknown error' }));
