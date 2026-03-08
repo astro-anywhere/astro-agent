@@ -867,8 +867,8 @@ function showGhInstallRecommendation(): void {
   console.log(`  ${chalk.cyan(B.tl + B.h.repeat(W + 2) + B.tr)}`);
   console.log(line(chalk.cyan.bold('GitHub CLI (gh) — optional, recommended')));
   console.log(line(''));
-  console.log(line(`Astro works great without gh! Local mode edits files`));
-  console.log(line(`directly and merges branches locally.`));
+  console.log(line(`Astro works great without gh! It can edit files,`));
+  console.log(line(`run tasks, and merge branches — all locally.`));
   console.log(line(''));
   console.log(line(`To also create GitHub PRs automatically, install gh:`));
   console.log(line(''));
