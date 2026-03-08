@@ -28,6 +28,11 @@ const GITIGNORE_CONTENTS = '.astro\nnode_modules\n.env\n.env.local\n';
 export async function initializeGit(workdir: string): Promise<void> {
   await execFileAsync('git', ['init', '-b', 'main'], { cwd: workdir, timeout: 10_000 });
 
+  // Set repo-local git identity so commit works on machines without global git config.
+  // This writes to .git/config (local only), not the user's ~/.gitconfig.
+  await execFileAsync('git', ['config', 'user.name', 'Astro Agent'], { cwd: workdir, timeout: 5_000 });
+  await execFileAsync('git', ['config', 'user.email', 'agent@astro.local'], { cwd: workdir, timeout: 5_000 });
+
   // Create .gitignore if it doesn't exist
   const gitignorePath = join(workdir, '.gitignore');
   try {

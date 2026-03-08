@@ -17,6 +17,7 @@ import { getMachineResources } from '../lib/resources.js';
 import { WebSocketClient } from '../lib/websocket-client.js';
 import { TaskExecutor } from '../lib/task-executor.js';
 import { localRepoSetup } from '../lib/repo-utils.js';
+import { initializeGit } from '../lib/git-bootstrap.js';
 import { executionStrategyRegistry } from '../execution/index.js';
 import {
   formatLaunchBanner,
@@ -997,8 +998,6 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       const { correlationId, workingDirectory } = payload;
       log('info', `Git init request: dir=${workingDirectory}`, logLevel);
       try {
-        // Use shared initializeGit (same as task-executor.ts)
-        const { initializeGit } = await import('../lib/git-bootstrap.js');
         await initializeGit(workingDirectory);
 
         // Get file tree after init
