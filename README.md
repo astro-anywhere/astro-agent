@@ -47,7 +47,7 @@ No global install. `npx` fetches the latest version.
 ```
 $ npx @astroanywhere/agent@latest launch
 
-  Detecting providers... claude-sdk, claude-code
+  Detecting providers... claude-sdk
   Discovering SSH hosts... found 3: lab-gpu, hpc-login, aws-dev
 
   To authenticate, open this URL in your browser:
