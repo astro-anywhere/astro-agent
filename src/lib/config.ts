@@ -62,6 +62,12 @@ function resolveRelayUrlFromEnv(): string {
   return DEFAULT_RELAY_URL;
 }
 
+/** Map legacy provider type strings to current values. */
+function normalizeProviderType(type: ProviderType): ProviderType {
+  if ((type as string) === 'claude-code') return 'claude-sdk';
+  return type;
+}
+
 interface ConfigSchema {
   runnerId: string;
   machineId: string;
@@ -388,10 +394,12 @@ class ConfigManager {
   }
 
   /**
-   * Get configured providers
+   * Get configured providers.
+   * Normalizes legacy values (e.g. 'claude-code' → 'claude-sdk') read from disk.
    */
   getProviders(): ProviderType[] {
-    return this.conf.get('providers');
+    const raw = this.conf.get('providers');
+    return raw.map(normalizeProviderType);
   }
 
   /**
