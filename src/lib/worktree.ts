@@ -40,6 +40,8 @@ export interface WorktreeSetup {
   gitRoot: string;
   /** Project accumulation branch name, if applicable (e.g., 'astro/7b19a9') */
   projectBranch?: string;
+  /** Absolute path to the persistent project worktree (detached HEAD), if created */
+  projectWorktreePath?: string;
   cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
 }
 
@@ -126,6 +128,16 @@ export async function createWorktree(
   // create it from origin/{defaultBranch}. Idempotent.
   if (projectBranchName) {
     await ensureProjectBranch(gitRoot, projectBranchName, defaultBranch);
+  }
+
+  // Create persistent project worktree (detached HEAD) — idempotent.
+  // This enables file browsing at .astro/worktrees/{shortProjectId}/ after
+  // task worktrees are cleaned up.
+  let projectWorktreePath: string | undefined;
+  if (projectBranchName && shortProjectId) {
+    projectWorktreePath = await createProjectWorktree(
+      gitRoot, projectBranchName, baseRoot, sanitize(shortProjectId),
+    ) ?? undefined;
   }
 
   // Start point: prefer project branch tip (accumulates prior task work),
@@ -225,6 +237,7 @@ export async function createWorktree(
     commitBeforeSha,
     gitRoot,
     projectBranch: projectBranchName,
+    projectWorktreePath,
     cleanup: async (options?: { keepBranch?: boolean }) => {
       await cleanupWorktree(gitRoot, worktreePath, taskBranchName, options?.keepBranch);
     },
@@ -385,6 +398,128 @@ async function ensureProjectBranch(
       throw new Error(`Failed to create local project branch ${projectBranch}: ${msg}`);
     }
   }
+}
+
+/**
+ * Create a persistent project-level worktree using detached HEAD.
+ *
+ * The project worktree lives at {baseRoot}/{shortProjectId}/ and mirrors
+ * the project branch on disk. It uses `--detach` so the project branch
+ * ref remains free for temporary merge worktrees (localMergeIntoProjectBranch
+ * checks out the project branch — git prevents the same branch in two worktrees).
+ *
+ * Idempotent — safe to call on every task dispatch. If the worktree
+ * already exists, returns the existing path.
+ */
+export async function createProjectWorktree(
+  gitRoot: string,
+  projectBranch: string,
+  baseRoot: string,
+  shortProjectId: string,
+): Promise<string | null> {
+  const projectWorktreePath = join(baseRoot, shortProjectId);
+
+  // Already exists — no-op
+  if (existsSync(projectWorktreePath)) {
+    console.log(`[worktree] Project worktree already exists at ${projectWorktreePath}`);
+    return projectWorktreePath;
+  }
+
+  // Determine start point: prefer local ref, fall back to remote
+  const localRef = `refs/heads/${projectBranch}`;
+  const remoteRef = `origin/${projectBranch}`;
+  const hasLocal = await refExists(gitRoot, localRef);
+  const startPoint = hasLocal ? localRef : remoteRef;
+
+  try {
+    await execFileAsync(
+      'git',
+      ['-C', gitRoot, 'worktree', 'add', '--detach', projectWorktreePath, startPoint],
+      { env: withGitEnv(), timeout: 30_000 }
+    );
+    console.log(`[worktree] Created persistent project worktree at ${projectWorktreePath} (detached HEAD at ${projectBranch})`);
+    return projectWorktreePath;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Handle race: another parallel task created it between our check and git worktree add
+    if (msg.includes('already registered') || msg.includes('already exists')) {
+      console.log(`[worktree] Project worktree created by another task (race OK): ${projectWorktreePath}`);
+      return projectWorktreePath;
+    }
+    console.warn(`[worktree] Failed to create project worktree: ${msg}`);
+    return null;
+  }
+}
+
+/**
+ * Sync the persistent project worktree to the latest project branch tip.
+ *
+ * After each successful merge (branch or PR mode), the project branch moves
+ * forward. This updates the detached HEAD in the project worktree so the
+ * files on disk reflect the latest state.
+ *
+ * Non-fatal — sync failure doesn't affect task completion.
+ */
+export async function syncProjectWorktree(
+  projectWorktreePath: string,
+  projectBranch: string,
+  gitRoot: string,
+): Promise<void> {
+  if (!existsSync(projectWorktreePath)) {
+    return;
+  }
+
+  // For remote repos, fetch the latest project branch so the local ref is current
+  const hasRemote = await repoHasRemote(gitRoot);
+  if (hasRemote) {
+    try {
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, 'fetch', 'origin', projectBranch],
+        { env: withGitEnv(), timeout: 15_000 }
+      );
+    } catch {
+      // Non-fatal: proceed with local ref
+    }
+  }
+
+  try {
+    await execFileAsync(
+      'git',
+      ['-C', projectWorktreePath, 'checkout', '--detach', `refs/heads/${projectBranch}`],
+      { env: withGitEnv(), timeout: 10_000 }
+    );
+    console.log(`[worktree] Synced project worktree at ${projectWorktreePath} to ${projectBranch} tip`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[worktree] Failed to sync project worktree: ${msg}`);
+  }
+}
+
+/**
+ * Remove the persistent project worktree.
+ * Called when the project branch is deleted or the project is removed.
+ */
+export async function cleanupProjectWorktree(
+  gitRoot: string,
+  projectWorktreePath: string,
+): Promise<void> {
+  if (!existsSync(projectWorktreePath)) {
+    return;
+  }
+
+  try {
+    await execFileAsync(
+      'git',
+      ['-C', gitRoot, 'worktree', 'remove', '--force', projectWorktreePath],
+      { env: withGitEnv(), timeout: 30_000 }
+    );
+  } catch {
+    await rm(projectWorktreePath, { recursive: true, force: true });
+  }
+
+  await pruneWorktrees(gitRoot);
+  console.log(`[worktree] Cleaned up project worktree at ${projectWorktreePath}`);
 }
 
 /**
