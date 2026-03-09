@@ -17,7 +17,7 @@ import { discoverRemoteHosts } from '../lib/ssh-discovery.js';
 import { requestDeviceCode, pollForToken, registerMachine, DeviceAuthApiError } from '../lib/api-client.js';
 import {
   detectLocalIP, checkRemoteNode, packAndInstall, sshExec,
-  hasControlMaster, establishControlMaster,
+  hasControlMaster, establishControlMaster, teardownControlMaster,
 } from '../lib/ssh-installer.js';
 import {
   formatInstallErrorBox,
@@ -663,9 +663,15 @@ async function installOnRemoteHosts(
       // Duo push. We detect this and offer to establish a ControlMaster session
       // so the user can authenticate interactively once.
       const errMsg = err instanceof Error ? err.message : String(err);
-      const is2FA = errMsg.includes('Permission denied') ||
-        errMsg.includes('keyboard-interactive') ||
-        errMsg.includes('password');
+
+      // Detect 2FA/interactive auth requirement. BatchMode=yes produces specific
+      // error messages when the server requires keyboard-interactive or password
+      // auth (which includes Duo, OTP prompts). We look for these indicators
+      // specifically to avoid misclassifying plain SSH key failures.
+      const is2FA = errMsg.includes('keyboard-interactive') ||
+        errMsg.includes('password') ||
+        // "Permission denied (keyboard-interactive)" is the most common 2FA signal
+        (errMsg.includes('Permission denied') && errMsg.includes('interactive'));
 
       // Check if a ControlMaster session already exists (shouldn't, but be safe)
       const hasMaster = await hasControlMaster(host);
@@ -845,6 +851,14 @@ async function installOnRemoteHosts(
       if (verbose && err instanceof Error && err.stack) {
         console.error(chalk.dim(`[setup] Stack trace: ${err.stack}`));
       }
+    }
+  }
+
+  // Clean up any ControlMaster sessions we established for 2FA hosts
+  for (const hostName of selectedHosts) {
+    const host = discoveredHosts.find((h) => h.name === hostName);
+    if (host) {
+      await teardownControlMaster(host).catch(() => {});
     }
   }
 

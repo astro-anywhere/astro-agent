@@ -50,19 +50,38 @@ const testHost: DiscoveredHost = {
 describe('controlSocketPath', () => {
   it('should return a path under ~/.ssh/astro-sockets/', () => {
     const path = controlSocketPath(testHost);
-    expect(path).toBe('/home/testuser/.ssh/astro-sockets/testuser@10.0.0.1:22');
+    expect(path).toMatch(/^\/home\/testuser\/\.ssh\/astro-sockets\/[0-9a-f]{16}$/);
   });
 
-  it('should use custom port when specified', () => {
+  it('should produce different hashes for different ports', () => {
     const host: DiscoveredHost = { ...testHost, port: 2222 };
-    const path = controlSocketPath(host);
-    expect(path).toBe('/home/testuser/.ssh/astro-sockets/testuser@10.0.0.1:2222');
+    const path1 = controlSocketPath(testHost);
+    const path2 = controlSocketPath(host);
+    expect(path1).not.toBe(path2);
   });
 
-  it('should use "default" when no user specified', () => {
+  it('should produce different hashes for different users', () => {
     const host: DiscoveredHost = { ...testHost, user: undefined };
-    const path = controlSocketPath(host);
-    expect(path).toBe('/home/testuser/.ssh/astro-sockets/default@10.0.0.1:22');
+    const path1 = controlSocketPath(testHost);
+    const path2 = controlSocketPath(host);
+    expect(path1).not.toBe(path2);
+  });
+
+  it('should produce deterministic paths for the same host', () => {
+    const path1 = controlSocketPath(testHost);
+    const path2 = controlSocketPath(testHost);
+    expect(path1).toBe(path2);
+  });
+
+  it('should stay well under Unix socket path limit', () => {
+    const longHost: DiscoveredHost = {
+      ...testHost,
+      hostname: 'very-long-subdomain.cluster.department.university.edu',
+      user: 'longusername',
+    };
+    const path = controlSocketPath(longHost);
+    // macOS limit is 104, Linux is 108
+    expect(path.length).toBeLessThan(104);
   });
 });
 
@@ -78,8 +97,9 @@ describe('buildSshArgs', () => {
 
   it('should include ControlPath for multiplexing', () => {
     const args = buildSshArgs(testHost, 'echo hello');
-    const cpIdx = args.indexOf('ControlPath=/home/testuser/.ssh/astro-sockets/testuser@10.0.0.1:22');
-    expect(cpIdx).toBeGreaterThan(-1);
+    const cpArg = args.find(a => a.startsWith('ControlPath='));
+    expect(cpArg).toBeDefined();
+    expect(cpArg).toMatch(/ControlPath=.*astro-sockets\/[0-9a-f]{16}$/);
   });
 
   it('should include port flag when non-default port', () => {

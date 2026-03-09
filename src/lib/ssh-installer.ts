@@ -8,6 +8,7 @@
 
 import { execFile as execFileCb, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
 import { networkInterfaces, homedir } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,12 +51,17 @@ const CONTROL_SOCKET_DIR = join(homedir(), '.ssh', 'astro-sockets');
 
 /**
  * Return the ControlPath for a given host.
- * Format: ~/.ssh/astro-sockets/%r@%h:%p
+ *
+ * Uses a truncated SHA-256 hash of user@hostname:port to keep the path
+ * well under the Unix domain socket limit (104 bytes on macOS, 108 on Linux).
+ * Result: ~/.ssh/astro-sockets/<16-char hex hash>  (total ~50 bytes)
  */
 export function controlSocketPath(host: DiscoveredHost): string {
   const user = host.user ?? 'default';
   const port = host.port ?? 22;
-  return join(CONTROL_SOCKET_DIR, `${user}@${host.hostname}:${port}`);
+  const key = `${user}@${host.hostname}:${port}`;
+  const hash = createHash('sha256').update(key).digest('hex').slice(0, 16);
+  return join(CONTROL_SOCKET_DIR, hash);
 }
 
 /**
@@ -104,25 +110,38 @@ export async function establishControlMaster(host: DiscoveredHost): Promise<bool
     target,
   );
 
+  const AUTH_TIMEOUT_MS = 120_000; // 2 minutes for user to complete 2FA
+
   return new Promise<boolean>((resolve) => {
     const child = spawn('ssh', args, {
       stdio: 'inherit',  // user sees 2FA prompts, enters password, etc.
     });
 
-    // Give the connection time to establish, then check
+    let settled = false;
+    const finish = (result: boolean) => {
+      if (!settled) { settled = true; resolve(result); }
+    };
+
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      finish(false);
+    }, AUTH_TIMEOUT_MS);
+
     child.on('close', async (code) => {
+      clearTimeout(timer);
       // -N + ControlPersist means SSH exits 0 after backgrounding the master
       if (code === 0) {
-        resolve(true);
+        finish(true);
       } else {
         // Check if master established despite non-zero exit (can happen with -N)
         const running = await hasControlMaster(host);
-        resolve(running);
+        finish(running);
       }
     });
 
     child.on('error', () => {
-      resolve(false);
+      clearTimeout(timer);
+      finish(false);
     });
   });
 }
@@ -390,8 +409,10 @@ export function buildSshArgs(host: DiscoveredHost, command: string): string[] {
     args.push('-J', host.proxyJump);
   }
 
-  // If a ControlMaster socket exists, route through it (supports 2FA hosts).
-  // Otherwise fall back to BatchMode=yes for non-interactive operation.
+  // ControlPath enables multiplexing: if a master session exists, SSH routes
+  // through it without re-authenticating, so BatchMode=yes is fine — the auth
+  // already happened on the master. If no master exists, BatchMode=yes ensures
+  // SSH fails fast instead of hanging on a password/2FA prompt.
   const socketPath = controlSocketPath(host);
   args.push('-o', `ControlPath=${socketPath}`);
   args.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10');
