@@ -237,53 +237,65 @@ Stored at `~/.config/astro-agent/config.json`. Most users never need to touch th
 ## Architecture
 
 ```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'primaryColor': '#e8e0d8',
-  'primaryBorderColor': '#b8a99a',
-  'primaryTextColor': '#3d3a37',
-  'lineColor': '#9a918a',
-  'textColor': '#3d3a37',
-  'fontSize': '18px',
-  'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif'
-}}}%%
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#e8e0d8',
+    'primaryBorderColor': '#b8a99a',
+    'primaryTextColor': '#3d3a37',
+    'lineColor': '#9a918a',
+    'textColor': '#3d3a37',
+    'fontSize': '20px',
+    'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif',
+    'edgeLabelBackground': 'transparent'
+  },
+  'flowchart': {
+    'nodeSpacing': 30,
+    'rankSpacing': 50,
+    'padding': 24,
+    'htmlLabels': true,
+    'curve': 'basis'
+  }
+}}%%
 flowchart TD
-    classDef warm fill:#e8e0d8,stroke:#b8a99a,color:#3d3a37
-    classDef sand fill:#f0ebe4,stroke:#c4b9ab,color:#3d3a37
-    classDef sage fill:#dde5da,stroke:#a8b8a2,color:#3d3a37
-    classDef mist fill:#dce4ec,stroke:#9ab0c4,color:#3d3a37
-    classDef rose fill:#eaddd8,stroke:#c4a99c,color:#3d3a37
+    classDef warm fill:#e8e0d8,stroke:#b8a99a,stroke-width:2px,color:#3d3a37,font-size:20px
+    classDef sand fill:#f0ebe4,stroke:#c4b9ab,stroke-width:2px,color:#3d3a37,font-size:20px
+    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37,font-size:18px
+    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:2px,color:#3d3a37,font-size:18px
 
-    Dashboard["<b>Astro Dashboard</b><br/>Plan / Dispatch / Monitor / Steer / Ship"]:::warm
+    Dashboard["<b>Astro Dashboard</b><br/><br/>Plan &nbsp; Dispatch &nbsp; Monitor &nbsp; Steer &nbsp; Ship"]:::warm
 
-    Dashboard -->|"REST + SSE"| Server
+    Dashboard ==>|" REST + SSE "| Server
 
-    Server["<b>Astro Server</b><br/>Orchestrator / Dispatch / Relay"]:::sand
+    Server["<b>Astro Server</b><br/><br/>Orchestrator &nbsp; Dispatch &nbsp; Relay"]:::sand
 
-    Server -->|"WebSocket"| Runner
+    Server ==>|" WebSocket "| Runner
 
-    subgraph Runner[" "]
+    subgraph Runner["&nbsp; Agent Runner &mdash; this repo &nbsp;"]
         direction LR
 
-        subgraph agents["AI Agents"]
+        subgraph agents["&nbsp; AI Agents &nbsp;"]
             direction TB
-            A1["Claude SDK"]:::mist
-            A2["Codex"]:::mist
-            A3["OpenClaw"]:::mist
-            A4["OpenCode"]:::mist
+            A1["&nbsp; Claude SDK &nbsp;"]:::mist
+            A2["&nbsp; Codex &nbsp;"]:::mist
+            A3["&nbsp; OpenClaw &nbsp;"]:::mist
+            A4["&nbsp; OpenCode &nbsp;"]:::mist
         end
 
-        subgraph compute["Compute Backends"]
+        subgraph compute["&nbsp; Compute Backends &nbsp;"]
             direction TB
-            C1["Docker"]:::rose
-            C2["Slurm"]:::rose
-            C3["Kubernetes"]:::rose
-            C4["SSH"]:::rose
+            C1["&nbsp; Docker &nbsp;"]:::rose
+            C2["&nbsp; Slurm &nbsp;"]:::rose
+            C3["&nbsp; Kubernetes &nbsp;"]:::rose
+            C4["&nbsp; SSH &nbsp;"]:::rose
         end
     end
 
-    style Runner fill:#f7f4f0,stroke:#b8a99a,color:#3d3a37,font-size:18px
-    style agents fill:#edf2f7,stroke:#9ab0c4,color:#3d3a37
-    style compute fill:#f5eeea,stroke:#c4a99c,color:#3d3a37
+    style Runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:2px,color:#3d3a37,font-size:20px
+    style agents fill:#edf2f7,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37,font-size:18px
+    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:2px,color:#3d3a37,font-size:18px
+
+    linkStyle default stroke:#9a918a,stroke-width:3px
 ```
 
 > **Agent Runner** (this repo) receives tasks, selects an AI agent, runs it on the appropriate compute backend, and streams results back.
