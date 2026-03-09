@@ -527,7 +527,7 @@ export async function startRemoteAgents(
     try {
       const { stdout } = await sshExec(
         host,
-        '(pgrep -f "[a]stro-agent" 2>/dev/null || ps aux | awk \'/[a]stro-agent/{print $2}\') || true',
+        '(pgrep -f "[a]stro-agent start" 2>/dev/null || ps aux | awk \'/[a]stro-agent start/{print $2}\') || true',
       );
       if (stdout.trim()) {
         log(host.name, 'Agent started — reading status...');
