@@ -81,24 +81,27 @@ async function parseSSHConfig(): Promise<SSHHost[]> {
           hostname: hostPattern, // Default to the host alias
         };
       } else if (currentHost && value) {
+        // Strip inline comments: require whitespace before AND after '#'
+        // so that '#' inside values (e.g., paths) is preserved.
+        // Matches "value  # comment" but not "value#fragment".
+        const stripComment = (v: string) => v.trim().replace(/\s+#\s.*$/, '');
+
         switch (keyLower) {
           case 'hostname': {
-            // Strip inline comments (e.g., "1.2.3.4  # my server" → "1.2.3.4")
-            currentHost.hostname = value.trim().replace(/\s+#.*$/, '');
+            currentHost.hostname = stripComment(value);
             break;
           }
           case 'user':
-            // Strip inline comments (e.g., "ubuntu  # replace with your user" → "ubuntu")
-            currentHost.user = value.trim().replace(/\s+#.*$/, '');
+            currentHost.user = stripComment(value);
             break;
           case 'port':
-            currentHost.port = parseInt(value.trim().replace(/\s+#.*$/, ''), 10);
+            currentHost.port = parseInt(stripComment(value), 10);
             break;
           case 'identityfile':
-            currentHost.identityFile = value.trim().replace(/\s+#.*$/, '').replace('~', homedir());
+            currentHost.identityFile = stripComment(value).replace('~', homedir());
             break;
           case 'proxyjump':
-            currentHost.proxyJump = value.trim().replace(/\s+#.*$/, '');
+            currentHost.proxyJump = stripComment(value);
             break;
         }
       }
