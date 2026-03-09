@@ -18,7 +18,7 @@ const mockExecFile = vi.hoisted(() => {
     }
   };
   // This is what promisify(execFile) will call
-  (fn as unknown as Record<symbol, unknown>)[_promisify.custom] = (_cmd: string, gitArgs: string[], _opts?: unknown) => {
+  (fn as unknown as Record<symbol, unknown>)[_promisify.custom] = (_cmd: string, gitArgs: string[]) => {
     return new Promise((resolve, reject) => {
       const filtered = (gitArgs as string[]).filter((a: string, i: number, arr: string[]) => {
         if (a === '-C') return false;
@@ -28,8 +28,8 @@ const mockExecFile = vi.hoisted(() => {
       const key = filtered.join(' ');
 
       // We'll use a global to pass responses since hoisted runs before module scope
-      const responses = (globalThis as any).__gitResponses ?? {};
-      for (const [pattern, response] of Object.entries(responses) as [string, any][]) {
+      const responses = (globalThis as unknown as Record<string, Record<string, GitResponse>>).__gitResponses ?? {};
+      for (const [pattern, response] of Object.entries(responses) as [string, GitResponse][]) {
         if (key.includes(pattern)) {
           if (response.error) {
             reject(response.error);
@@ -58,11 +58,11 @@ import { localMergeIntoProjectBranch } from '../local-merge.js';
 describe('localMergeIntoProjectBranch', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (globalThis as any).__gitResponses = {};
+    (globalThis as unknown as Record<string, unknown>).__gitResponses = {};
   });
 
   function setGitResponses(responses: Record<string, GitResponse>) {
-    (globalThis as any).__gitResponses = responses;
+    (globalThis as unknown as Record<string, unknown>).__gitResponses = responses;
   }
 
   it('returns merged=false when there are no changes between branches', async () => {

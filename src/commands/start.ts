@@ -117,7 +117,7 @@ function scanSlashCommands(workingDirectory?: string): Array<{ name: string; des
  */
 async function killExistingProcesses(): Promise<void> {
   const myPid = process.pid;
-  let pids: string[] = [];
+  const pids: string[] = [];
 
   // Check PID file first
   const pidFile = join(homedir(), '.astro', 'agent-runner.pid');
@@ -436,9 +436,9 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         log('error', `Failed to handle safety decision for task ${taskId}: ${error.message}`, logLevel);
       });
     },
-    onTaskSteer: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string, branchName?: string) => {
+    onTaskSteer: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string) => {
       log('info', `Received steer for task ${taskId}: "${message.slice(0, 100)}"${action ? ` (action: ${action})` : ''}${interrupt ? ' (interrupt)' : ''}${sessionId ? ` session=${sessionId}` : ''}`, logLevel);
-      taskExecutor.steerTask(taskId, message, interrupt ?? false, sessionId, branchName).then((result) => {
+      taskExecutor.steerTask(taskId, message, interrupt ?? false, sessionId).then((result) => {
         wsClient.sendSteerAck(taskId, result.accepted, result.reason, interrupt);
         log('info', `Steer ack for task ${taskId}: accepted=${result.accepted}${result.reason ? ` reason=${result.reason}` : ''}${interrupt ? ' (interrupt)' : ''}`, logLevel);
       }).catch((err) => {
@@ -666,7 +666,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           .map(d => {
             const fullPath = join(resolvedPath, d.name);
             let isDirectory = d.isDirectory();
-            let isSymlink = d.isSymbolicLink();
+            const isSymlink = d.isSymbolicLink();
             // Resolve symlinks to check if they point to directories
             if (isSymlink) {
               try {

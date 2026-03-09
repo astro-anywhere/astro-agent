@@ -85,7 +85,7 @@ describe('requestDeviceCode', () => {
 
     try {
       await requestDeviceCode('https://api.example.com', { hostname: 'h', platform: 'p' })
-    } catch (err) {
+    } catch {
       // Second call also fails with same mock reset
     }
   })

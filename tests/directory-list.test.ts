@@ -7,7 +7,7 @@
  *   3. WebSocket client — response sending
  *   4. Start command — onDirectoryList callback (filesystem listing logic)
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect } from 'vitest'
 import { existsSync, statSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'

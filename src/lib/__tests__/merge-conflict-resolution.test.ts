@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 /** Mirror of sanitizeGitRef from task-executor.ts */
 function sanitizeGitRef(ref: string): string {
-  return ref.replace(/[^a-zA-Z0-9/_.\-]/g, '');
+  return ref.replace(/[^a-zA-Z0-9/_.-]/g, '');
 }
 
 /**

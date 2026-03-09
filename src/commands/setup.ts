@@ -1052,6 +1052,7 @@ function showGhInstallRecommendation(): void {
   const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
   const W = 62;
   const line = (s: string) => {
+    // eslint-disable-next-line no-control-regex
     const visible = s.replace(/\x1b\[[0-9;]*m/g, '');
     return `  ${chalk.cyan(B.v)} ${s}${' '.repeat(Math.max(0, W - visible.length))} ${chalk.cyan(B.v)}`;
   };
