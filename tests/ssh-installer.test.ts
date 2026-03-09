@@ -29,9 +29,13 @@ vi.mock('node:child_process', () => {
   };
 });
 
-vi.mock('node:os', () => ({
-  networkInterfaces: vi.fn(),
-}));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return {
+    ...actual,
+    networkInterfaces: vi.fn(),
+  };
+});
 
 // Must import after mocks
 import {
