@@ -157,28 +157,12 @@ npx @astroanywhere/agent@latest launch --no-ssh-config
 
 #### Option B &mdash; From a compute node (if the login node blocks it)
 
-Request an interactive allocation first, then install from the compute node:
+Request an interactive allocation first, then launch from the compute node:
 
 ```bash
 ssh user@hpc-login.university.edu
 srun --time=8:00:00 --mem=4G --pty bash
 npx @astroanywhere/agent@latest launch --no-ssh-config
-```
-
-Or authenticate on the login node first, then submit the long-running agent as a batch job:
-
-```bash
-# Run once on the login node to authenticate (opens a browser URL)
-npx @astroanywhere/agent@latest setup --no-ssh-config
-
-# Then submit the agent as a Slurm job
-sbatch <<'EOF'
-#!/bin/bash
-#SBATCH --time=8:00:00
-#SBATCH --mem=4G
-#SBATCH --job-name=astro-agent
-npx @astroanywhere/agent@latest start
-EOF
 ```
 
 **Before running `launch`**, install at least one AI coding agent on the cluster:
