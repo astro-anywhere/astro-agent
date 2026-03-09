@@ -238,51 +238,55 @@ Stored at `~/.config/astro-agent/config.json`. Most users never need to touch th
 
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {
-  'primaryColor': '#dbeafe',
-  'primaryBorderColor': '#93c5fd',
-  'primaryTextColor': '#1e293b',
-  'lineColor': '#64748b',
-  'textColor': '#334155',
-  'fontSize': '14px',
-  'fontFamily': 'Inter, -apple-system, sans-serif'
+  'primaryColor': '#e8e0d8',
+  'primaryBorderColor': '#b8a99a',
+  'primaryTextColor': '#3d3a37',
+  'lineColor': '#9a918a',
+  'textColor': '#3d3a37',
+  'fontSize': '18px',
+  'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif'
 }}}%%
 flowchart TD
-    classDef blue fill:#dbeafe,stroke:#93c5fd,color:#1e293b
-    classDef green fill:#dcfce7,stroke:#86efac,color:#1e293b
-    classDef amber fill:#fef3c7,stroke:#fcd34b,color:#1e293b
-    classDef slate fill:#f1f5f9,stroke:#cbd5e1,color:#1e293b
-    classDef violet fill:#ede9fe,stroke:#c4b5fd,color:#1e293b
+    classDef warm fill:#e8e0d8,stroke:#b8a99a,color:#3d3a37
+    classDef sand fill:#f0ebe4,stroke:#c4b9ab,color:#3d3a37
+    classDef sage fill:#dde5da,stroke:#a8b8a2,color:#3d3a37
+    classDef mist fill:#dce4ec,stroke:#9ab0c4,color:#3d3a37
+    classDef rose fill:#eaddd8,stroke:#c4a99c,color:#3d3a37
 
-    Dashboard["Astro Dashboard · browser\nPlan · Dispatch · Monitor · Steer · Ship"]:::blue
+    Dashboard["<b>Astro Dashboard</b><br/>Plan / Dispatch / Monitor / Steer / Ship"]:::warm
 
-    Dashboard -->|"SSE / REST"| Server
+    Dashboard -->|"REST + SSE"| Server
 
-    Server["Astro Server\nOrchestrator · Dispatch · Relay"]:::slate
+    Server["<b>Astro Server</b><br/>Orchestrator / Dispatch / Relay"]:::sand
 
     Server -->|"WebSocket"| Runner
 
-    subgraph Runner["Agent Runner — this repo"]
-        direction TB
+    subgraph Runner[" "]
+        direction LR
 
         subgraph agents["AI Agents"]
-            A1["Claude SDK"]:::violet
-            A2["Codex"]:::violet
-            A3["OpenClaw"]:::violet
-            A4["OpenCode"]:::violet
+            direction TB
+            A1["Claude SDK"]:::mist
+            A2["Codex"]:::mist
+            A3["OpenClaw"]:::mist
+            A4["OpenCode"]:::mist
         end
 
         subgraph compute["Compute Backends"]
-            C1["Docker"]:::amber
-            C2["Slurm / HPC"]:::amber
-            C3["Kubernetes"]:::amber
-            C4["SSH · VM"]:::amber
+            direction TB
+            C1["Docker"]:::rose
+            C2["Slurm"]:::rose
+            C3["Kubernetes"]:::rose
+            C4["SSH"]:::rose
         end
     end
 
-    style Runner fill:#f8fafc,stroke:#93c5fd,color:#1e293b
-    style agents fill:#faf5ff,stroke:#c4b5fd,color:#1e293b
-    style compute fill:#fffbeb,stroke:#fcd34b,color:#1e293b
+    style Runner fill:#f7f4f0,stroke:#b8a99a,color:#3d3a37,font-size:18px
+    style agents fill:#edf2f7,stroke:#9ab0c4,color:#3d3a37
+    style compute fill:#f5eeea,stroke:#c4a99c,color:#3d3a37
 ```
+
+> **Agent Runner** (this repo) receives tasks, selects an AI agent, runs it on the appropriate compute backend, and streams results back.
 
 ## Related
 
