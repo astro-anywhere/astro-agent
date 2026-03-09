@@ -1191,6 +1191,25 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       }
     }
 
+    // Detect unauthenticated Claude Code sessions.
+    // When the keychain token is missing (common on remote/HPC machines), the CLI
+    // streams "Not logged in · Please run /login" for every turn instead of doing work.
+    // The SDK still reports subtype=success because the process exited cleanly.
+    // We must detect this and fail the task — otherwise it gets auto-verified despite
+    // producing zero useful output.
+    if (success && (output.includes('Not logged in') || output.includes('Please run /login'))) {
+      success = false;
+      errorMessage =
+        'Claude Code is not authenticated on this machine. The CLI reported "Not logged in · Please run /login".\n\n' +
+        'The Mac keychain credential is not accessible (common on remote or headless machines).\n' +
+        'To fix this, generate a Claude auth token on an authenticated machine:\n' +
+        '  1. Run: claude setup-token\n' +
+        '  2. Set the token in the agent environment: CLAUDE_CODE_OAUTH_TOKEN=<token>\n' +
+        '     (add it to ~/.astro/config.json under "environment" or export it in your shell)\n' +
+        '  3. Alternatively, set ANTHROPIC_API_KEY to use direct API key authentication.';
+      stream.status('failed', progress, 'Authentication error: Claude Code not logged in — set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY');
+    }
+
     return {
       success,
       output,

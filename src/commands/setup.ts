@@ -261,23 +261,53 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
         await setupClaudeOauthToken();
       }
     } else {
-      // Check if `claude` CLI is already logged in (session-based OAuth)
-      let claudeCliLoggedIn = false;
+      // Check if `claude` CLI is available on this machine
+      let claudeDetected = false;
       try {
         const { stdout } = await execFile('claude', ['--version']);
-        if (stdout) claudeCliLoggedIn = true;
+        if (stdout) claudeDetected = true;
       } catch {
         // claude CLI not available
       }
 
-      if (claudeCliLoggedIn) {
-        console.log(chalk.green('✓ Claude CLI detected — agent SDK will use existing CLI session\n'));
+      if (claudeDetected) {
+        // Claude is installed but no explicit token is configured.
+        // The CLI's keychain session is NOT reliable in agent/background contexts:
+        // on Mac, the keychain is only accessible in the user's GUI session, so
+        // tasks fail with "Not logged in · Please run /login" when the agent runs
+        // headlessly or is invoked from a non-GUI context (SSH, background process).
+        console.log(chalk.yellow('  Claude CLI is installed, but no Claude auth token is configured.\n'));
+        console.log(chalk.dim('  The CLI\'s keychain session may not be accessible when the agent'));
+        console.log(chalk.dim('  runs as a background process. This causes tasks to fail with'));
+        console.log(chalk.dim('  "Not logged in · Please run /login" even though you are logged in.\n'));
+        console.log(chalk.bold('  Recommended: generate a Claude auth token to ensure reliable auth.\n'));
+
+        if (!options.nonInteractive) {
+          const { setupToken } = await inquirer.prompt<{ setupToken: boolean }>([
+            {
+              type: 'confirm',
+              name: 'setupToken',
+              message: 'Set up a Claude auth token now? (strongly recommended)',
+              default: true,
+            },
+          ]);
+          if (setupToken) {
+            await setupClaudeOauthToken();
+          } else {
+            console.log(chalk.dim('  You can set it up later: run `claude setup-token` and set'));
+            console.log(chalk.dim('  CLAUDE_CODE_OAUTH_TOKEN in the agent environment,'));
+            console.log(chalk.dim('  or set ANTHROPIC_API_KEY.\n'));
+          }
+        } else {
+          console.log(chalk.dim('  Run `claude setup-token` and set CLAUDE_CODE_OAUTH_TOKEN,'));
+          console.log(chalk.dim('  or set ANTHROPIC_API_KEY in the agent environment.\n'));
+        }
       } else {
         console.log(chalk.dim('The agent runner needs authentication to call the Claude API.'));
         console.log(chalk.dim('You can either:'));
-        console.log(chalk.dim('  1. Run `claude login` to authenticate the CLI (recommended)'));
+        console.log(chalk.dim('  1. Install Claude Code and run `claude login` (then re-run setup to configure a cloud token)'));
         console.log(chalk.dim('  2. Set ANTHROPIC_API_KEY environment variable'));
-        console.log(chalk.dim('  3. Generate a long-lived token via `claude setup-token`\n'));
+        console.log(chalk.dim('  3. Set CLAUDE_CODE_OAUTH_TOKEN (generate via `claude setup-token`)\n'));
       }
     }
     console.log();
