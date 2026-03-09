@@ -15,19 +15,19 @@
   <text x="450" y="58" text-anchor="middle" font-size="24" font-weight="bold" fill="#1a2744">Astro Server</text>
   <text x="450" y="80" text-anchor="middle" font-size="14" fill="#9a918a" font-style="italic">astroanywhere.com</text>
 
-  <!-- Plan / Tasks / Dispatch — centered -->
-  <rect x="170" y="100" width="170" height="60" rx="6" fill="#e8e0d8" stroke="#b8a99a" stroke-width="1.5"/>
-  <text x="255" y="136" text-anchor="middle" font-size="18" fill="#5c4a3a">Plan</text>
+  <!-- Plan / Tasks / Dispatch — centered with wider gaps for visible arrows -->
+  <rect x="165" y="100" width="155" height="60" rx="6" fill="#e8e0d8" stroke="#b8a99a" stroke-width="1.5"/>
+  <text x="242" y="136" text-anchor="middle" font-size="18" fill="#5c4a3a">Plan</text>
 
-  <rect x="365" y="100" width="170" height="60" rx="6" fill="#e8e0d8" stroke="#b8a99a" stroke-width="1.5"/>
+  <rect x="373" y="100" width="155" height="60" rx="6" fill="#e8e0d8" stroke="#b8a99a" stroke-width="1.5"/>
   <text x="450" y="136" text-anchor="middle" font-size="18" fill="#5c4a3a">Tasks</text>
 
-  <rect x="560" y="100" width="170" height="60" rx="6" fill="#e8e0d8" stroke="#b8a99a" stroke-width="1.5"/>
-  <text x="645" y="136" text-anchor="middle" font-size="18" fill="#5c4a3a">Dispatch</text>
+  <rect x="581" y="100" width="155" height="60" rx="6" fill="#e8e0d8" stroke="#b8a99a" stroke-width="1.5"/>
+  <text x="658" y="136" text-anchor="middle" font-size="18" fill="#5c4a3a">Dispatch</text>
 
-  <!-- Plan → Tasks → Dispatch arrows -->
-  <line x1="340" y1="130" x2="362" y2="130" stroke="#7a706a" stroke-width="3" marker-end="url(#arr-h)"/>
-  <line x1="535" y1="130" x2="557" y2="130" stroke="#7a706a" stroke-width="3" marker-end="url(#arr-h)"/>
+  <!-- Plan → Tasks → Dispatch arrows (53px gaps for visible shafts) -->
+  <line x1="320" y1="130" x2="370" y2="130" stroke="#7a706a" stroke-width="3" marker-end="url(#arr-h)"/>
+  <line x1="528" y1="130" x2="578" y2="130" stroke="#7a706a" stroke-width="3" marker-end="url(#arr-h)"/>
 
   <!-- ═══════════════════════════════════════════════════════════ -->
   <!-- ARROWS: Server ↔ Runner                                     -->

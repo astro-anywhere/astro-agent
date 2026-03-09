@@ -257,41 +257,54 @@ export async function discoverRemoteHosts(): Promise<DiscoveredHost[]> {
   console.log('[ssh-discovery] Starting remote host discovery...');
 
   const discovered: DiscoveredHost[] = [];
-  const seenHosts = new Set<string>();
+  const seenNames = new Set<string>();
+  const seenHostnames = new Set<string>(); // resolved hostnames/IPs for cross-source dedup
 
   // Parse SSH config (highest priority)
   console.log('[ssh-discovery] 1/3 Checking SSH config (~/.ssh/config)...');
   const sshHosts = await parseSSHConfig();
   for (const host of sshHosts) {
-    seenHosts.add(host.name);
+    const resolvedLower = host.hostname.toLowerCase();
+    if (seenHostnames.has(resolvedLower)) {
+      console.log(`[ssh-discovery] ⊗ Skipped duplicate hostname: ${host.name} → ${host.hostname} (already discovered)`);
+      continue;
+    }
+    seenNames.add(host.name);
+    seenHostnames.add(resolvedLower);
     discovered.push({
       ...host,
       source: 'ssh-config',
     });
   }
-  console.log(`[ssh-discovery] Found ${sshHosts.length} hosts from SSH config`);
+  console.log(`[ssh-discovery] Found ${discovered.length} hosts from SSH config`);
 
   // Discover VS Code tunnels
   console.log('[ssh-discovery] 2/3 Checking VS Code Remote SSH...');
   const vscodeTunnels = await discoverVSCodeTunnels();
+  let vscodeAdded = 0;
   for (const host of vscodeTunnels) {
-    if (!seenHosts.has(host.name)) {
-      seenHosts.add(host.name);
+    const resolvedLower = host.hostname.toLowerCase();
+    if (!seenNames.has(host.name) && !seenHostnames.has(resolvedLower)) {
+      seenNames.add(host.name);
+      seenHostnames.add(resolvedLower);
       discovered.push({
         ...host,
         source: 'vscode-tunnel',
       });
+      vscodeAdded++;
     }
   }
-  console.log(`[ssh-discovery] Found ${vscodeTunnels.length} unique VS Code hosts`);
+  console.log(`[ssh-discovery] Found ${vscodeAdded} unique VS Code hosts`);
 
   // Parse known_hosts (lowest priority - just suggests hostnames)
   console.log('[ssh-discovery] 3/3 Checking known_hosts...');
   const knownHostnames = await parseKnownHosts();
   let knownHostsAdded = 0;
   for (const hostname of knownHostnames) {
-    if (!seenHosts.has(hostname)) {
-      seenHosts.add(hostname);
+    const hostnameLower = hostname.toLowerCase();
+    if (!seenNames.has(hostname) && !seenHostnames.has(hostnameLower)) {
+      seenNames.add(hostname);
+      seenHostnames.add(hostnameLower);
       discovered.push({
         name: hostname,
         hostname,
