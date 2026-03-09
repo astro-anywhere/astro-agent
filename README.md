@@ -142,6 +142,51 @@ npx @astroanywhere/agent@latest launch --no-ssh-config
 
 Astro picks the best available machine for each task based on load and capabilities.
 
+### Installing on Slurm (HPC Clusters)
+
+On HPC clusters, login nodes enforce strict resource limits and kill long-running processes. You have two options for installing the agent runner:
+
+**Option A &mdash; From the login node** (simplest)
+
+SSH to the login node and run setup directly. The setup process is lightweight and completes in under a minute:
+
+```bash
+ssh user@hpc-login.university.edu
+npx @astroanywhere/agent@latest launch --no-ssh-config
+```
+
+**Option B &mdash; From a compute node** (if the login node blocks it)
+
+Request an interactive allocation first, then install from the compute node:
+
+```bash
+ssh user@hpc-login.university.edu
+srun --time=8:00:00 --mem=4G --pty bash
+npx @astroanywhere/agent@latest launch --no-ssh-config
+```
+
+Or submit as a batch job:
+
+```bash
+sbatch <<'EOF'
+#!/bin/bash
+#SBATCH --time=8:00:00
+#SBATCH --mem=4G
+#SBATCH --job-name=astro-agent
+npx @astroanywhere/agent@latest launch --no-ssh-config --non-interactive
+EOF
+```
+
+**Before running `launch`**, install at least one AI coding agent on the cluster:
+
+```bash
+npm i -g @anthropic-ai/claude-code   # Claude Code (recommended)
+npm i -g @openai/codex                # or Codex
+npm i -g openclaw                     # or OpenClaw
+```
+
+> **Note:** The agent runner uses Slurm to submit AI agent jobs to compute nodes automatically. Once installed, Astro dispatches tasks as Slurm jobs &mdash; you don't need to manage `sbatch` yourself.
+
 ---
 
 ## Key Features

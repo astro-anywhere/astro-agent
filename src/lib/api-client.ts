@@ -113,7 +113,17 @@ export async function pollForToken(
     }
 
     // Error → parse RFC 8628 error body
-    const body = (await res.json()) as DeviceTokenError;
+    let body: DeviceTokenError;
+    try {
+      body = (await res.json()) as DeviceTokenError;
+    } catch {
+      // Non-JSON error (e.g., reverse proxy HTML response)
+      throw new DeviceAuthApiError(
+        `Unexpected non-JSON response from token endpoint (${res.status})`,
+        'server_error',
+        res.status,
+      );
+    }
 
     switch (body.error) {
       case 'authorization_pending':
@@ -165,12 +175,22 @@ export async function registerMachine(
   }
 
   if (!res.ok) {
-    const body = await res.text();
-    throw new DeviceAuthApiError(
-      `Machine registration failed (${res.status}): ${body}`,
-      'server_error',
-      res.status,
-    );
+    const text = await res.text();
+    let errorMsg = `Machine registration failed (${res.status})`;
+    try {
+      const body = JSON.parse(text) as { error?: string; error_description?: string; detail?: string };
+      if (body.error_description) {
+        errorMsg += `: ${body.error_description}`;
+      } else if (body.error) {
+        errorMsg += `: ${body.error}`;
+      }
+      if (body.detail) {
+        errorMsg += `\n  Detail: ${body.detail}`;
+      }
+    } catch {
+      if (text) errorMsg += `: ${text}`;
+    }
+    throw new DeviceAuthApiError(errorMsg, 'server_error', res.status);
   }
 
   return (await res.json()) as MachineRegisterResponse;

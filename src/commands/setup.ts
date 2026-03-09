@@ -843,56 +843,81 @@ async function configureMcpForClaudeCode(): Promise<boolean> {
 // ============================================================================
 
 /**
- * Interactive host selection using checkbox prompt.
+ * Interactive host selection using a list prompt with Enter-to-toggle.
  *
- * Uses inquirer's native checkbox type for clean multi-select UI.
- * Space to toggle, Enter to confirm, 'a' to toggle all.
+ * Shows all hosts with circle/check markers. Pressing Enter on a host toggles it.
+ * "Select all" toggles all hosts. "Confirm" and "Skip" at the bottom.
+ * Cursor stays on the same position after each toggle.
+ *
+ * This uses `type: 'list'` (not `checkbox`) so that Enter toggles — the standard
+ * checkbox behavior (Space to toggle, Enter to confirm) confuses users who expect
+ * Enter to select. See commit 7b421e5 for the original rationale.
  */
 async function selectHostsInteractive(hosts: DiscoveredHost[]): Promise<string[]> {
-  // Build choices for checkbox
-  const choices = hosts.map((h) => {
-    const label = h.hostname !== h.name ? `${h.name} ${chalk.dim(`(${h.hostname})`)}` : h.name;
-    const user = h.user ? chalk.dim(` [${h.user}]`) : '';
-    return {
-      name: `${label}${user}`,
-      value: h.name,
-      short: h.name,
-    };
-  });
+  const selected = new Set<string>();
+  const ACTION_SELECT_ALL = '__select_all__';
+  const ACTION_CONFIRM = '__confirm__';
+  const ACTION_SKIP = '__skip__';
 
-  console.log(chalk.dim('  Use Space to toggle, ↑↓ to navigate, Enter to confirm, "a" to toggle all\n'));
+  let cursorIndex = 0;
 
-  // Loop until the user makes a selection or explicitly skips
   while (true) {
-    const { selectedHosts } = await inquirer.prompt<{ selectedHosts: string[] }>([
-      {
-        type: 'checkbox',
-        name: 'selectedHosts',
-        message: 'Select hosts to install Astro Agent on:',
-        choices,
-        pageSize: Math.min(hosts.length + 2, 15),
-      },
-    ]);
+    // Build choices with current selection state
+    const choices: Array<{ name: string; value: string } | inquirer.Separator> = [];
 
-    if (selectedHosts.length > 0) {
-      return selectedHosts;
+    for (const h of hosts) {
+      const marker = selected.has(h.name) ? chalk.green('\u2713') : chalk.dim('\u25CB');
+      const label = h.hostname !== h.name ? `${h.name} ${chalk.dim(`(${h.hostname})`)}` : h.name;
+      const user = h.user ? chalk.dim(` [${h.user}]`) : '';
+      choices.push({ name: `${marker} ${label}${user}`, value: h.name });
     }
 
-    // No hosts selected — ask whether to retry or skip
-    const { action } = await inquirer.prompt<{ action: string }>([
+    choices.push(new inquirer.Separator(chalk.dim('\u2500'.repeat(30))));
+
+    const allSelected = hosts.every((h) => selected.has(h.name));
+    const selectAllLabel = allSelected ? 'Deselect all' : 'Select all';
+    choices.push({ name: chalk.cyan(`\u25C9 ${selectAllLabel}`), value: ACTION_SELECT_ALL });
+
+    choices.push(new inquirer.Separator(chalk.dim('\u2500'.repeat(30))));
+    choices.push({ name: chalk.green(`\u2714 Confirm (${selected.size} selected)`), value: ACTION_CONFIRM });
+    choices.push({ name: chalk.yellow('\u2718 Skip'), value: ACTION_SKIP });
+
+    const { choice } = await inquirer.prompt<{ choice: string }>([
       {
         type: 'list',
-        name: 'action',
-        message: 'No hosts selected. Use Space to toggle hosts before pressing Enter.',
-        choices: [
-          { name: 'Go back and select hosts', value: 'retry' },
-          { name: 'Skip remote installation', value: 'skip' },
-        ],
+        name: 'choice',
+        message: 'Select hosts to install Astro Agent on:',
+        choices,
+        pageSize: choices.length,
+        default: cursorIndex,
       },
     ]);
 
-    if (action === 'skip') {
+    if (choice === ACTION_CONFIRM) {
+      return Array.from(selected);
+    }
+
+    if (choice === ACTION_SKIP) {
       return [];
+    }
+
+    if (choice === ACTION_SELECT_ALL) {
+      if (allSelected) {
+        selected.clear();
+      } else {
+        for (const h of hosts) selected.add(h.name);
+      }
+      // Keep cursor on Select all
+      cursorIndex = hosts.length + 1; // +1 for separator
+    } else {
+      // Toggle host
+      if (selected.has(choice)) {
+        selected.delete(choice);
+      } else {
+        selected.add(choice);
+      }
+      // Keep cursor on the same host
+      cursorIndex = hosts.findIndex((h) => h.name === choice);
     }
   }
 }
