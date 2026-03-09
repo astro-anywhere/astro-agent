@@ -146,7 +146,7 @@ Astro picks the best available machine for each task based on load and capabilit
 
 On HPC clusters, login nodes enforce strict resource limits and kill long-running processes. You have two options for installing the agent runner:
 
-**Option A &mdash; From the login node** (simplest)
+#### Option A &mdash; From the login node (simplest)
 
 SSH to the login node and run setup directly. The setup process is lightweight and completes in under a minute:
 
@@ -155,7 +155,7 @@ ssh user@hpc-login.university.edu
 npx @astroanywhere/agent@latest launch --no-ssh-config
 ```
 
-**Option B &mdash; From a compute node** (if the login node blocks it)
+#### Option B &mdash; From a compute node (if the login node blocks it)
 
 Request an interactive allocation first, then install from the compute node:
 
@@ -184,6 +184,22 @@ npm i -g @anthropic-ai/claude-code   # Claude Code (recommended)
 npm i -g @openai/codex                # or Codex
 npm i -g openclaw                     # or OpenClaw
 ```
+
+#### Authentication on HPC
+
+We detect Claude Code login by default, but if you encounter any problems, we recommend setting up a long-lived token:
+
+```bash
+claude setup-token
+```
+
+Then add the token to your shell config (e.g., `~/.bashrc`):
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN=your-token
+```
+
+Restart your shell or run `source ~/.bashrc` before re-running setup.
 
 > **Note:** The agent runner uses Slurm to submit AI agent jobs to compute nodes automatically. Once installed, Astro dispatches tasks as Slurm jobs &mdash; you don't need to manage `sbatch` yourself.
 
