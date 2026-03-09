@@ -270,22 +270,22 @@ The [Astro Dashboard](https://astroanywhere.com) gives you full visibility into 
     'primaryTextColor': '#3d3a37',
     'lineColor': '#9a918a',
     'textColor': '#3d3a37',
-    'fontSize': '20px',
+    'fontSize': '24px',
     'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif',
     'edgeLabelBackground': '#f7f4f0'
   },
   'flowchart': {
-    'nodeSpacing': 30,
-    'rankSpacing': 50,
-    'padding': 40,
+    'nodeSpacing': 40,
+    'rankSpacing': 60,
+    'padding': 60,
     'htmlLabels': true,
     'curve': 'basis'
   }
 }}%%
 flowchart TB
-    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:30px
-    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:3px,color:#3d3a37,font-size:30px
-    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:30px
+    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:4px,color:#3d3a37,font-size:30px
+    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:4px,color:#3d3a37,font-size:30px
+    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:4px,color:#3d3a37,font-size:30px
 
     subgraph Server["Astro Server"]
         S1[" &nbsp; Plan &nbsp; "]:::server --> S2[" &nbsp; Tasks &nbsp; "]:::server --> S3[" &nbsp; Dispatch &nbsp; "]:::server
@@ -305,16 +305,16 @@ flowchart TB
         C1[" &nbsp; Docker &nbsp; "]:::rose ~~~ C2[" &nbsp; Slurm &nbsp; "]:::rose ~~~ C3[" &nbsp; K8s &nbsp; "]:::rose ~~~ C4[" &nbsp; SSH &nbsp; "]:::rose
     end
 
-    style Server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#1a2744,font-size:40px,font-weight:bold
-    style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:3px,color:#1a2744,font-size:40px,font-weight:bold
-    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:3px,color:#1a2744,font-size:40px,font-weight:bold
+    style Server fill:#f0ebe4,stroke:#b8a99a,stroke-width:4px,color:#1a2744,font-size:40px,font-weight:bold
+    style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:4px,color:#1a2744,font-size:40px,font-weight:bold
+    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:4px,color:#1a2744,font-size:40px,font-weight:bold
 
-    linkStyle 0,1 stroke:#9a918a,stroke-width:3px
-    linkStyle 2 stroke:#9a918a,stroke-width:3px
-    linkStyle 3 stroke:#9a918a,stroke-width:3px,stroke-dasharray:6
+    linkStyle 0,1 stroke:#9a918a,stroke-width:10px
+    linkStyle 2 stroke:#9a918a,stroke-width:10px
+    linkStyle 3 stroke:#9a918a,stroke-width:10px,stroke-dasharray:12
     linkStyle 4,5,6 stroke:none,stroke-width:0
-    linkStyle 7 stroke:#9a918a,stroke-width:3px
-    linkStyle 8 stroke:#9a918a,stroke-width:3px,stroke-dasharray:6
+    linkStyle 7 stroke:#9a918a,stroke-width:10px
+    linkStyle 8 stroke:#9a918a,stroke-width:10px,stroke-dasharray:12
     linkStyle 9,10,11 stroke:none,stroke-width:0
 ```
 
