@@ -603,9 +603,12 @@ async function runDeviceAuthFlow(
     } else {
       console.error(chalk.red(err instanceof Error ? err.message : String(err)));
     }
-    // Still save the access/refresh tokens from the auth step
+    // Save the access token from the auth step (refresh token is only
+    // issued during successful registration, so it may be empty here)
     config.setAccessToken(tokenResponse.accessToken);
-    config.setRefreshToken(tokenResponse.refreshToken);
+    if (tokenResponse.refreshToken) {
+      config.setRefreshToken(tokenResponse.refreshToken);
+    }
     console.log();
   }
 }
@@ -859,17 +862,39 @@ async function selectHostsInteractive(hosts: DiscoveredHost[]): Promise<string[]
 
   console.log(chalk.dim('  Use Space to toggle, ↑↓ to navigate, Enter to confirm, "a" to toggle all\n'));
 
-  const { selectedHosts } = await inquirer.prompt<{ selectedHosts: string[] }>([
-    {
-      type: 'checkbox',
-      name: 'selectedHosts',
-      message: 'Select hosts to install Astro Agent on:',
-      choices,
-      pageSize: Math.min(hosts.length + 2, 15),
-    },
-  ]);
+  // Loop until the user makes a selection or explicitly skips
+  while (true) {
+    const { selectedHosts } = await inquirer.prompt<{ selectedHosts: string[] }>([
+      {
+        type: 'checkbox',
+        name: 'selectedHosts',
+        message: 'Select hosts to install Astro Agent on:',
+        choices,
+        pageSize: Math.min(hosts.length + 2, 15),
+      },
+    ]);
 
-  return selectedHosts;
+    if (selectedHosts.length > 0) {
+      return selectedHosts;
+    }
+
+    // No hosts selected — ask whether to retry or skip
+    const { action } = await inquirer.prompt<{ action: string }>([
+      {
+        type: 'list',
+        name: 'action',
+        message: 'No hosts selected. Use Space to toggle hosts before pressing Enter.',
+        choices: [
+          { name: 'Go back and select hosts', value: 'retry' },
+          { name: 'Skip remote installation', value: 'skip' },
+        ],
+      },
+    ]);
+
+    if (action === 'skip') {
+      return [];
+    }
+  }
 }
 
 /**
