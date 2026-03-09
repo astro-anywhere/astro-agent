@@ -6,6 +6,8 @@
  */
 
 import { homedir } from 'node:os';
+import { realpathSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Task, TaskStatus, ProviderType, HpcCapability } from '../types.js';
@@ -177,6 +179,17 @@ export interface TaskExecutorOptions {
   hpcCapability?: HpcCapability | null; // Pre-classified HPC info from startup detection
 }
 
+/** Canonicalize a directory path for use as a lock key (follows symlinks, normalizes). */
+function canonicalDirLockKey(workdir: string): string {
+  let canonical: string;
+  try {
+    canonical = realpathSync(workdir);
+  } catch {
+    canonical = resolve(workdir);
+  }
+  return `dir::${canonical}`;
+}
+
 export class TaskExecutor {
   private wsClient: WebSocketClient;
   private runningTasks: Map<string, RunningTask> = new Map();
@@ -298,9 +311,12 @@ export class TaskExecutor {
         console.log(`[executor] Task ${normalizedTask.id}: queued for serial execution (${safetyCheck.parallelTaskCount} active in dir)`);
         this.trackTaskDirectory(normalizedTask);
         this.taskQueue.push(normalizedTask);
+        const reason = safetyCheck.isGitRepo
+          ? 'uncommitted changes without worktree isolation'
+          : 'non-git directory';
         this.wsClient.sendTaskStatus(
           normalizedTask.id, 'queued', 0,
-          `Waiting for ${safetyCheck.parallelTaskCount} task(s) in this directory to complete (serial execution for non-git directory)`,
+          `Waiting for ${safetyCheck.parallelTaskCount} task(s) in this directory to complete (serial execution: ${reason})`,
         );
         return;
       }
@@ -362,7 +378,9 @@ export class TaskExecutor {
     // Check queue
     const queueIndex = this.taskQueue.findIndex((t) => t.id === taskId);
     if (queueIndex >= 0) {
+      const task = this.taskQueue[queueIndex];
       this.taskQueue.splice(queueIndex, 1);
+      this.untrackTaskDirectory(task);
       this.wsClient.sendTaskResult({
         taskId,
         status: 'cancelled',
@@ -478,8 +496,9 @@ export class TaskExecutor {
     }
     this.taskQueue = [];
 
-    // Release all branch locks to unblock any waiting tasks
+    // Release all locks to unblock any waiting tasks
     this.branchLockManager.releaseAll();
+    this.directoryLockManager.releaseAll();
 
     // Stop job monitor
     this.jobMonitor.stop();
@@ -1495,6 +1514,11 @@ export class TaskExecutor {
       // and re-execution will create a fresh worktree if needed.
       if (this.preserveWorktrees) {
         console.log(`[executor] Task ${task.id}: worktree preserved (debug mode)`);
+        // Still release directory locks even in debug mode to avoid deadlocks.
+        // Git worktree cleanup is skipped but lock cleanup is always needed.
+        if (task.deliveryMode === 'direct' || task.deliveryMode === 'copy') {
+          await prepared.cleanup({ keepBranch });
+        }
       } else {
         await prepared.cleanup({ keepBranch });
       }
@@ -1548,7 +1572,7 @@ export class TaskExecutor {
     // Direct delivery mode: skip worktree, work in-place.
     // Acquire directory lock to serialize tasks on the same directory.
     if (task.deliveryMode === 'direct') {
-      const lockKey = `dir::${task.workingDirectory}`;
+      const lockKey = canonicalDirLockKey(task.workingDirectory);
       console.log(`[executor] Task ${task.id}: direct delivery mode, acquiring directory lock`);
       const lockHandle = await this.directoryLockManager.acquire(lockKey, task.id);
       console.log(`[executor] Task ${task.id}: directory lock acquired, using raw workdir: ${task.workingDirectory}`);
@@ -1574,8 +1598,13 @@ export class TaskExecutor {
         return { workingDirectory: copy.worktreePath, cleanup: async () => { await copy.cleanup(); } };
       } catch (error) {
         const errorMsg = error instanceof Error ? error.message : String(error);
-        console.error(`[executor] Task ${task.id}: copy worktree failed: ${errorMsg}, using raw workdir`);
-        return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
+        console.error(`[executor] Task ${task.id}: copy worktree failed: ${errorMsg}, falling back to locked direct execution`);
+        const lockKey = canonicalDirLockKey(task.workingDirectory);
+        const lockHandle = await this.directoryLockManager.acquire(lockKey, task.id);
+        return {
+          workingDirectory: task.workingDirectory,
+          cleanup: async () => { lockHandle.release(); },
+        };
       }
     }
 
@@ -1583,7 +1612,7 @@ export class TaskExecutor {
     // Acquire a per-directory lock to serialize tasks — without git worktree
     // isolation, concurrent modification of the same files causes conflicts.
     if (this.gitAvailable && !(await isGitRepo(task.workingDirectory))) {
-      const lockKey = `dir::${task.workingDirectory}`;
+      const lockKey = canonicalDirLockKey(task.workingDirectory);
       console.log(`[executor] Task ${task.id}: not a git repo, acquiring directory lock for ${task.workingDirectory}`);
       stream.stdout(`[astro] Non-git directory — waiting for exclusive access...\n`);
       const lockHandle = await this.directoryLockManager.acquire(lockKey, task.id);
