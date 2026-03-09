@@ -11,7 +11,7 @@
   <br />
   <a href="https://astroanywhere.com/landing/">Website</a>
   &nbsp;&middot;&nbsp;
-  <a href="#get-started">Get Started</a>
+  <a href="#quick-start">Get Started</a>
   <br />
   <br />
 </p>
@@ -28,15 +28,42 @@ Mission control lives in the browser. Your machines do the work. The **Agent Run
 
 ---
 
-## Get Started
+## Quick Start
 
-Create an account at [astroanywhere.com](https://astroanywhere.com), then run:
+### Step 1 &mdash; Register
+
+Create an account at [astroanywhere.com](https://astroanywhere.com).
+
+### Step 2 &mdash; Install
+
+Install at least one AI coding agent:
+
+```bash
+npm i -g @anthropic-ai/claude-code   # Claude Code
+npm i -g @openai/codex                # Codex
+npm i -g openclaw                     # OpenClaw
+bun i -g opencode                     # OpenCode
+```
+
+Optionally install [GitHub CLI](https://cli.github.com/) (`gh`) for automatic PR creation &mdash; recommended but not required.
+
+Then launch the agent runner:
 
 ```bash
 npx @astroanywhere/agent@latest launch
 ```
 
-One command. It detects your AI agents, discovers your machine hardware, finds your SSH hosts, authenticates you, sets up everything, and starts listening for tasks. No global install &mdash; `npx` fetches the latest version.
+One command. It detects your AI agents, discovers your machine hardware, finds your SSH hosts, authenticates you, and starts listening for tasks. No global install &mdash; `npx` fetches the latest version.
+
+### Step 3 &mdash; Start Building
+
+Open the [Astro Dashboard](https://astroanywhere.com), create a project, and describe what you want to build. Try one of these to get started:
+
+- **"Add dark mode support to my React app"** &mdash; a single focused task
+- **"Build a REST API with auth, CRUD endpoints, and tests"** &mdash; Astro decomposes this into parallel tasks
+- **"Refactor the data layer to use a repository pattern"** &mdash; multi-step refactoring across files
+
+Or jump straight in and describe your own goal. Astro will generate a plan, show you the dependency graph, and execute across your machines.
 
 ### What You'll See
 
