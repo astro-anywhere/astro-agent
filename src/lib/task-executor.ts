@@ -1118,22 +1118,29 @@ export class TaskExecutor {
       if (canResume) {
         console.log(`[executor] Task ${task.id}: resuming session ${taskWithWorkspace.resumeSessionId} with ${adapter.name}...`);
         const resumeStartedAt = new Date().toISOString();
-        const resumeResult = await adapter.resumeTask(
-          taskWithWorkspace.id,
-          taskWithWorkspace.prompt,
-          taskWithWorkspace.workingDirectory || process.cwd(),
-          taskWithWorkspace.resumeSessionId!,
-          stream,
-          abortController.signal,
-        );
-        result = {
-          taskId: taskWithWorkspace.id,
-          status: resumeResult.success ? 'completed' : 'failed',
-          output: resumeResult.output,
-          error: resumeResult.error,
-          startedAt: resumeStartedAt,
-          completedAt: new Date().toISOString(),
-        };
+        try {
+          const resumeResult = await adapter.resumeTask(
+            taskWithWorkspace.id,
+            taskWithWorkspace.prompt,
+            taskWithWorkspace.workingDirectory || process.cwd(),
+            taskWithWorkspace.resumeSessionId!,
+            stream,
+            abortController.signal,
+          );
+          result = {
+            taskId: taskWithWorkspace.id,
+            status: resumeResult.success ? 'completed' : 'failed',
+            output: resumeResult.output,
+            error: resumeResult.error,
+            startedAt: resumeStartedAt,
+            completedAt: new Date().toISOString(),
+          };
+        } catch (resumeErr) {
+          // Resume failed (session expired, different machine, SDK error) —
+          // fall back to fresh execution with conversation history in messages
+          console.warn(`[executor] Task ${task.id}: resume failed (${resumeErr instanceof Error ? resumeErr.message : resumeErr}), falling back to fresh execution`);
+          result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
+        }
       } else {
         console.log(`[executor] Task ${task.id}: executing with ${adapter.name}...`);
         result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
