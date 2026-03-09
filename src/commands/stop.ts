@@ -57,8 +57,24 @@ export async function stopCommand(): Promise<void> {
             .split('\n')
             .map((line) => line.trim())
             .filter((line) => /^\d+$/.test(line));
-        } catch {
-          // No processes found (pgrep exits 1 when no match)
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            // pgrep not available — fall back to ps
+            try {
+              const { stdout } = await execFileAsync(
+                'sh',
+                ['-c', "ps aux | awk '/[a]stro-agent.*start/{print $2}'"],
+                { timeout: 5000 },
+              );
+              pids = stdout
+                .split('\n')
+                .map((line) => line.trim())
+                .filter((line) => /^\d+$/.test(line));
+            } catch {
+              // No processes found
+            }
+          }
+          // else: exit code 1 = no matches, ignore
         }
       }
     }

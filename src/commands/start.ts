@@ -144,8 +144,27 @@ async function killExistingProcesses(): Promise<void> {
       for (const pid of found) {
         if (!pids.includes(pid)) pids.push(pid);
       }
-    } catch {
-      // No processes found (pgrep exits 1 when no match)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // pgrep not available — fall back to ps
+        try {
+          const { stdout } = await execFileAsync(
+            'sh',
+            ['-c', "ps aux | awk '/[a]stro-agent.*start/{print $2}'"],
+            { timeout: 5000 },
+          );
+          const found = stdout
+            .split('\n')
+            .map((line) => line.trim())
+            .filter((line) => /^\d+$/.test(line) && line !== String(myPid));
+          for (const pid of found) {
+            if (!pids.includes(pid)) pids.push(pid);
+          }
+        } catch {
+          // No processes found
+        }
+      }
+      // else: exit code 1 = no matches, ignore
     }
   } else {
     try {
