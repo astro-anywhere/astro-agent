@@ -470,7 +470,7 @@ export class TaskExecutor {
    * For completed tasks with a preserved session, this triggers a full
    * resume via the SDK's `resume` option for post-completion follow-up.
    */
-  async steerTask(taskId: string, message: string, interrupt = false): Promise<{ accepted: boolean; reason?: string }> {
+  async steerTask(taskId: string, message: string, interrupt = false, sessionId?: string, _branchName?: string): Promise<{ accepted: boolean; reason?: string }> {
     const running = this.runningTasks.get(taskId);
 
     if (running) {
@@ -487,10 +487,14 @@ export class TaskExecutor {
     }
 
     // Task is not running — check if we have a preserved session for resume
+    // sessionId hint from frontend can be used for validation; primary lookup is by taskId
     const resumeAdapter = this.findAdapterWithSession(taskId);
     if (resumeAdapter) {
       const context = resumeAdapter.getTaskContext(taskId);
       if (context) {
+        if (sessionId && context.sessionId !== sessionId) {
+          console.warn(`[task-executor] Session hint mismatch for task ${taskId}: hint=${sessionId}, actual=${context.sessionId}`);
+        }
         if (resumeAdapter instanceof ClaudeSdkAdapter) {
           this.resumeCompletedTask(taskId, message, resumeAdapter, context);
           return { accepted: true };
