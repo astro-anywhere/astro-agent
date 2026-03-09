@@ -173,7 +173,7 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
     console.log();
     const sshSpinner = ora('Discovering remote hosts...').start();
     try {
-      discoveredHosts = await discoverRemoteHosts();
+      discoveredHosts = await discoverRemoteHosts({ verbose });
       if (discoveredHosts.length > 0) {
         sshSpinner.succeed(`Found ${discoveredHosts.length} remote host(s)`);
         console.log();
