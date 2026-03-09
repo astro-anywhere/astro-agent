@@ -288,8 +288,19 @@ export OPENAI_API_KEY=sk-...
 Or configure it in `~/.codex/config.toml`:
 
 ```toml
-model = "o4-mini"
+model = "gpt-5.3-codex"
 ```
+
+Available Codex models (run `codex -m <model_name>` to switch):
+
+| Model | Description |
+|---|---|
+| `gpt-5.3-codex` | Latest frontier agentic coding model (default) |
+| `gpt-5.4` | Latest frontier agentic coding model |
+| `gpt-5.2-codex` | Frontier agentic coding model |
+| `gpt-5.1-codex-max` | Codex-optimized flagship for deep and fast reasoning |
+| `gpt-5.2` | Latest frontier model with improvements across knowledge, reasoning and coding |
+| `gpt-5.1-codex-mini` | Optimized for codex &mdash; cheaper, faster, but less capable |
 
 ### OpenClaw &amp; OpenCode
 
