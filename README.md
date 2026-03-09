@@ -146,7 +146,7 @@ Astro picks the best available machine for each task based on load and capabilit
 
 On HPC clusters, login nodes enforce strict resource limits and kill long-running processes. You have two options for installing the agent runner:
 
-**Option A &mdash; From the login node** (simplest)
+#### Option A &mdash; From the login node (simplest)
 
 SSH to the login node and run setup directly. The setup process is lightweight and completes in under a minute:
 
@@ -155,26 +155,14 @@ ssh user@hpc-login.university.edu
 npx @astroanywhere/agent@latest launch --no-ssh-config
 ```
 
-**Option B &mdash; From a compute node** (if the login node blocks it)
+#### Option B &mdash; From a compute node (if the login node blocks it)
 
-Request an interactive allocation first, then install from the compute node:
+Request an interactive allocation first, then launch from the compute node:
 
 ```bash
 ssh user@hpc-login.university.edu
 srun --time=8:00:00 --mem=4G --pty bash
 npx @astroanywhere/agent@latest launch --no-ssh-config
-```
-
-Or submit as a batch job:
-
-```bash
-sbatch <<'EOF'
-#!/bin/bash
-#SBATCH --time=8:00:00
-#SBATCH --mem=4G
-#SBATCH --job-name=astro-agent
-npx @astroanywhere/agent@latest launch --no-ssh-config --non-interactive
-EOF
 ```
 
 **Before running `launch`**, install at least one AI coding agent on the cluster:
@@ -216,6 +204,22 @@ Astro works with the AI coding agents you already use. Install any supported age
 | **OpenCode** | `bun i -g opencode` | [github.com/opencode-ai/opencode](https://github.com/opencode-ai/opencode) |
 
 All agents get full project context injection, real-time output streaming, and session preservation for multi-turn resume. Your API keys stay on your machine &mdash; Astro never sees them.
+
+#### Authentication Troubleshooting
+
+We auto-detect authentication from Claude Code CLI sessions, environment variables, or stored tokens. If you encounter problems (e.g., on remote machines or HPC clusters), we recommend setting up a long-lived token instead of session-based login:
+
+```bash
+claude setup-token
+```
+
+Copy the token from the output and add it to your shell config (e.g., `~/.bashrc`):
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>
+```
+
+Restart your shell or run `source ~/.bashrc` before re-running setup.
 
 ### 3. GitHub-Native Workflow
 
