@@ -173,7 +173,8 @@ sbatch <<'EOF'
 #SBATCH --time=8:00:00
 #SBATCH --mem=4G
 #SBATCH --job-name=astro-agent
-npx @astroanywhere/agent@latest launch --no-ssh-config --non-interactive
+npx @astroanywhere/agent@latest setup --no-ssh-config --non-interactive --skip-auth
+npx @astroanywhere/agent@latest start
 EOF
 ```
 
@@ -219,16 +220,16 @@ All agents get full project context injection, real-time output streaming, and s
 
 #### Authentication Troubleshooting
 
-We detect Claude Code login by default, but if you encounter any problems (e.g., on remote machines or HPC clusters), we recommend setting up a long-lived token:
+We auto-detect authentication from Claude Code CLI sessions, environment variables, or stored tokens. If you encounter problems (e.g., on remote machines or HPC clusters), we recommend setting up a long-lived token instead of session-based login:
 
 ```bash
 claude setup-token
 ```
 
-Then add the token to your shell config (e.g., `~/.bashrc`):
+Copy the token from the output and add it to your shell config (e.g., `~/.bashrc`):
 
 ```bash
-export CLAUDE_CODE_OAUTH_TOKEN=your-token
+export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>
 ```
 
 Restart your shell or run `source ~/.bashrc` before re-running setup.
