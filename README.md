@@ -245,57 +245,53 @@ Stored at `~/.config/astro-agent/config.json`. Most users never need to touch th
     'primaryTextColor': '#3d3a37',
     'lineColor': '#9a918a',
     'textColor': '#3d3a37',
-    'fontSize': '18px',
+    'fontSize': '16px',
     'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif',
-    'edgeLabelBackground': 'transparent'
+    'edgeLabelBackground': '#f7f4f0'
   },
   'flowchart': {
-    'nodeSpacing': 40,
-    'rankSpacing': 55,
-    'padding': 28,
+    'nodeSpacing': 20,
+    'rankSpacing': 40,
+    'padding': 16,
     'htmlLabels': true,
     'curve': 'basis'
   }
 }}%%
 flowchart TB
-    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:2px,color:#3d3a37,font-size:18px
-    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37,font-size:16px
-    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:2px,color:#3d3a37,font-size:16px
+    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:2px,color:#3d3a37
+    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37
+    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:2px,color:#3d3a37
 
-    Server["<b>Astro Server</b> &nbsp; <i>astroanywhere.com</i><br/><br/>Generate Plan &rarr; Break into Tasks &rarr; Dispatch"]:::server
+    Server["<b>Astro Server</b> &nbsp; <i>astroanywhere.com</i><br/>Plan &rarr; Tasks &rarr; Dispatch"]:::server
 
-    Server ==>|" &nbsp; deploy tasks &nbsp; "| Runner
-    Runner -.->|" &nbsp; report progress &nbsp; "| Server
+    Server -- "dispatch tasks" --> runner
+    runner -. "report progress" .-> Server
 
-    subgraph Runner["&nbsp; Astro Agent Runner &mdash; this repo &nbsp;"]
-        direction TB
-
-        subgraph agents["&nbsp; AI Agents &nbsp;"]
-            direction LR
-            A1["&nbsp; Claude SDK &nbsp;"]:::mist
-            A2["&nbsp; Codex &nbsp;"]:::mist
-            A3["&nbsp; OpenClaw &nbsp;"]:::mist
-            A4["&nbsp; OpenCode &nbsp;"]:::mist
-        end
-
-        agents ==>|" &nbsp; deploy jobs &nbsp; "| compute
-        compute -.->|" &nbsp; results &nbsp; "| agents
-
-        subgraph compute["&nbsp; Compute Backends &nbsp;"]
-            direction LR
-            C1["&nbsp; Docker &nbsp;"]:::rose
-            C2["&nbsp; Slurm &nbsp;"]:::rose
-            C3["&nbsp; Kubernetes &nbsp;"]:::rose
-            C4["&nbsp; SSH &nbsp;"]:::rose
-        end
+    subgraph runner["Agent Runner &mdash; this repo"]
+        direction LR
+        A1["Claude SDK"]:::mist
+        A2["Codex"]:::mist
+        A3["OpenClaw"]:::mist
+        A4["OpenCode"]:::mist
     end
 
-    style Runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:2px,color:#3d3a37,font-size:18px
-    style agents fill:#edf2f7,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37,font-size:16px
-    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:2px,color:#3d3a37,font-size:16px
+    runner -- "deploy jobs" --> compute
+    compute -. "results" .-> runner
 
-    linkStyle default stroke:#9a918a,stroke-width:3px
+    subgraph compute["Compute Backends"]
+        direction LR
+        C1["Docker"]:::rose
+        C2["Slurm"]:::rose
+        C3["K8s"]:::rose
+        C4["SSH"]:::rose
+    end
+
+    style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:2px,color:#3d3a37
+    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:2px,color:#3d3a37
+
+    linkStyle 0 stroke:#9a918a,stroke-width:3px
     linkStyle 1 stroke:#9a918a,stroke-width:2px,stroke-dasharray:6
+    linkStyle 2 stroke:#9a918a,stroke-width:3px
     linkStyle 3 stroke:#9a918a,stroke-width:2px,stroke-dasharray:6
 ```
 
