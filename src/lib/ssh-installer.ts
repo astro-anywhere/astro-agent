@@ -517,13 +517,17 @@ export async function startRemoteAgents(
       // remote process started successfully. We verify via pgrep below.
     }
 
-    // 3. Verify after 2s — use [a]stro-agent bracket trick to prevent grep self-match
+    // 3. Verify after 2s
+    // Use a command that always exits 0 so sshExec never throws.
+    // pgrep may not exist on minimal Linux (HPC clusters). The ps+awk fallback
+    // also exits non-zero when there's no match, which sshExec treats as an error.
+    // Appending `|| true` ensures exit 0; we check stdout instead.
     log(host.name, 'Verifying process started...');
     await new Promise((r) => setTimeout(r, 2000));
     try {
       const { stdout } = await sshExec(
         host,
-        'pgrep -f "[a]stro-agent start" 2>/dev/null || ps aux | grep "[a]stro-agent start"',
+        '(pgrep -f "astro-agent" 2>/dev/null || ps aux | awk \'/[a]stro-agent/{print $2}\') || true',
       );
       if (stdout.trim()) {
         log(host.name, 'Agent started — reading status...');
@@ -533,7 +537,7 @@ export async function startRemoteAgents(
           const delay = Math.min(100 * Math.pow(2, attempt), 3200); // 100, 200, 400, 800, 1600, 3200, 3200, 3200 (~9.5s total)
           await new Promise((r) => setTimeout(r, delay));
           try {
-            const { stdout: statusJson } = await sshExec(host, 'cat $HOME/.astro/agent-status.json 2>/dev/null');
+            const { stdout: statusJson } = await sshExec(host, 'cat $HOME/.astro/agent-status.json 2>/dev/null || true');
             if (statusJson.trim()) {
               agentStatus = JSON.parse(statusJson.trim()) as RemoteAgentStatus;
               break;
@@ -546,17 +550,24 @@ export async function startRemoteAgents(
       } else {
         // Fallback: check log tail for error details
         try {
-          const { stdout: logTail } = await sshExec(host, 'tail -5 $HOME/.astro/logs/agent-runner.log 2>/dev/null');
-          log(host.name, `Process not found. Log tail: ${logTail.trim()}`);
-          results.push({ host, success: false, message: `Process not found after start. Log tail:\n${logTail}` });
+          const { stdout: logTail } = await sshExec(host, 'tail -20 $HOME/.astro/logs/agent-runner.log 2>/dev/null || true');
+          const tail = logTail.trim();
+          if (tail) {
+            log(host.name, `Process not found. Log tail:\n${tail}`);
+            results.push({ host, success: false, message: `Agent process not found after start. Check remote logs:\n${tail}` });
+          } else {
+            log(host.name, 'Process not found (no logs available)');
+            results.push({ host, success: false, message: 'Agent process not found after start (no logs available)' });
+          }
         } catch {
           log(host.name, 'Process not found (no logs available)');
-          results.push({ host, success: false, message: 'Process not found after start (no logs available)' });
+          results.push({ host, success: false, message: 'Agent process not found after start (no logs available)' });
         }
       }
-    } catch {
-      log(host.name, 'Could not verify (pgrep failed)');
-      results.push({ host, success: false, message: 'Could not verify agent start (pgrep failed)' });
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log(host.name, `Verification failed: ${errMsg}`);
+      results.push({ host, success: false, message: `Could not verify agent start: ${errMsg}` });
     }
   }
 
