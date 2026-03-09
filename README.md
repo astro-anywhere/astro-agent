@@ -201,6 +201,102 @@ npx @astroanywhere/agent@latest setup --with-ssh-config
 
 ---
 
+## Authentication
+
+> **Key concept:** Astro does not access your API keys directly. The agent runner spawns AI agents (Claude Code, Codex, etc.) as subprocesses and passes your shell environment through. Each agent handles its own authentication using its own credentials. Your keys never leave your machine and Astro never sees them.
+
+### Claude Code
+
+Claude Code supports multiple authentication backends. Add the relevant environment variables to your shell profile (`~/.zshrc` on macOS, `~/.bashrc` on Linux).
+
+**Anthropic cloud &mdash; OAuth token (recommended)**
+
+```bash
+claude setup-token
+# Then add to your shell profile:
+export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>
+```
+
+**Anthropic cloud &mdash; API key**
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+**Amazon Bedrock**
+
+```bash
+export CLAUDE_CODE_USE_BEDROCK=1
+export AWS_REGION=us-west-2
+
+# Option 1: explicit keys
+export AWS_ACCESS_KEY_ID=AKIA...
+export AWS_SECRET_ACCESS_KEY=...
+
+# Option 2: AWS profile (recommended)
+export AWS_PROFILE=default
+```
+
+> Bedrock models use different model IDs (e.g., `anthropic.claude-sonnet-4-20250514`). The agent runner auto-detects Bedrock model formats and disables sandbox mode, which is not supported on Bedrock.
+
+**Google Vertex AI**
+
+```bash
+export CLAUDE_CODE_USE_VERTEX=1
+export CLOUD_ML_REGION=us-east5
+export ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project
+```
+
+**Third-party models via Claude Code**
+
+Claude Code can also be configured to use third-party model providers that expose an OpenAI-compatible API. This allows using models like MiniMax-M1, Kimi K2, GLM-5, or Doubao through Claude Code's interface. Set `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL` to point at the provider:
+
+```bash
+# MiniMax
+export ANTHROPIC_BASE_URL=https://api.minimax.chat/v1
+export ANTHROPIC_API_KEY=<your-minimax-key>
+export ANTHROPIC_MODEL=MiniMax-M1
+
+# Kimi (Moonshot)
+export ANTHROPIC_BASE_URL=https://api.moonshot.cn/v1
+export ANTHROPIC_API_KEY=<your-moonshot-key>
+export ANTHROPIC_MODEL=kimi-k2
+
+# GLM (Zhipu AI)
+export ANTHROPIC_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+export ANTHROPIC_API_KEY=<your-zhipu-key>
+export ANTHROPIC_MODEL=glm-5
+
+# Doubao (ByteDance / Volcengine ModelArk)
+export ANTHROPIC_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+export ANTHROPIC_API_KEY=<your-volcengine-key>
+export ANTHROPIC_MODEL=<your-endpoint-id>
+```
+
+> **Experimental:** Third-party model support depends on Claude Code's compatibility layer. Some features (tool use, streaming, sandbox) may not work with all providers. This is not tested by the Astro team &mdash; refer to each provider's documentation for Claude Code integration details (e.g., [BytePlus ModelArk](https://docs.byteplus.com/en/docs/ModelArk/1928262), [Zhipu AI](https://docs.z.ai/devpack/tool/claude)).
+
+**Troubleshooting:** On remote machines or HPC clusters, session-based login (`claude login`) may not work. Use one of the export methods above instead.
+
+### Codex
+
+Codex authenticates with an OpenAI API key. Add it to your shell profile:
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+Or configure it in `~/.codex/config.toml`:
+
+```toml
+model = "o4-mini"
+```
+
+### OpenClaw &amp; OpenCode
+
+These agents support multiple model providers (OpenAI, Anthropic, Google, etc.). Configure them through their own CLI or config files &mdash; refer to each agent's documentation for details.
+
+---
+
 ## Commands
 
 The agent runner provides several commands for managing your setup:
@@ -294,26 +390,6 @@ Astro works with the AI coding agents you already use. Install any supported age
 | **OpenCode** | `bun i -g opencode` | [github.com/opencode-ai/opencode](https://github.com/opencode-ai/opencode) |
 
 All agents get full project context injection, real-time output streaming, and session preservation for multi-turn resume. Your API keys stay on your machine &mdash; Astro never sees them.
-
-#### Authentication Troubleshooting
-
-We auto-detect authentication from Claude Code CLI sessions, environment variables, or stored tokens. If you encounter problems (e.g., on remote machines or HPC clusters), we recommend setting up a long-lived token instead of session-based login:
-
-```bash
-claude setup-token
-```
-
-Copy the token from the output and add it to your shell config:
-
-```bash
-# macOS (zsh)
-echo 'export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>' >> ~/.zshrc
-source ~/.zshrc
-
-# Linux (bash)
-echo 'export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>' >> ~/.bashrc
-source ~/.bashrc
-```
 
 ### 3. GitHub-Native Workflow
 
