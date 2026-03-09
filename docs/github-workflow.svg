@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 100" font-family="Palatino, Palatino Linotype, Georgia, serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="10" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="#7a706a"/>
+    </marker>
+  </defs>
+
+  <!-- Create worktree -->
+  <rect x="45" y="24" width="170" height="52" rx="6" fill="#f0ebe4" stroke="#c4b9ab" stroke-width="1.5"/>
+  <text x="130" y="55" text-anchor="middle" font-size="17" fill="#5c4a3a">Create worktree</text>
+
+  <!-- AI agent executes -->
+  <rect x="245" y="24" width="170" height="52" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="330" y="55" text-anchor="middle" font-size="17" fill="#2c4a6e">AI agent executes</text>
+
+  <!-- Commit & push -->
+  <rect x="445" y="24" width="170" height="52" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="530" y="55" text-anchor="middle" font-size="17" fill="#2c4a6e">Commit &amp; push</text>
+
+  <!-- Submit PR -->
+  <rect x="645" y="24" width="170" height="52" rx="6" fill="#dde5d9" stroke="#a3b89a" stroke-width="1.5"/>
+  <text x="730" y="55" text-anchor="middle" font-size="17" fill="#3d6b3a">Submit PR</text>
+
+  <!-- Arrows -->
+  <line x1="215" y1="50" x2="242" y2="50" stroke="#7a706a" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="415" y1="50" x2="442" y2="50" stroke="#7a706a" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="615" y1="50" x2="642" y2="50" stroke="#7a706a" stroke-width="2.5" marker-end="url(#arr)"/>
+</svg>

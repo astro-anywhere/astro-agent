@@ -152,48 +152,9 @@ Describe what you want to build. Astro decomposes your goal into a **dependency 
 
 A complex feature that would take hours of serial work gets broken into independent subtasks. Tasks without dependencies run simultaneously on separate git branches. Dependent tasks wait only for their upstream inputs, not for unrelated work to finish.
 
-```mermaid
-%%{init: {
-  'theme': 'base',
-  'themeVariables': {
-    'primaryColor': '#e8e0d8',
-    'primaryBorderColor': '#b8a99a',
-    'primaryTextColor': '#3d3a37',
-    'lineColor': '#9a918a',
-    'textColor': '#3d3a37',
-    'fontSize': '14px',
-    'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif',
-    'edgeLabelBackground': '#f7f4f0'
-  },
-  'flowchart': {
-    'nodeSpacing': 20,
-    'rankSpacing': 40,
-    'padding': 16,
-    'htmlLabels': true,
-    'curve': 'basis'
-  }
-}}%%
-flowchart LR
-    classDef warm fill:#f0ebe4,stroke:#b8a99a,stroke-width:2px,color:#3d3a37
-    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37
-    classDef sage fill:#dde5d9,stroke:#a3b89a,stroke-width:2px,color:#3d3a37
-
-    Goal["Describe<br/>your goal"]:::warm
-    Plan["Plan<br/>DAG"]:::warm
-    Goal --> Plan
-
-    Plan --> T1["Task A"]:::mist
-    Plan --> T2["Task B"]:::mist
-    Plan --> T3["Task C"]:::mist
-
-    T1 --> T4["Task D"]:::mist
-    T2 --> T4
-    T3 --> T5["Task E"]:::mist
-    T4 --> Done["Done"]:::sage
-    T5 --> Done
-
-    linkStyle default stroke:#9a918a,stroke-width:2px
-```
+<p align="center">
+  <img src="docs/dag-workflow.svg" alt="DAG parallel execution" width="800"/>
+</p>
 
 > **Tasks A, B, C run in parallel.** Task D waits for A + B. Task E waits for C.
 > Total time = **longest path**, not sum of all tasks.
@@ -215,36 +176,9 @@ All agents get full project context injection, real-time output streaming, and s
 
 Every task runs on its own **git worktree** &mdash; a real, isolated branch with no conflicts. When the agent finishes, the runner commits the changes, pushes the branch, and opens a pull request automatically.
 
-```mermaid
-%%{init: {
-  'theme': 'base',
-  'themeVariables': {
-    'primaryColor': '#e8e0d8',
-    'primaryBorderColor': '#b8a99a',
-    'primaryTextColor': '#3d3a37',
-    'lineColor': '#9a918a',
-    'textColor': '#3d3a37',
-    'fontSize': '14px',
-    'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif',
-    'edgeLabelBackground': '#f7f4f0'
-  },
-  'flowchart': {
-    'nodeSpacing': 20,
-    'rankSpacing': 40,
-    'padding': 16,
-    'htmlLabels': true,
-    'curve': 'basis'
-  }
-}}%%
-flowchart LR
-    classDef warm fill:#f0ebe4,stroke:#b8a99a,stroke-width:2px,color:#3d3a37
-    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37
-    classDef sage fill:#dde5d9,stroke:#a3b89a,stroke-width:2px,color:#3d3a37
-
-    WT["Create<br/>worktree"]:::warm --> Run["AI agent<br/>executes"]:::mist --> Commit["Commit &amp;<br/>push"]:::mist --> PR["Submit<br/>PR"]:::sage
-
-    linkStyle default stroke:#9a918a,stroke-width:2px
-```
+<p align="center">
+  <img src="docs/github-workflow.svg" alt="GitHub-native workflow" width="800"/>
+</p>
 
 No merge conflicts between parallel tasks. Each branch is isolated. Review and merge at your own pace.
 
