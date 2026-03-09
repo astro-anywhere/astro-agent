@@ -14,6 +14,7 @@ import { getMachineResources, formatResourceSummary } from '../lib/resources.js'
 import { discoverRemoteHosts, formatDiscoveredHosts } from '../lib/ssh-discovery.js';
 import { requestDeviceCode, pollForToken, registerMachine, DeviceAuthApiError } from '../lib/api-client.js';
 import { detectLocalIP, checkRemoteNode, packAndInstall, sshExec } from '../lib/ssh-installer.js';
+import { formatInstallErrorBox, type InstallErrorInfo } from '../lib/display.js';
 import type { ProviderType, DiscoveredHost } from '../types.js';
 
 const execFile = promisify(execFileCb);
@@ -621,6 +622,7 @@ async function installOnRemoteHosts(
   verbose = false,
 ): Promise<DiscoveredHost[]> {
   const installedHosts: DiscoveredHost[] = [];
+  const installErrors: InstallErrorInfo[] = [];
   console.log();
   const localIP = detectLocalIP();
   // Build URLs that remote hosts can reach
@@ -637,19 +639,60 @@ async function installOnRemoteHosts(
     // Matching the behavior of startRemoteAgents() — PRs #2/#3 found that pgrep-based
     // "already running" detection is unreliable (self-matches the SSH command process).
     spinner.text = `${hostName}: Stopping existing agent (if any)...`;
-    await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true').catch(() => {});
+    try {
+      await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true');
+    } catch (err) {
+      // SSH connection failed entirely
+      const errMsg = err instanceof Error ? err.message : String(err);
+      const reason = errMsg.includes('Permission denied') ? 'permission_denied' : 'ssh_failed';
+      spinner.fail(`${hostName}: SSH connection failed`);
+      installErrors.push({
+        host: hostName,
+        hostname: host.hostname,
+        user: host.user,
+        error: errMsg,
+        reason,
+      });
+      continue;
+    }
     await new Promise((r) => setTimeout(r, 1000));
 
     spinner.text = `Checking Node.js on ${hostName}...`;
 
-    // Check remote Node.js availability
-    const nodeCheck = await checkRemoteNode(host);
+    // Check remote Node.js availability (now supports HPC module systems)
+    let nodeCheck: { available: boolean; version: string | null; method?: string };
+    try {
+      nodeCheck = await checkRemoteNode(host);
+    } catch (err) {
+      spinner.fail(`${hostName}: Could not check Node.js`);
+      installErrors.push({
+        host: hostName,
+        hostname: host.hostname,
+        user: host.user,
+        error: err instanceof Error ? err.message : String(err),
+        reason: 'ssh_failed',
+      });
+      continue;
+    }
+
     if (!nodeCheck.available) {
+      const reason = nodeCheck.version ? 'node_too_old' : 'node_not_found';
       spinner.fail(
         `${hostName}: Node.js ${nodeCheck.version ? `${nodeCheck.version} (need ≥18)` : 'not found'}`,
       );
-      console.log(chalk.dim('  Install Node.js ≥ 18 on this host first'));
+      installErrors.push({
+        host: hostName,
+        hostname: host.hostname,
+        user: host.user,
+        error: nodeCheck.version ? `Node.js ${nodeCheck.version} is too old` : 'Node.js not found',
+        reason,
+        nodeVersion: nodeCheck.version,
+      });
       continue;
+    }
+
+    if (verbose && nodeCheck.method) {
+      console.log(chalk.dim(`  [setup] Node.js found via: ${nodeCheck.method}`));
     }
 
     spinner.text = `Installing on ${hostName}...`;
@@ -659,6 +702,13 @@ async function installOnRemoteHosts(
 
     if (!localAccessToken) {
       spinner.fail(`${hostName}: No auth tokens available. Authenticate locally first.`);
+      installErrors.push({
+        host: hostName,
+        hostname: host.hostname,
+        user: host.user,
+        error: 'No authentication tokens available',
+        reason: 'install_failed',
+      });
       continue;
     }
 
@@ -703,12 +753,26 @@ async function installOnRemoteHosts(
       installedHosts.push(host);
     } catch (err) {
       spinner.fail(`${hostName}: Installation failed`);
-      console.error(chalk.red(`  ${err instanceof Error ? err.message : String(err)}`));
+      const errMsg = err instanceof Error ? err.message : String(err);
+      installErrors.push({
+        host: hostName,
+        hostname: host.hostname,
+        user: host.user,
+        error: errMsg,
+        reason: 'install_failed',
+      });
       if (verbose && err instanceof Error && err.stack) {
         console.error(chalk.dim(`[setup] Stack trace: ${err.stack}`));
       }
     }
   }
+
+  // Show error summary box if there were failures
+  if (installErrors.length > 0) {
+    console.log();
+    console.log(formatInstallErrorBox(installErrors));
+  }
+
   console.log();
   return installedHosts;
 }
@@ -776,80 +840,36 @@ async function configureMcpForClaudeCode(): Promise<boolean> {
 // ============================================================================
 
 /**
- * Interactive host selection using a list prompt with Enter-to-toggle.
+ * Interactive host selection using checkbox prompt.
  *
- * Shows all hosts with ◯/✓ markers. Pressing Enter on a host toggles it.
- * "Select all" toggles all hosts. "Confirm" and "Skip" at the bottom.
- * Cursor stays on the same position after each toggle.
+ * Uses inquirer's native checkbox type for clean multi-select UI.
+ * Space to toggle, Enter to confirm, 'a' to toggle all.
  */
 async function selectHostsInteractive(hosts: DiscoveredHost[]): Promise<string[]> {
-  const selected = new Set<string>();
-  const ACTION_SELECT_ALL = '__select_all__';
-  const ACTION_CONFIRM = '__confirm__';
-  const ACTION_SKIP = '__skip__';
+  // Build choices for checkbox
+  const choices = hosts.map((h) => {
+    const label = h.hostname !== h.name ? `${h.name} ${chalk.dim(`(${h.hostname})`)}` : h.name;
+    const user = h.user ? chalk.dim(` [${h.user}]`) : '';
+    return {
+      name: `${label}${user}`,
+      value: h.name,
+      short: h.name,
+    };
+  });
 
-  let cursorIndex = 0;
+  console.log(chalk.dim('  Use Space to toggle, ↑↓ to navigate, Enter to confirm, "a" to toggle all\n'));
 
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
-    // Build choices with current selection state
-    const choices: Array<{ name: string; value: string } | inquirer.Separator> = [];
+  const { selectedHosts } = await inquirer.prompt<{ selectedHosts: string[] }>([
+    {
+      type: 'checkbox',
+      name: 'selectedHosts',
+      message: 'Select hosts to install Astro Agent on:',
+      choices,
+      pageSize: Math.min(hosts.length + 2, 15),
+    },
+  ]);
 
-    for (const h of hosts) {
-      const marker = selected.has(h.name) ? chalk.green('✓') : chalk.dim('◯');
-      const label = h.hostname !== h.name ? `${h.name} ${chalk.dim(`(${h.hostname})`)}` : h.name;
-      const user = h.user ? chalk.dim(` [${h.user}]`) : '';
-      choices.push({ name: `${marker} ${label}${user}`, value: h.name });
-    }
-
-    choices.push(new inquirer.Separator(chalk.dim('──────────────────')));
-
-    const allSelected = hosts.every((h) => selected.has(h.name));
-    const selectAllLabel = allSelected ? 'Deselect all' : 'Select all';
-    choices.push({ name: chalk.cyan(`◉ ${selectAllLabel}`), value: ACTION_SELECT_ALL });
-
-    choices.push(new inquirer.Separator(chalk.dim('──────────────────')));
-    choices.push({ name: chalk.green(`✔ Confirm (${selected.size} selected)`), value: ACTION_CONFIRM });
-    choices.push({ name: chalk.yellow('✘ Skip'), value: ACTION_SKIP });
-
-    const { choice } = await inquirer.prompt<{ choice: string }>([
-      {
-        type: 'list',
-        name: 'choice',
-        message: `Select hosts to install on:`,
-        choices,
-        pageSize: choices.length,
-        default: cursorIndex,
-      },
-    ]);
-
-    if (choice === ACTION_CONFIRM) {
-      return Array.from(selected);
-    }
-
-    if (choice === ACTION_SKIP) {
-      return [];
-    }
-
-    if (choice === ACTION_SELECT_ALL) {
-      if (allSelected) {
-        selected.clear();
-      } else {
-        for (const h of hosts) selected.add(h.name);
-      }
-      // Keep cursor on Select all
-      cursorIndex = hosts.length + 1; // +1 for separator
-    } else {
-      // Toggle host
-      if (selected.has(choice)) {
-        selected.delete(choice);
-      } else {
-        selected.add(choice);
-      }
-      // Keep cursor on the same host
-      cursorIndex = hosts.findIndex((h) => h.name === choice);
-    }
-  }
+  return selectedHosts;
 }
 
 /**
