@@ -33,9 +33,9 @@
 
 ## What is Astro?
 
-[**Astro**](https://astroanywhere.com/landing/) is mission control for the AI age. It turns ambitious goals into dependency graphs, dispatches tasks across your machines in parallel, and surfaces the decisions that need you.
+[**Astro**](https://astroanywhere.com/landing/) is an orchestrator for AI agents. It connects multiple jobs across different machines and compute backends &mdash; your laptop, GPU servers, HPC clusters, cloud VMs &mdash; so AI agents can work in parallel on the tasks that matter.
 
-You plan in the browser. Your machines do the work. The **Agent Runner** is the piece that runs on your machines &mdash; it receives tasks, executes AI agents, and streams results back.
+Mission control lives in the browser. Your machines do the work. The **Agent Runner** is the piece that runs on each machine &mdash; it receives tasks, executes AI agents on the available compute backends, and streams results back.
 
 > **Self-hosting** is on the roadmap. Currently Astro runs as a hosted service at [astroanywhere.com](https://astroanywhere.com).
 
@@ -236,31 +236,52 @@ Stored at `~/.config/astro-agent/config.json`. Most users never need to touch th
 
 ## Architecture
 
-```
-+--------------------------------------------------------+
-|  Astro Dashboard (browser)                             |
-|  Plan > Dispatch > Monitor > Steer > Approve > Ship    |
-+--------------------------+-----------------------------+
-                           | SSE / REST
-                           v
-+--------------------------------------------------------+
-|  Astro Backend + Relay Server                          |
-|  Dispatch engine / Streaming events / WebSocket relay  |
-+--------------------------+-----------------------------+
-                           | WebSocket
-                           v
-+--------------------------------------------------------+
-|  Agent Runner (this repo)                              |
-|                                                        |
-|  +--------------+ +--------------+ +--------------+    |
-|  | Claude SDK   | | Codex CLI    | | OpenClaw     |    |
-|  | (Anthropic)  | | (OpenAI)     | | (Gateway)    |    |
-|  +--------------+ +--------------+ +--------------+    |
-|  +--------------+ +--------------+                     |
-|  | OpenCode     | | Slurm/HPC    |                     |
-|  | (CLI)        | | (sbatch)     |                     |
-|  +--------------+ +--------------+                     |
-+--------------------------------------------------------+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {
+  'primaryColor': '#dbeafe',
+  'primaryBorderColor': '#93c5fd',
+  'primaryTextColor': '#1e293b',
+  'lineColor': '#64748b',
+  'textColor': '#334155',
+  'fontSize': '14px',
+  'fontFamily': 'Inter, -apple-system, sans-serif'
+}}}%%
+flowchart TD
+    classDef blue fill:#dbeafe,stroke:#93c5fd,color:#1e293b
+    classDef green fill:#dcfce7,stroke:#86efac,color:#1e293b
+    classDef amber fill:#fef3c7,stroke:#fcd34b,color:#1e293b
+    classDef slate fill:#f1f5f9,stroke:#cbd5e1,color:#1e293b
+    classDef violet fill:#ede9fe,stroke:#c4b5fd,color:#1e293b
+
+    Dashboard["Astro Dashboard · browser\nPlan · Dispatch · Monitor · Steer · Ship"]:::blue
+
+    Dashboard -->|"SSE / REST"| Server
+
+    Server["Astro Server\nOrchestrator · Dispatch · Relay"]:::slate
+
+    Server -->|"WebSocket"| Runner
+
+    subgraph Runner["Agent Runner — this repo"]
+        direction TB
+
+        subgraph agents["AI Agents"]
+            A1["Claude SDK"]:::violet
+            A2["Codex"]:::violet
+            A3["OpenClaw"]:::violet
+            A4["OpenCode"]:::violet
+        end
+
+        subgraph compute["Compute Backends"]
+            C1["Docker"]:::amber
+            C2["Slurm / HPC"]:::amber
+            C3["Kubernetes"]:::amber
+            C4["SSH · VM"]:::amber
+        end
+    end
+
+    style Runner fill:#f8fafc,stroke:#93c5fd,color:#1e293b
+    style agents fill:#faf5ff,stroke:#c4b5fd,color:#1e293b
+    style compute fill:#fffbeb,stroke:#fcd34b,color:#1e293b
 ```
 
 ## Related
