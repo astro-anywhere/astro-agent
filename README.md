@@ -245,45 +245,44 @@ Stored at `~/.config/astro-agent/config.json`. Most users never need to touch th
     'primaryTextColor': '#3d3a37',
     'lineColor': '#9a918a',
     'textColor': '#3d3a37',
-    'fontSize': '20px',
+    'fontSize': '18px',
     'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif',
     'edgeLabelBackground': 'transparent'
   },
   'flowchart': {
-    'nodeSpacing': 30,
-    'rankSpacing': 50,
-    'padding': 24,
+    'nodeSpacing': 40,
+    'rankSpacing': 55,
+    'padding': 28,
     'htmlLabels': true,
     'curve': 'basis'
   }
 }}%%
-flowchart TD
-    classDef warm fill:#e8e0d8,stroke:#b8a99a,stroke-width:2px,color:#3d3a37,font-size:20px
-    classDef sand fill:#f0ebe4,stroke:#c4b9ab,stroke-width:2px,color:#3d3a37,font-size:20px
-    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37,font-size:18px
-    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:2px,color:#3d3a37,font-size:18px
+flowchart TB
+    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:2px,color:#3d3a37,font-size:18px
+    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37,font-size:16px
+    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:2px,color:#3d3a37,font-size:16px
 
-    Dashboard["<b>Astro Dashboard</b><br/><br/>Plan &nbsp; Dispatch &nbsp; Monitor &nbsp; Steer &nbsp; Ship"]:::warm
+    Server["<b>Astro Server</b> &nbsp; <i>astroanywhere.com</i><br/><br/>Generate Plan &rarr; Break into Tasks &rarr; Dispatch"]:::server
 
-    Dashboard ==>|" REST + SSE "| Server
+    Server ==>|" &nbsp; deploy tasks &nbsp; "| Runner
+    Runner -.->|" &nbsp; report progress &nbsp; "| Server
 
-    Server["<b>Astro Server</b><br/><br/>Orchestrator &nbsp; Dispatch &nbsp; Relay"]:::sand
-
-    Server ==>|" WebSocket "| Runner
-
-    subgraph Runner["&nbsp; Agent Runner &mdash; this repo &nbsp;"]
-        direction LR
+    subgraph Runner["&nbsp; Astro Agent Runner &mdash; this repo &nbsp;"]
+        direction TB
 
         subgraph agents["&nbsp; AI Agents &nbsp;"]
-            direction TB
+            direction LR
             A1["&nbsp; Claude SDK &nbsp;"]:::mist
             A2["&nbsp; Codex &nbsp;"]:::mist
             A3["&nbsp; OpenClaw &nbsp;"]:::mist
             A4["&nbsp; OpenCode &nbsp;"]:::mist
         end
 
+        agents ==>|" &nbsp; deploy jobs &nbsp; "| compute
+        compute -.->|" &nbsp; results &nbsp; "| agents
+
         subgraph compute["&nbsp; Compute Backends &nbsp;"]
-            direction TB
+            direction LR
             C1["&nbsp; Docker &nbsp;"]:::rose
             C2["&nbsp; Slurm &nbsp;"]:::rose
             C3["&nbsp; Kubernetes &nbsp;"]:::rose
@@ -291,14 +290,16 @@ flowchart TD
         end
     end
 
-    style Runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:2px,color:#3d3a37,font-size:20px
-    style agents fill:#edf2f7,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37,font-size:18px
-    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:2px,color:#3d3a37,font-size:18px
+    style Runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:2px,color:#3d3a37,font-size:18px
+    style agents fill:#edf2f7,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37,font-size:16px
+    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:2px,color:#3d3a37,font-size:16px
 
     linkStyle default stroke:#9a918a,stroke-width:3px
+    linkStyle 1 stroke:#9a918a,stroke-width:2px,stroke-dasharray:6
+    linkStyle 3 stroke:#9a918a,stroke-width:2px,stroke-dasharray:6
 ```
 
-> **Agent Runner** (this repo) receives tasks, selects an AI agent, runs it on the appropriate compute backend, and streams results back.
+> **Astro Server** generates plans, breaks them into tasks, and dispatches to agent runners. Each **Agent Runner** (this repo) selects an AI agent, deploys jobs to compute backends, and streams progress back to the server.
 
 ## Related
 
