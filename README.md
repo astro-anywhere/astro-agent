@@ -306,9 +306,12 @@ flowchart TB
     style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:22px
     style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:22px
 
-    linkStyle default stroke:#9a918a,stroke-width:3px
-    linkStyle 1 stroke-dasharray:6
-    linkStyle 3 stroke-dasharray:6
+    linkStyle 0 stroke:#9a918a,stroke-width:3px
+    linkStyle 1 stroke:#9a918a,stroke-width:3px,stroke-dasharray:6
+    linkStyle 2,3,4 stroke:none,stroke-width:0
+    linkStyle 5 stroke:#9a918a,stroke-width:3px
+    linkStyle 6 stroke:#9a918a,stroke-width:3px,stroke-dasharray:6
+    linkStyle 7,8,9 stroke:none,stroke-width:0
 ```
 
 > **Astro Server** generates plans, breaks them into tasks, and dispatches to agent runners. Each **Agent Runner** (this repo) selects an AI agent, deploys jobs to compute backends, and streams progress back to the server.
