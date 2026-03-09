@@ -168,18 +168,19 @@ flowchart LR
     linkStyle default stroke:#9a918a,stroke-width:2px
 ```
 
-> Tasks A, B, C run in parallel. Task D waits for A + B. Task E waits for C. Total time = longest path, not sum of all tasks.
+> **Tasks A, B, C run in parallel.** Task D waits for A + B. Task E waits for C.
+> Total time = **longest path**, not sum of all tasks.
 
-### 2. Multi-Agent Support
+### 2. Supporting Mainstream AI Agents
 
 Astro works with the AI coding agents you already use. Install any supported agent &mdash; Astro detects it at startup and dispatches tasks automatically.
 
-| Agent | Link | Steering |
+| Agent | Install | Website |
 |---|---|---|
-| **Claude Code** | [anthropic.com/claude-code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) | Mid-execution + post-completion |
-| **Codex** | [github.com/openai/codex](https://github.com/openai/codex) | Post-completion |
-| **OpenClaw** | [github.com/openclaw-ai/openclaw](https://github.com/openclaw-ai/openclaw) | Post-completion |
-| **OpenCode** | [github.com/opencode-ai/opencode](https://github.com/opencode-ai/opencode) | Post-completion |
+| **Claude Code** | `npm i -g @anthropic-ai/claude-code` | [anthropic.com/claude-code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) |
+| **Codex** | `npm i -g @openai/codex` | [github.com/openai/codex](https://github.com/openai/codex) |
+| **OpenClaw** | `npm i -g openclaw` | [github.com/openclaw-ai/openclaw](https://github.com/openclaw-ai/openclaw) |
+| **OpenCode** | `bun i -g opencode` | [github.com/opencode-ai/opencode](https://github.com/opencode-ai/opencode) |
 
 All agents get full project context injection, real-time output streaming, and session preservation for multi-turn resume. Your API keys stay on your machine &mdash; Astro never sees them.
 
@@ -213,18 +214,18 @@ flowchart LR
     classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37
     classDef sage fill:#dde5d9,stroke:#a3b89a,stroke-width:2px,color:#3d3a37
 
-    WT["Create<br/>worktree"]:::warm --> Run["AI agent<br/>executes"]:::mist --> Commit["Commit &amp;<br/>push"]:::mist --> PR["Open<br/>PR"]:::sage
+    WT["Create<br/>worktree"]:::warm --> Run["AI agent<br/>executes"]:::mist --> Commit["Commit &amp;<br/>push"]:::mist --> PR["Submit<br/>PR"]:::sage
 
     linkStyle default stroke:#9a918a,stroke-width:2px
 ```
 
 No merge conflicts between parallel tasks. Each branch is isolated. Review and merge at your own pace.
 
-### 4. Mission Control
+### 4. Mission Control &amp; Full Observability
 
-The [Astro Dashboard](https://astroanywhere.com) gives you full visibility across every project, task, and machine:
+The [Astro Dashboard](https://astroanywhere.com) gives you full visibility into every agent session, tool execution, and file change across all your projects and machines:
 
-- **Monitor** &mdash; real-time streaming of agent output, tool calls, and file changes
+- **Observe** &mdash; see the full dialogue of AI agents, every tool call, every file diff, in real time
 - **Steer** &mdash; send guidance or redirect agents mid-execution
 - **Decide** &mdash; approve, reject, or rerun from any device &mdash; no terminal needed
 - **Scale** &mdash; multi-machine routing by load and capability
