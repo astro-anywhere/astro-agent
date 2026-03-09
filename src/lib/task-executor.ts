@@ -194,6 +194,8 @@ export class TaskExecutor {
   private gitAvailable: boolean = false;
   private hpcCapability: HpcCapability | null;
   private branchLockManager = new BranchLockManager();
+  /** Per-directory lock for serializing tasks on non-git directories (no worktree isolation). */
+  private directoryLockManager = new BranchLockManager();
   private openclawBridge: OpenClawBridge | null = null;
 
   // Safety tracking
@@ -254,9 +256,18 @@ export class TaskExecutor {
     };
 
     // Determine if worktree isolation will be used for this task.
+    // Check git availability early: non-git directories cannot use git worktrees,
+    // so willUseWorktree must be false for them. Without this, the safety check
+    // thinks worktree isolation is active and allows parallel execution, but
+    // prepareTaskWorkspace() later falls back to direct in-place execution —
+    // causing file conflicts when multiple tasks run on the same non-git directory.
+    const isGitDir = !isTextOnlyTask && normalizedTask.workingDirectory && this.gitAvailable
+      ? await isGitRepo(normalizedTask.workingDirectory)
+      : false;
     const willUseWorktree = this.useWorktree
       && normalizedTask.useWorktree !== false
-      && normalizedTask.deliveryMode !== 'direct';
+      && normalizedTask.deliveryMode !== 'direct'
+      && (isGitDir || normalizedTask.deliveryMode === 'copy');
 
     if (!isTextOnlyTask && task.skipSafetyCheck) {
       // Server already approved safety for this directory — skip the prompt.
@@ -281,13 +292,16 @@ export class TaskExecutor {
 
       // Handle safety tiers
       if (safetyCheck.tier === WorkdirSafetyTier.UNSAFE) {
-        // BLOCK: unsafe conditions (non-git parallel, or git + uncommitted + no worktree)
-        this.wsClient.sendTaskResult({
-          taskId: normalizedTask.id,
-          status: 'failed',
-          error: safetyCheck.blockReason,
-          completedAt: new Date().toISOString(),
-        });
+        // QUEUE: serial execution required (non-git parallel, or git + uncommitted + no worktree).
+        // Instead of failing, queue the task and execute it once the current task
+        // in this directory completes. Track it so further tasks also queue behind it.
+        console.log(`[executor] Task ${normalizedTask.id}: queued for serial execution (${safetyCheck.parallelTaskCount} active in dir)`);
+        this.trackTaskDirectory(normalizedTask);
+        this.taskQueue.push(normalizedTask);
+        this.wsClient.sendTaskStatus(
+          normalizedTask.id, 'queued', 0,
+          `Waiting for ${safetyCheck.parallelTaskCount} task(s) in this directory to complete (serial execution for non-git directory)`,
+        );
         return;
       }
 
@@ -1531,10 +1545,17 @@ export class TaskExecutor {
       return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
     }
 
-    // Direct delivery mode: skip worktree, work in-place
+    // Direct delivery mode: skip worktree, work in-place.
+    // Acquire directory lock to serialize tasks on the same directory.
     if (task.deliveryMode === 'direct') {
-      console.log(`[executor] Task ${task.id}: direct delivery mode, using raw workdir: ${task.workingDirectory}`);
-      return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
+      const lockKey = `dir::${task.workingDirectory}`;
+      console.log(`[executor] Task ${task.id}: direct delivery mode, acquiring directory lock`);
+      const lockHandle = await this.directoryLockManager.acquire(lockKey, task.id);
+      console.log(`[executor] Task ${task.id}: directory lock acquired, using raw workdir: ${task.workingDirectory}`);
+      return {
+        workingDirectory: task.workingDirectory,
+        cleanup: async () => { lockHandle.release(); },
+      };
     }
 
     // Copy delivery mode: copy project to worktree dir (non-git)
@@ -1559,11 +1580,19 @@ export class TaskExecutor {
     }
 
     // Non-git directory: fall back to direct execution (no worktree possible).
-    // The safety check (checkWorkdirSafety) already handles blocking parallel
-    // execution in non-git dirs, so single-task direct execution is safe here.
+    // Acquire a per-directory lock to serialize tasks — without git worktree
+    // isolation, concurrent modification of the same files causes conflicts.
     if (this.gitAvailable && !(await isGitRepo(task.workingDirectory))) {
-      console.warn(`[executor] Task ${task.id}: not a git repo (${task.workingDirectory}), falling back to direct execution`);
-      return { workingDirectory: task.workingDirectory, cleanup: async () => {} };
+      const lockKey = `dir::${task.workingDirectory}`;
+      console.log(`[executor] Task ${task.id}: not a git repo, acquiring directory lock for ${task.workingDirectory}`);
+      stream.stdout(`[astro] Non-git directory — waiting for exclusive access...\n`);
+      const lockHandle = await this.directoryLockManager.acquire(lockKey, task.id);
+      console.log(`[executor] Task ${task.id}: directory lock acquired, proceeding with direct execution`);
+      stream.stdout(`[astro] Directory lock acquired, working directly on files.\n`);
+      return {
+        workingDirectory: task.workingDirectory,
+        cleanup: async () => { lockHandle.release(); },
+      };
     }
 
     // Untracked subdirectory of a parent repo: the workdir inherits a git repo
