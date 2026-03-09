@@ -14,21 +14,28 @@ import { ClaudeSdkAdapter } from './claude-sdk-adapter.js';
 import { CodexAdapter } from './codex-adapter.js';
 import { OpenClawAdapter } from './openclaw-adapter.js';
 import { OpenCodeAdapter } from './opencode-adapter.js';
+import type { OpenClawBridge } from '../lib/openclaw-bridge.js';
 
 /**
  * Create a provider adapter by type.
  *
  * @param hpcCapability Pre-classified HPC info from startup detection.
  *   Passed to ClaudeSdkAdapter to avoid re-running SLURM detection at query time.
+ * @param openclawBridge Optional bridge instance for OpenClaw adapter delegation.
  */
-export function createProviderAdapter(type: ProviderType, hpcCapability?: HpcCapability | null): ProviderAdapter | null {
+export function createProviderAdapter(type: ProviderType, hpcCapability?: HpcCapability | null, openclawBridge?: OpenClawBridge | null): ProviderAdapter | null {
   switch (type) {
     case 'claude-sdk':
       return new ClaudeSdkAdapter(hpcCapability);
     case 'codex':
       return new CodexAdapter();
-    case 'openclaw':
-      return new OpenClawAdapter();
+    case 'openclaw': {
+      const adapter = new OpenClawAdapter();
+      if (openclawBridge) {
+        adapter.setBridge(openclawBridge);
+      }
+      return adapter;
+    }
     case 'opencode':
       return new OpenCodeAdapter();
     case 'slurm':

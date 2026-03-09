@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { WebSocketServer } from 'ws'
 import { OpenClawAdapter } from '../src/providers/openclaw-adapter.js'
+import { OpenClawBridge } from '../src/lib/openclaw-bridge.js'
 import type { TaskOutputStream } from '../src/providers/base-adapter.js'
 import type { Task } from '../src/types.js'
 
@@ -411,6 +412,68 @@ describe('OpenClaw Gateway Adapter', () => {
 
       expect(result.status).toBe('cancelled')
       expect(result.error).toBe('Task cancelled')
+    })
+  })
+
+  describe('execute — bridge-backed', () => {
+    let bridge: OpenClawBridge
+
+    beforeEach(async () => {
+      bridge = new OpenClawBridge()
+      // Override config discovery to use our test port
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(bridge as any).gatewayConfig = {
+        port,
+        token: 'test-token',
+        url: `ws://127.0.0.1:${port}`,
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(bridge as any)._started = true
+      // Connect the bridge
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      await (bridge as any).connect()
+    })
+
+    afterEach(() => {
+      bridge.stop()
+    })
+
+    it('should dispatch task via bridge and stream events', async () => {
+      adapter.setBridge(bridge)
+
+      const stream = createMockStream()
+      const controller = new AbortController()
+
+      const result = await adapter.execute(makeTask(), stream, controller.signal)
+
+      expect(result.status).toBe('completed')
+      expect(result.output).toContain('Hello!')
+      expect(stream.text).toHaveBeenCalledWith('Hello!')
+    })
+
+    it('should use bridge for resume when available', async () => {
+      adapter.setBridge(bridge)
+
+      const stream = createMockStream()
+      const controller = new AbortController()
+
+      // First execute to create a preserved session
+      await adapter.execute(makeTask({ id: 'resume-test' }), stream, controller.signal)
+
+      // Now resume
+      const resumeStream = createMockStream()
+      const resumeController = new AbortController()
+
+      const result = await adapter.resumeTask(
+        'resume-test',
+        'Follow up question',
+        '/tmp',
+        'astro:task:resume-test',
+        resumeStream,
+        resumeController.signal,
+      )
+
+      expect(result.success).toBe(true)
     })
   })
 })
