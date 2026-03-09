@@ -287,7 +287,9 @@ flowchart TB
     classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:3px,color:#3d3a37,font-size:18px
     classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:18px
 
-    Server["<b>Astro Server</b><br/><i>astroanywhere.com</i><br/><br/>Plan &rarr; Tasks &rarr; Dispatch"]:::server
+    subgraph Server[" &nbsp; Astro Server &nbsp; &mdash; &nbsp; astroanywhere.com &nbsp; "]
+        S1[" &nbsp; Plan &nbsp; "]:::server --> S2[" &nbsp; Tasks &nbsp; "]:::server --> S3[" &nbsp; Dispatch &nbsp; "]:::server
+    end
 
     Server -- " &nbsp; dispatch tasks &nbsp; " --> runner
     runner -. " &nbsp; report progress &nbsp; " .-> Server
@@ -306,12 +308,15 @@ flowchart TB
     style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:22px
     style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:22px
 
-    linkStyle 0 stroke:#9a918a,stroke-width:3px
-    linkStyle 1 stroke:#9a918a,stroke-width:3px,stroke-dasharray:6
-    linkStyle 2,3,4 stroke:none,stroke-width:0
-    linkStyle 5 stroke:#9a918a,stroke-width:3px
-    linkStyle 6 stroke:#9a918a,stroke-width:3px,stroke-dasharray:6
-    linkStyle 7,8,9 stroke:none,stroke-width:0
+    style Server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:22px
+
+    linkStyle 0,1 stroke:#9a918a,stroke-width:3px
+    linkStyle 2 stroke:#9a918a,stroke-width:3px
+    linkStyle 3 stroke:#9a918a,stroke-width:3px,stroke-dasharray:6
+    linkStyle 4,5,6 stroke:none,stroke-width:0
+    linkStyle 7 stroke:#9a918a,stroke-width:3px
+    linkStyle 8 stroke:#9a918a,stroke-width:3px,stroke-dasharray:6
+    linkStyle 9,10,11 stroke:none,stroke-width:0
 ```
 
 > **Astro Server** generates plans, breaks them into tasks, and dispatches to agent runners. Each **Agent Runner** (this repo) selects an AI agent, deploys jobs to compute backends, and streams progress back to the server.
