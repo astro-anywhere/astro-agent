@@ -121,50 +121,117 @@ $ npx @astroanywhere/agent@latest launch
 
 Your laptop and all remote hosts appear in Astro's **Environments** page. Dispatch tasks to any of them.
 
-## What You Get with Astro Anywhere
+## Key Features
 
-| | Feature | |
+### 1. Planning &amp; Parallel Execution
+
+Describe what you want to build. Astro decomposes your goal into a **dependency graph** (DAG) of tasks, then executes them in parallel across your machines &mdash; respecting the dependency order automatically.
+
+A complex feature that would take hours of serial work gets broken into independent subtasks. Tasks without dependencies run simultaneously on separate git branches. Dependent tasks wait only for their upstream inputs, not for unrelated work to finish.
+
+```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#e8e0d8',
+    'primaryBorderColor': '#b8a99a',
+    'primaryTextColor': '#3d3a37',
+    'lineColor': '#9a918a',
+    'textColor': '#3d3a37',
+    'fontSize': '14px',
+    'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif',
+    'edgeLabelBackground': '#f7f4f0'
+  },
+  'flowchart': {
+    'nodeSpacing': 20,
+    'rankSpacing': 40,
+    'padding': 16,
+    'htmlLabels': true,
+    'curve': 'basis'
+  }
+}}%%
+flowchart LR
+    classDef warm fill:#f0ebe4,stroke:#b8a99a,stroke-width:2px,color:#3d3a37
+    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37
+    classDef sage fill:#dde5d9,stroke:#a3b89a,stroke-width:2px,color:#3d3a37
+
+    Goal["Describe<br/>your goal"]:::warm
+    Plan["Plan<br/>DAG"]:::warm
+    Goal --> Plan
+
+    Plan --> T1["Task A"]:::mist
+    Plan --> T2["Task B"]:::mist
+    Plan --> T3["Task C"]:::mist
+
+    T1 --> T4["Task D"]:::mist
+    T2 --> T4
+    T3 --> T5["Task E"]:::mist
+    T4 --> Done["Done"]:::sage
+    T5 --> Done
+
+    linkStyle default stroke:#9a918a,stroke-width:2px
+```
+
+> Tasks A, B, C run in parallel. Task D waits for A + B. Task E waits for C. Total time = longest path, not sum of all tasks.
+
+### 2. Multi-Agent Support
+
+Astro works with the AI coding agents you already use. Install any of the supported agents &mdash; Astro detects them at startup and dispatches tasks automatically.
+
+| Agent | Link | Steering |
 |---|---|---|
-| **Plan** | Describe a goal &rarr; Astro breaks it into a dependency graph | Graph, List, Timeline views |
-| **Execute** | Dispatch to any machine &mdash; laptop, server, HPC | Parallel, isolated branches |
-| **Monitor** | Real-time agent output, tool calls, file changes | Live streaming |
-| **Steer** | Send guidance, redirect, or resume completed sessions | Multi-turn conversations |
-| **Decide** | Approve, reject, or redirect from any device | No terminal needed |
-| **Ship** | PRs created automatically per task | Branch-per-task isolation |
-| **Scale** | Multi-machine routing by load & capability | SSH config auto-discovery |
+| **Claude Code** | [anthropic.com/claude-code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) | Mid-execution + post-completion |
+| **Codex** | [github.com/openai/codex](https://github.com/openai/codex) | Post-completion |
+| **OpenClaw** | [github.com/openclaw-ai/openclaw](https://github.com/openclaw-ai/openclaw) | Post-completion |
+| **OpenCode** | [github.com/opencode-ai/opencode](https://github.com/opencode-ai/opencode) | Post-completion |
 
-## What the Agent Runner Does
+All agents get full project context injection, real-time output streaming, and session preservation for multi-turn resume. Your API keys stay on your machine &mdash; Astro never sees them.
 
-When you execute a task in Astro, it lands on one of your machines. The agent runner:
+### 3. GitHub-Native Workflow
 
-- Creates an isolated git branch for the task
-- Runs the selected AI agent with your project's full context
-- Streams progress back to the Astro UI in real time
-- Commits changes, pushes the branch, and opens a PR
-- Supports mid-execution steering and post-completion session resume
+Every task runs on its own **git worktree** &mdash; a real, isolated branch with no conflicts. When the agent finishes, the runner commits the changes, pushes the branch, and opens a pull request automatically.
 
-Multiple tasks run in parallel &mdash; each on its own branch, no conflicts.
+```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'primaryColor': '#e8e0d8',
+    'primaryBorderColor': '#b8a99a',
+    'primaryTextColor': '#3d3a37',
+    'lineColor': '#9a918a',
+    'textColor': '#3d3a37',
+    'fontSize': '14px',
+    'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif',
+    'edgeLabelBackground': '#f7f4f0'
+  },
+  'flowchart': {
+    'nodeSpacing': 20,
+    'rankSpacing': 40,
+    'padding': 16,
+    'htmlLabels': true,
+    'curve': 'basis'
+  }
+}}%%
+flowchart LR
+    classDef warm fill:#f0ebe4,stroke:#b8a99a,stroke-width:2px,color:#3d3a37
+    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37
+    classDef sage fill:#dde5d9,stroke:#a3b89a,stroke-width:2px,color:#3d3a37
 
-Your API keys stay on your machine. Astro never sees them.
+    WT["Create<br/>worktree"]:::warm --> Run["AI agent<br/>executes"]:::mist --> Commit["Commit &amp;<br/>push"]:::mist --> PR["Open<br/>PR"]:::sage
 
-## AI Providers
+    linkStyle default stroke:#9a918a,stroke-width:2px
+```
 
-Auto-detected at startup. No configuration needed if any of these are installed:
+No merge conflicts between parallel tasks. Each branch is isolated. Review and merge at your own pace.
 
-| Provider | Type | How to Enable | Resume Support |
-|---|---|---|---|
-| **Claude SDK** | Anthropic Direct API | Run `astro-agent auth` or set `ANTHROPIC_API_KEY` | Mid-execution + post-completion |
-| **Codex** | OpenAI CLI agent | Install [Codex CLI](https://github.com/openai/codex) (`npm i -g @openai/codex`) | Post-completion |
-| **OpenClaw** | Gateway WebSocket | Install [OpenClaw](https://github.com/openclaw-ai/openclaw) (`npm i -g openclaw`) | Post-completion |
-| **OpenCode** | CLI headless mode | Install [OpenCode](https://github.com/opencode-ai/opencode) (`bun i -g opencode`) | Post-completion |
+### 4. Mission Control
 
-All providers support:
-- Task execution with full project context injection
-- Real-time streaming of agent output, tool calls, and file changes
-- Session preservation for multi-turn resume after completion
-- Automatic execution summaries
+The [Astro Dashboard](https://astroanywhere.com) gives you full visibility across every project, task, and machine:
 
-**Claude SDK** additionally supports mid-execution steering &mdash; send guidance or redirect the agent while it's still running (via the Claude Agent SDK's `injectMessage`).
+- **Monitor** &mdash; real-time streaming of agent output, tool calls, and file changes
+- **Steer** &mdash; send guidance or redirect agents mid-execution
+- **Decide** &mdash; approve, reject, or rerun from any device &mdash; no terminal needed
+- **Scale** &mdash; multi-machine routing by load and capability
 
 ## Commands
 
