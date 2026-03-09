@@ -8,16 +8,40 @@ import inquirer from 'inquirer';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { hostname as osHostname } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { config } from '../lib/config.js';
-import { detectProviders, formatProvidersSummary } from '../lib/providers.js';
+import { detectProviders } from '../lib/providers.js';
 import { getMachineResources, formatResourceSummary } from '../lib/resources.js';
-import { discoverRemoteHosts, formatDiscoveredHosts } from '../lib/ssh-discovery.js';
+import { discoverRemoteHosts } from '../lib/ssh-discovery.js';
 import { requestDeviceCode, pollForToken, registerMachine, DeviceAuthApiError } from '../lib/api-client.js';
 import { detectLocalIP, checkRemoteNode, packAndInstall, sshExec } from '../lib/ssh-installer.js';
-import { formatInstallErrorBox, type InstallErrorInfo } from '../lib/display.js';
+import {
+  formatInstallErrorBox,
+  formatAgentDetectionBox,
+  formatGhStatusLine,
+  formatSshDiscoveryBox,
+  formatSetupSummaryBox,
+  formatSectionHeader,
+  type InstallErrorInfo,
+} from '../lib/display.js';
 import type { ProviderType, DiscoveredHost } from '../types.js';
 
 const execFile = promisify(execFileCb);
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+async function getVersion(): Promise<string> {
+  try {
+    const packageJson = await import(join(__dirname, '../../package.json'), {
+      with: { type: 'json' },
+    });
+    return packageJson.default.version ?? '0.1.0';
+  } catch {
+    return '0.1.0';
+  }
+}
 
 export interface SetupOptions {
   api?: string;
@@ -71,29 +95,28 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
   }
 
   // Step 2: Detect installed providers
-  const providerSpinner = ora('Detecting agent providers...').start();
+  const providerSpinner = ora('Detecting AI agents...').start();
   let detectedProviders: Awaited<ReturnType<typeof detectProviders>>;
   try {
     detectedProviders = await detectProviders();
-    if (detectedProviders.length > 0) {
-      const providerNames = detectedProviders.filter(p => p.available).map(p => p.name).join(', ');
-      providerSpinner.succeed(`Found ${detectedProviders.length} agent provider(s)${providerNames ? `: ${providerNames}` : ''}`);
-      if (verbose) console.log(chalk.dim(formatProvidersSummary(detectedProviders)));
+    const available = detectedProviders.filter(p => p.available);
+    if (available.length > 0) {
+      providerSpinner.succeed(`Found ${available.length} AI agent(s)`);
     } else {
-      providerSpinner.warn('No agent providers detected');
-      console.log(chalk.yellow('  Install Claude Code or Codex to enable task execution'));
-      console.log(chalk.dim('  Claude Code: https://claude.ai/code'));
-      console.log(chalk.dim('  Codex: https://openai.com/codex'));
+      providerSpinner.warn('No AI agents detected');
     }
     console.log();
+    console.log(formatAgentDetectionBox(detectedProviders));
+    console.log();
   } catch {
-    providerSpinner.fail('Failed to detect providers');
+    providerSpinner.fail('Failed to detect AI agents');
     detectedProviders = [];
   }
 
   // Step 2b: Detect GitHub CLI (gh) — needed for PR delivery mode
   const ghSpinner = ora('Checking GitHub CLI (gh)...').start();
   let ghAvailable = false;
+  let ghStatus: 'authenticated' | 'installed' | 'not_installed' = 'not_installed';
   try {
     const { isGhAvailable } = await import('../lib/git-pr.js');
     // First check: is gh installed at all?
@@ -107,20 +130,22 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
       // gh exists — check if authenticated
       ghAvailable = await isGhAvailable();
       if (ghAvailable) {
-        ghSpinner.succeed('GitHub CLI (gh) installed and authenticated');
+        ghStatus = 'authenticated';
+        ghSpinner.succeed('GitHub CLI (gh) ready');
       } else {
-        ghSpinner.warn('GitHub CLI (gh) installed but not authenticated');
-        console.log(chalk.yellow('  Run `gh auth login` to also create PRs automatically'));
-        console.log(chalk.dim('  Astro works without it — tasks will merge branches locally'));
+        ghStatus = 'installed';
+        ghSpinner.warn('GitHub CLI (gh) not authenticated');
+        console.log(chalk.yellow('  Run `gh auth login` to enable PR creation'));
       }
     } else {
-      ghSpinner.warn('GitHub CLI (gh) not installed');
+      ghSpinner.info('GitHub CLI (gh) not installed');
       // macOS: attempt auto-install via brew
       if (process.platform === 'darwin') {
         console.log(chalk.yellow('  Attempting to install gh via Homebrew...'));
         const installed = await tryInstallGh(verbose);
         if (installed) {
           ghAvailable = await isGhAvailable();
+          ghStatus = ghAvailable ? 'authenticated' : 'installed';
           if (ghAvailable) {
             console.log(chalk.green('  ✓ gh installed and authenticated'));
           } else {
@@ -131,10 +156,10 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
           showGhInstallRecommendation();
         }
       } else {
-        // Linux / other: manual install required (adding GitHub's apt repo is too fragile)
         showGhInstallRecommendation();
       }
     }
+    console.log(formatGhStatusLine(ghStatus));
     console.log();
   } catch {
     ghSpinner.info('GitHub CLI check skipped');
@@ -144,12 +169,15 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
   // Step 3: Discover SSH hosts (only if --with-ssh-config flag is set)
   let discoveredHosts: DiscoveredHost[] = [];
   if (options.withSshConfig) {
+    console.log(formatSectionHeader('SSH Discovery'));
+    console.log();
     const sshSpinner = ora('Discovering remote hosts...').start();
     try {
       discoveredHosts = await discoverRemoteHosts();
       if (discoveredHosts.length > 0) {
         sshSpinner.succeed(`Found ${discoveredHosts.length} remote host(s)`);
-        if (verbose) console.log(chalk.dim(formatDiscoveredHosts(discoveredHosts)));
+        console.log();
+        console.log(formatSshDiscoveryBox(discoveredHosts));
       } else {
         sshSpinner.info('No remote hosts discovered');
       }
@@ -296,66 +324,48 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
   // Mark setup as complete
   config.completeSetup();
 
-  // Summary
+  // Summary model card
+  const version = await getVersion();
+  const hostname = resources?.hostname ?? osHostname();
+  const platform = resources?.platform ?? process.platform;
+  const arch = resources?.arch ?? process.arch;
+
   console.log();
   console.log(chalk.bold.green('✓ Setup Complete!\n'));
+  console.log(formatSetupSummaryBox({
+    hostname,
+    platform,
+    arch,
+    version,
+    runnerId: config.getRunnerId(),
+    providers: detectedProviders,
+    ghStatus,
+    sshHosts: discoveredHosts,
+    resources,
+    authenticated: !!config.getAccessToken(),
+  }));
+  console.log();
 
   if (verbose) {
-    console.log('Configuration saved to:', chalk.dim(config.getConfigPath()));
-    console.log();
-    console.log('Runner ID:', chalk.cyan(config.getRunnerId()));
-    console.log('Machine ID:', chalk.cyan(config.getMachineId()));
-    console.log('API URL:  ', chalk.cyan(config.getApiUrl()));
-    console.log('Relay URL:', chalk.cyan(config.getRelayUrl()));
-    console.log(
-      'Auth:    ',
-      config.getAccessToken() ? chalk.green('authenticated') : chalk.yellow('not configured'),
-    );
-    // Detect Claude auth: stored token > env var > CLI session
-    let claudeAuthStatus: string;
-    if (config.getClaudeOauthToken()) {
-      claudeAuthStatus = chalk.green('OAuth token configured');
-    } else if (process.env.CLAUDE_CODE_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY) {
-      claudeAuthStatus = chalk.green('env variable configured');
-    } else {
-      // Check if claude CLI is available (will use its session automatically)
-      let hasCli = false;
-      try {
-        const { stdout } = await execFile(
-          process.platform === 'win32' ? 'where' : 'which',
-          ['claude'],
-          { timeout: 3000 },
-        );
-        if (stdout.trim()) hasCli = true;
-      } catch { /* not installed */ }
-      claudeAuthStatus = hasCli
-        ? chalk.green('CLI session (auto-detected)')
-        : chalk.yellow('not configured — run `claude login` or set ANTHROPIC_API_KEY');
-    }
-    console.log('Claude:  ', claudeAuthStatus);
-    console.log(
-      'Providers:',
-      providerTypes.length > 0 ? chalk.cyan(providerTypes.join(', ')) : chalk.yellow('none'),
-    );
-    console.log(
-      'MCP:     ',
-      mcpConfigured ? chalk.green('configured for Claude Code') : chalk.yellow('not configured'),
-    );
+    console.log(chalk.dim(`  Config: ${config.getConfigPath()}`));
+    console.log(chalk.dim(`  API:    ${config.getApiUrl()}`));
+    console.log(chalk.dim(`  Relay:  ${config.getRelayUrl()}`));
     console.log();
   }
-  console.log(chalk.bold('Next steps:'));
-  console.log('  1. Start the agent runner:');
-  console.log(chalk.cyan('     npx @astroanywhere/agent start'));
+
+  console.log(chalk.bold('  Next steps:'));
+  console.log('    1. Start the agent runner:');
+  console.log(chalk.cyan('       npx @astroanywhere/agent start'));
   console.log();
-  console.log('  2. Or run in the foreground for testing:');
-  console.log(chalk.cyan('     npx @astroanywhere/agent start --foreground'));
+  console.log('    2. Or run in the foreground for testing:');
+  console.log(chalk.cyan('       npx @astroanywhere/agent start --foreground'));
   console.log();
 
   if (mcpConfigured) {
-    console.log('  3. In Claude Code, use these tools to connect to Astro:');
-    console.log(chalk.cyan('     astro_attach("TASK-ID")  # Attach to a task'));
-    console.log(chalk.cyan('     astro_status()           # Check connection status'));
-    console.log(chalk.cyan('     astro_detach()           # Detach from task'));
+    console.log('    3. In Claude Code, use these tools to connect to Astro:');
+    console.log(chalk.cyan('       astro_attach("TASK-ID")  # Attach to a task'));
+    console.log(chalk.cyan('       astro_status()           # Check connection status'));
+    console.log(chalk.cyan('       astro_detach()           # Detach from task'));
     console.log();
   }
 
