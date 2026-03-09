@@ -270,46 +270,45 @@ The [Astro Dashboard](https://astroanywhere.com) gives you full visibility into 
     'primaryTextColor': '#3d3a37',
     'lineColor': '#9a918a',
     'textColor': '#3d3a37',
-    'fontSize': '16px',
+    'fontSize': '20px',
     'fontFamily': 'Palatino, Palatino Linotype, Georgia, serif',
     'edgeLabelBackground': '#f7f4f0'
   },
   'flowchart': {
-    'nodeSpacing': 20,
-    'rankSpacing': 40,
-    'padding': 16,
+    'nodeSpacing': 30,
+    'rankSpacing': 50,
+    'padding': 24,
     'htmlLabels': true,
     'curve': 'basis'
   }
 }}%%
 flowchart TB
-    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:2px,color:#3d3a37
-    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:2px,color:#3d3a37
-    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:2px,color:#3d3a37
+    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:20px
+    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:3px,color:#3d3a37,font-size:18px
+    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:18px
 
-    Server["<b>Astro Server</b> &nbsp; <i>astroanywhere.com</i><br/>Plan &rarr; Tasks &rarr; Dispatch"]:::server
+    Server["<b>Astro Server</b><br/><i>astroanywhere.com</i><br/><br/>Plan &rarr; Tasks &rarr; Dispatch"]:::server
 
-    Server -- "dispatch tasks" --> runner
-    runner -. "report progress" .-> Server
+    Server -- " &nbsp; dispatch tasks &nbsp; " --> runner
+    runner -. " &nbsp; report progress &nbsp; " .-> Server
 
-    subgraph runner["Agent Runner &mdash; this repo"]
-        A1["Claude Code"]:::mist ~~~ A2["Codex"]:::mist ~~~ A3["OpenClaw"]:::mist ~~~ A4["OpenCode"]:::mist
+    subgraph runner[" &nbsp; Agent Runner &mdash; this repo &nbsp; "]
+        A1[" &nbsp; Claude Code &nbsp; "]:::mist ~~~ A2[" &nbsp; Codex &nbsp; "]:::mist ~~~ A3[" &nbsp; OpenClaw &nbsp; "]:::mist ~~~ A4[" &nbsp; OpenCode &nbsp; "]:::mist
     end
 
-    runner -- "deploy jobs" --> compute
-    compute -. "results" .-> runner
+    runner -- " &nbsp; deploy jobs &nbsp; " --> compute
+    compute -. " &nbsp; results &nbsp; " .-> runner
 
-    subgraph compute["Compute Backends"]
-        C1["Docker"]:::rose ~~~ C2["Slurm"]:::rose ~~~ C3["K8s"]:::rose ~~~ C4["SSH"]:::rose
+    subgraph compute[" &nbsp; Compute Backends &nbsp; "]
+        C1[" &nbsp; Docker &nbsp; "]:::rose ~~~ C2[" &nbsp; Slurm &nbsp; "]:::rose ~~~ C3[" &nbsp; K8s &nbsp; "]:::rose ~~~ C4[" &nbsp; SSH &nbsp; "]:::rose
     end
 
-    style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:2px,color:#3d3a37
-    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:2px,color:#3d3a37
+    style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:22px
+    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:22px
 
-    linkStyle 0 stroke:#9a918a,stroke-width:3px
-    linkStyle 1 stroke:#9a918a,stroke-width:2px,stroke-dasharray:6
-    linkStyle 2 stroke:#9a918a,stroke-width:3px
-    linkStyle 3 stroke:#9a918a,stroke-width:2px,stroke-dasharray:6
+    linkStyle default stroke:#9a918a,stroke-width:3px
+    linkStyle 1 stroke-dasharray:6
+    linkStyle 3 stroke-dasharray:6
 ```
 
 > **Astro Server** generates plans, breaks them into tasks, and dispatches to agent runners. Each **Agent Runner** (this repo) selects an AI agent, deploys jobs to compute backends, and streams progress back to the server.
