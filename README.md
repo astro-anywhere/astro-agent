@@ -295,25 +295,66 @@ Astro works with the AI coding agents you already use. Install any supported age
 
 All agents get full project context injection, real-time output streaming, and session preservation for multi-turn resume. Your API keys stay on your machine &mdash; Astro never sees them.
 
-#### Authentication Troubleshooting
+#### Claude Code Authentication
 
-We auto-detect authentication from Claude Code CLI sessions, environment variables, or stored tokens. If you encounter problems (e.g., on remote machines or HPC clusters), we recommend setting up a long-lived token instead of session-based login:
+Astro delegates authentication entirely to Claude Code. The agent runner passes your environment to the Claude Agent SDK, so you configure credentials the same way you would for Claude Code itself. Three methods are supported:
+
+**Option A &mdash; OAuth token (Anthropic cloud, recommended for most users)**
+
+Generate a long-lived token and export it in your shell profile:
 
 ```bash
 claude setup-token
 ```
 
-Copy the token from the output and add it to your shell config:
+```bash
+# macOS (zsh) — add to ~/.zshrc
+export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>
+
+# Linux (bash) — add to ~/.bashrc
+export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>
+```
+
+**Option B &mdash; Direct API key (Anthropic cloud)**
+
+If you have an Anthropic API key, export it directly:
 
 ```bash
-# macOS (zsh)
-echo 'export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>' >> ~/.zshrc
-source ~/.zshrc
-
-# Linux (bash)
-echo 'export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>' >> ~/.bashrc
-source ~/.bashrc
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+**Option C &mdash; Amazon Bedrock**
+
+Use Claude via your AWS account. Add these to your shell profile (`~/.zshrc` or `~/.bashrc`):
+
+```bash
+export CLAUDE_CODE_USE_BEDROCK=1
+export AWS_ACCESS_KEY_ID=AKIA...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-west-2          # or your preferred region
+```
+
+Or use an AWS profile instead of explicit keys:
+
+```bash
+export CLAUDE_CODE_USE_BEDROCK=1
+export AWS_PROFILE=my-bedrock-profile
+export AWS_REGION=us-west-2
+```
+
+> **Note:** Bedrock models use different model IDs (e.g., `anthropic.claude-sonnet-4-20250514`). The agent runner auto-detects Bedrock model formats and disables sandbox mode, which is not supported on Bedrock.
+
+**Option D &mdash; Google Vertex AI**
+
+Use Claude via your GCP account:
+
+```bash
+export CLAUDE_CODE_USE_VERTEX=1
+export CLOUD_ML_REGION=us-east5       # or your preferred region
+export ANTHROPIC_VERTEX_PROJECT_ID=my-gcp-project
+```
+
+**Troubleshooting:** On remote machines or HPC clusters, session-based login (`claude login`) may not work. Use one of the export methods above instead. Your API keys stay on your machine &mdash; Astro never sees them.
 
 ### 3. GitHub-Native Workflow
 
