@@ -229,7 +229,7 @@ describe('formatLocalMachineBox', () => {
       'id123',
     );
     const plain = stripAnsi(result);
-    expect(plain).toContain('No providers detected');
+    expect(plain).toContain('No agents detected');
   });
 
   it('shows truncated runner ID', () => {

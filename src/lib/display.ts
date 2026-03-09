@@ -105,11 +105,11 @@ export function formatLocalMachineBox(
     }
   }
 
-  // Providers
+  // AI Agents
   lines.push('');
-  lines.push(chalk.white('  AI Providers'));
+  lines.push(chalk.white('  AI Agents'));
   if (providers.length === 0) {
-    lines.push(chalk.yellow('    No providers detected'));
+    lines.push(chalk.yellow('    No agents detected'));
   } else {
     for (const p of providers) {
       const ver = p.version ? chalk.dim(` v${p.version}`) : '';
@@ -172,10 +172,10 @@ export function formatRemoteHostBox(
       }
     }
 
-    // AI Providers
+    // AI Agents
     if (agentStatus.providers && agentStatus.providers.length > 0) {
       lines.push('');
-      lines.push(chalk.white('  AI Providers'));
+      lines.push(chalk.white('  AI Agents'));
       for (const p of agentStatus.providers) {
         const ver = p.version ? chalk.dim(` v${p.version}`) : '';
         const model = p.model ? chalk.dim(` · model: ${p.model}`) : '';
@@ -217,7 +217,7 @@ export function formatSetupHint(hostCount: number): string {
  */
 export function formatNoProvidersWarning(): string {
   return [
-    chalk.yellow('  No AI providers detected.'),
+    chalk.yellow('  No AI agents detected.'),
     chalk.dim('  Install one of the following to get started:'),
     chalk.dim(`    • Claude (SDK)   ${chalk.white('npm i -g @anthropic-ai/claude-code')}`),
     chalk.dim(`    • OpenAI Codex   ${chalk.white('npm i -g @openai/codex')}`),
@@ -310,6 +310,160 @@ export function formatInstallErrorBox(errors: InstallErrorInfo[]): string {
   boxLines.push(chalk.red(`${B.bl}${B.h.repeat(width + 2)}${B.br}`));
 
   return boxLines.join('\n');
+}
+
+// ── Setup section displays ──────────────────────────────────────────
+
+/**
+ * Format a section header with visual delimiter for setup output.
+ */
+export function formatSectionHeader(title: string): string {
+  const line = BOX.h.repeat(50);
+  return `\n  ${chalk.cyan(line)}\n  ${chalk.bold(title)}\n  ${chalk.cyan(line)}`;
+}
+
+/**
+ * Format detected AI agents as a compact box for setup output.
+ */
+export function formatAgentDetectionBox(providers: ProviderInfo[]): string {
+  const lines: string[] = [];
+  lines.push(chalk.bold('  AI Agents'));
+  lines.push('');
+
+  if (providers.length === 0) {
+    lines.push(chalk.yellow('  No agents detected'));
+    lines.push('');
+    lines.push(chalk.dim('  Install one to get started:'));
+    lines.push(chalk.dim(`    npm i -g @anthropic-ai/claude-code`));
+    lines.push(chalk.dim(`    npm i -g @openai/codex`));
+  } else {
+    for (const p of providers) {
+      const icon = p.available ? chalk.green('✓') : chalk.red('✗');
+      const ver = p.version ? chalk.dim(` v${p.version}`) : '';
+      const model = p.capabilities.defaultModel
+        ? chalk.dim(` · ${p.capabilities.defaultModel}`)
+        : '';
+      const hpc = p.hpcCapability
+        ? chalk.dim(` · HPC: ${p.hpcCapability.clusterName || 'Slurm'}`)
+        : '';
+      lines.push(`  ${icon} ${chalk.white(p.name)}${ver}${model}${hpc}`);
+    }
+  }
+
+  return renderBox(lines, 54);
+}
+
+/**
+ * Format GitHub CLI detection status for setup output.
+ */
+export function formatGhStatusLine(status: 'authenticated' | 'installed' | 'not_installed'): string {
+  switch (status) {
+    case 'authenticated':
+      return `  ${chalk.green('✓')} GitHub CLI ${chalk.dim('— installed & authenticated (PR creation enabled)')}`;
+    case 'installed':
+      return `  ${chalk.yellow('○')} GitHub CLI ${chalk.dim('— installed but not authenticated')}`;
+    case 'not_installed':
+      return `  ${chalk.dim('✗')} GitHub CLI ${chalk.dim('— not installed (optional)')}`;
+  }
+}
+
+/**
+ * Format SSH discovery results as a compact box for setup output.
+ */
+export function formatSshDiscoveryBox(hosts: DiscoveredHost[]): string {
+  const lines: string[] = [];
+  lines.push(chalk.bold('  SSH Remote Hosts'));
+  lines.push('');
+
+  if (hosts.length === 0) {
+    lines.push(chalk.dim('  No remote hosts discovered'));
+  } else {
+    for (const h of hosts) {
+      const label = h.hostname !== h.name
+        ? `${h.name} ${chalk.dim(`(${h.hostname})`)}`
+        : h.name;
+      const user = h.user ? chalk.dim(` [${h.user}]`) : '';
+      lines.push(`  ${chalk.cyan('●')} ${label}${user}`);
+    }
+  }
+
+  return renderBox(lines, 54);
+}
+
+/**
+ * Format the setup summary "model card" — a final box showing everything detected.
+ */
+export function formatSetupSummaryBox(opts: {
+  hostname: string;
+  platform: string;
+  arch: string;
+  version: string;
+  runnerId: string;
+  providers: ProviderInfo[];
+  ghStatus: 'authenticated' | 'installed' | 'not_installed';
+  sshHosts: DiscoveredHost[];
+  resources?: MachineResources;
+  authenticated: boolean;
+}): string {
+  const lines: string[] = [];
+
+  // Title
+  lines.push(chalk.bold.cyan(`  ${opts.hostname}`) + chalk.dim(` (this device)`));
+  const machineDesc = opts.resources ? classifyMachine(opts.resources) : 'Unknown';
+  lines.push(chalk.dim(`  ${machineDesc} · ${opts.platform}/${opts.arch} · v${opts.version}`));
+  lines.push('');
+
+  // Hardware (compact)
+  if (opts.resources) {
+    lines.push(chalk.white('  Hardware'));
+    lines.push(`    CPU   ${chalk.white(opts.resources.cpu.model)} ${chalk.dim(`(${opts.resources.cpu.cores} cores)`)}`);
+    const totalRAM = formatBytes(opts.resources.memory.total);
+    const freeRAM = formatBytes(opts.resources.memory.free);
+    lines.push(`    RAM   ${chalk.white(totalRAM)} ${chalk.dim(`(${freeRAM} available)`)}`);
+    for (const gpu of opts.resources.gpu) {
+      const gpuMem = formatBytes(gpu.memoryTotal);
+      lines.push(`    GPU   ${chalk.white(gpu.name)} ${chalk.dim(`(${gpuMem})`)}`);
+    }
+    lines.push('');
+  }
+
+  // AI Agents
+  lines.push(chalk.white('  AI Agents'));
+  if (opts.providers.length === 0) {
+    lines.push(chalk.yellow('    No agents detected'));
+  } else {
+    for (const p of opts.providers) {
+      const ver = p.version ? chalk.dim(` v${p.version}`) : '';
+      const model = p.capabilities.defaultModel
+        ? chalk.dim(` · ${p.capabilities.defaultModel}`)
+        : '';
+      lines.push(`    ${chalk.green('✓')} ${chalk.white(p.name)}${ver}${model}`);
+    }
+  }
+  lines.push('');
+
+  // Tools
+  lines.push(chalk.white('  Tools'));
+  const ghIcon = opts.ghStatus === 'authenticated' ? chalk.green('✓')
+    : opts.ghStatus === 'installed' ? chalk.yellow('○')
+    : chalk.dim('✗');
+  const ghLabel = opts.ghStatus === 'authenticated' ? 'GitHub CLI (authenticated)'
+    : opts.ghStatus === 'installed' ? 'GitHub CLI (not authenticated)'
+    : 'GitHub CLI (not installed)';
+  lines.push(`    ${ghIcon} ${ghLabel}`);
+
+  // SSH hosts count
+  if (opts.sshHosts.length > 0) {
+    lines.push(`    ${chalk.green('✓')} SSH hosts: ${opts.sshHosts.length} discovered`);
+  }
+
+  // Auth status
+  lines.push('');
+  lines.push(chalk.white('  Status'));
+  lines.push(`    Auth  ${opts.authenticated ? chalk.green('authenticated') : chalk.yellow('not configured')}`);
+  lines.push(chalk.dim(`    Runner: ${opts.runnerId.slice(0, 8)}…`));
+
+  return renderBox(lines);
 }
 
 // ── Box separator for visual grouping ────────────────────────────────
