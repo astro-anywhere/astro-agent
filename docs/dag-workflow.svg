@@ -65,5 +65,5 @@
   <line x1="680" y1="223" x2="732" y2="158" stroke="#7a706a" stroke-width="2.5" marker-end="url(#arr)"/>
 
   <!-- Annotation -->
-  <text x="430" y="312" text-anchor="middle" font-size="14" fill="#8a7e74" font-style="italic">A, B, C run in parallel &mdash; total time = longest path</text>
+  <text x="430" y="312" text-anchor="middle" font-size="14" fill="#8a7e74" font-style="italic">A, B, C run in parallel &#x2014; total time = longest path</text>
 </svg>
