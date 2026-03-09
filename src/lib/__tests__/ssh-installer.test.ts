@@ -9,6 +9,7 @@ const mockExecFileCb = vi.hoisted(() => vi.fn());
 
 vi.mock('node:child_process', () => ({
   execFile: mockExecFileCb,
+  spawn: vi.fn(),
 }));
 vi.mock('node:util', () => ({
   promisify: () => mockExecFileAsync,
@@ -19,9 +20,13 @@ vi.mock('node:os', () => ({
       { family: 'IPv4', address: '192.168.1.100', internal: false },
     ],
   }),
+  homedir: () => '/home/testuser',
 }));
 vi.mock('node:url', () => ({
   fileURLToPath: () => '/mock/src/lib/ssh-installer.ts',
+}));
+vi.mock('node:fs/promises', () => ({
+  mkdir: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('node:path', async () => {
   const actual = await vi.importActual<typeof import('node:path')>('node:path');
@@ -32,7 +37,7 @@ vi.mock('node:path', async () => {
   };
 });
 
-import { buildSshArgs, detectLocalIP } from '../ssh-installer.js';
+import { buildSshArgs, detectLocalIP, controlSocketPath } from '../ssh-installer.js';
 import type { DiscoveredHost } from '../../types.js';
 
 const testHost: DiscoveredHost = {
@@ -42,6 +47,25 @@ const testHost: DiscoveredHost = {
   source: 'ssh-config',
 };
 
+describe('controlSocketPath', () => {
+  it('should return a path under ~/.ssh/astro-sockets/', () => {
+    const path = controlSocketPath(testHost);
+    expect(path).toBe('/home/testuser/.ssh/astro-sockets/testuser@10.0.0.1:22');
+  });
+
+  it('should use custom port when specified', () => {
+    const host: DiscoveredHost = { ...testHost, port: 2222 };
+    const path = controlSocketPath(host);
+    expect(path).toBe('/home/testuser/.ssh/astro-sockets/testuser@10.0.0.1:2222');
+  });
+
+  it('should use "default" when no user specified', () => {
+    const host: DiscoveredHost = { ...testHost, user: undefined };
+    const path = controlSocketPath(host);
+    expect(path).toBe('/home/testuser/.ssh/astro-sockets/default@10.0.0.1:22');
+  });
+});
+
 describe('buildSshArgs', () => {
   it('should build basic SSH args with user and hostname', () => {
     const args = buildSshArgs(testHost, 'echo hello');
@@ -50,6 +74,12 @@ describe('buildSshArgs', () => {
     expect(args).toContain('echo hello');
     expect(args).toContain('-o');
     expect(args).toContain('BatchMode=yes');
+  });
+
+  it('should include ControlPath for multiplexing', () => {
+    const args = buildSshArgs(testHost, 'echo hello');
+    const cpIdx = args.indexOf('ControlPath=/home/testuser/.ssh/astro-sockets/testuser@10.0.0.1:22');
+    expect(cpIdx).toBeGreaterThan(-1);
   });
 
   it('should include port flag when non-default port', () => {

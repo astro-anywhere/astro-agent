@@ -15,7 +15,10 @@ import { detectProviders } from '../lib/providers.js';
 import { getMachineResources, formatResourceSummary } from '../lib/resources.js';
 import { discoverRemoteHosts } from '../lib/ssh-discovery.js';
 import { requestDeviceCode, pollForToken, registerMachine, DeviceAuthApiError } from '../lib/api-client.js';
-import { detectLocalIP, checkRemoteNode, packAndInstall, sshExec } from '../lib/ssh-installer.js';
+import {
+  detectLocalIP, checkRemoteNode, packAndInstall, sshExec,
+  hasControlMaster, establishControlMaster,
+} from '../lib/ssh-installer.js';
 import {
   formatInstallErrorBox,
   formatAgentDetectionBox,
@@ -655,18 +658,83 @@ async function installOnRemoteHosts(
     try {
       await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true');
     } catch (err) {
-      // SSH connection failed entirely
+      // SSH connection failed — check if this is a 2FA/interactive auth issue.
+      // BatchMode=yes causes SSH to fail when the host requires password, OTP, or
+      // Duo push. We detect this and offer to establish a ControlMaster session
+      // so the user can authenticate interactively once.
       const errMsg = err instanceof Error ? err.message : String(err);
-      const reason = errMsg.includes('Permission denied') ? 'permission_denied' : 'ssh_failed';
-      spinner.fail(`${hostName}: SSH connection failed`);
-      installErrors.push({
-        host: hostName,
-        hostname: host.hostname,
-        user: host.user,
-        error: errMsg,
-        reason,
-      });
-      continue;
+      const is2FA = errMsg.includes('Permission denied') ||
+        errMsg.includes('keyboard-interactive') ||
+        errMsg.includes('password');
+
+      // Check if a ControlMaster session already exists (shouldn't, but be safe)
+      const hasMaster = await hasControlMaster(host);
+
+      if (is2FA && !hasMaster) {
+        spinner.warn(`${hostName}: Requires interactive authentication (2FA/Duo)`);
+        console.log();
+        console.log(chalk.yellow(`  ${hostName} requires two-factor authentication.`));
+        console.log(chalk.dim('  Astro can open an interactive SSH session for you to authenticate.'));
+        console.log(chalk.dim('  Once authenticated, all subsequent commands will reuse the session.'));
+        console.log();
+
+        const { authenticate } = await inquirer.prompt<{ authenticate: boolean }>([{
+          type: 'confirm',
+          name: 'authenticate',
+          message: `Authenticate to ${hostName} interactively?`,
+          default: true,
+        }]);
+
+        if (authenticate) {
+          console.log(chalk.dim(`\n  Opening SSH connection to ${hostName}...`));
+          console.log(chalk.dim('  Complete the authentication prompt below.\n'));
+
+          const established = await establishControlMaster(host);
+
+          if (established) {
+            console.log(chalk.green(`\n  Session established for ${hostName}.`));
+            // Retry the initial command through the multiplexed session
+            spinner.start(`${hostName}: Stopping existing agent (if any)...`);
+            try {
+              await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true');
+            } catch {
+              // Non-critical — pkill may fail if no agent is running
+            }
+          } else {
+            spinner.fail(`${hostName}: Authentication failed`);
+            installErrors.push({
+              host: hostName,
+              hostname: host.hostname,
+              user: host.user,
+              error: 'Interactive authentication failed or was cancelled',
+              reason: 'needs_2fa',
+            });
+            continue;
+          }
+        } else {
+          spinner.fail(`${hostName}: Skipped (requires 2FA)`);
+          installErrors.push({
+            host: hostName,
+            hostname: host.hostname,
+            user: host.user,
+            error: 'Host requires two-factor authentication',
+            reason: 'needs_2fa',
+          });
+          continue;
+        }
+      } else if (!hasMaster) {
+        const reason = errMsg.includes('Permission denied') ? 'permission_denied' : 'ssh_failed';
+        spinner.fail(`${hostName}: SSH connection failed`);
+        installErrors.push({
+          host: hostName,
+          hostname: host.hostname,
+          user: host.user,
+          error: errMsg,
+          reason,
+        });
+        continue;
+      }
+      // If hasMaster is true, we already have a session — continue normally
     }
     await new Promise((r) => setTimeout(r, 1000));
 
