@@ -185,22 +185,6 @@ npm i -g @openai/codex                # or Codex
 npm i -g openclaw                     # or OpenClaw
 ```
 
-#### Authentication on HPC
-
-We detect Claude Code login by default, but if you encounter any problems, we recommend setting up a long-lived token:
-
-```bash
-claude setup-token
-```
-
-Then add the token to your shell config (e.g., `~/.bashrc`):
-
-```bash
-export CLAUDE_CODE_OAUTH_TOKEN=your-token
-```
-
-Restart your shell or run `source ~/.bashrc` before re-running setup.
-
 > **Note:** The agent runner uses Slurm to submit AI agent jobs to compute nodes automatically. Once installed, Astro dispatches tasks as Slurm jobs &mdash; you don't need to manage `sbatch` yourself.
 
 ---
@@ -232,6 +216,22 @@ Astro works with the AI coding agents you already use. Install any supported age
 | **OpenCode** | `bun i -g opencode` | [github.com/opencode-ai/opencode](https://github.com/opencode-ai/opencode) |
 
 All agents get full project context injection, real-time output streaming, and session preservation for multi-turn resume. Your API keys stay on your machine &mdash; Astro never sees them.
+
+#### Authentication Troubleshooting
+
+We detect Claude Code login by default, but if you encounter any problems (e.g., on remote machines or HPC clusters), we recommend setting up a long-lived token:
+
+```bash
+claude setup-token
+```
+
+Then add the token to your shell config (e.g., `~/.bashrc`):
+
+```bash
+export CLAUDE_CODE_OAUTH_TOKEN=your-token
+```
+
+Restart your shell or run `source ~/.bashrc` before re-running setup.
 
 ### 3. GitHub-Native Workflow
 
