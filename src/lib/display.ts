@@ -235,7 +235,6 @@ export interface InstallErrorInfo {
   error: string;
   reason: 'node_not_found' | 'node_too_old' | 'ssh_failed' | 'install_failed' | 'permission_denied';
   nodeVersion?: string | null;
-  suggestion?: string;
 }
 
 /**

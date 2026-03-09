@@ -64,8 +64,10 @@ const HPC_MODULE_INIT_COMMANDS = [
 const HPC_NODE_MODULE_NAMES = [
   'nodejs',
   'node',
+  'nodejs/22',
   'nodejs/20',
   'nodejs/18',
+  'node/22',
   'node/20',
   'node/18',
   'Node.js',
@@ -91,32 +93,50 @@ const COMMON_NODE_PATHS = [
 export async function checkRemoteNode(
   host: DiscoveredHost,
 ): Promise<{ available: boolean; version: string | null; method?: string }> {
+  // Track the best version found across all strategies so the caller can
+  // distinguish "node_too_old" (found but < 18) from "node_not_found".
+  let bestVersion: string | null = null;
+
+  function parseVersion(stdout: string): { ver: string; major: number } | null {
+    // Extract the version line (e.g. "v20.11.0") — first line matching vN.N.N
+    const match = stdout.match(/v\d+\.\d+\.\d+/);
+    if (!match) return null;
+    const ver = match[0];
+    const major = parseInt(ver.replace(/^v/, ''), 10);
+    if (isNaN(major)) return null;
+    if (!bestVersion) bestVersion = ver;
+    return { ver, major };
+  }
+
   // Strategy 1: Direct check (works on standard Linux/macOS)
   for (const bin of ['node', 'nodejs']) {
     try {
       const { stdout } = await sshExec(host, `${bin} --version`);
-      const ver = stdout.trim();
-      const major = parseInt(ver.replace(/^v/, ''), 10);
-      if (major >= 18) return { available: true, version: ver, method: 'direct' };
+      const parsed = parseVersion(stdout);
+      if (parsed && parsed.major >= 18) return { available: true, version: parsed.ver, method: 'direct' };
     } catch {
       // binary not found, try next
     }
   }
 
-  // Strategy 2: HPC module system — initialize modules and try loading node
+  // Strategy 2: HPC module system — batch all module-load attempts into a single
+  // SSH call to minimize round-trips on high-latency HPC login nodes.
   const moduleInit = HPC_MODULE_INIT_COMMANDS.join('; ');
-  for (const moduleName of HPC_NODE_MODULE_NAMES) {
-    try {
-      const cmd = `${moduleInit}; module load ${moduleName} 2>/dev/null && node --version`;
-      const { stdout } = await sshExec(host, cmd);
-      const ver = stdout.trim();
-      const major = parseInt(ver.replace(/^v/, ''), 10);
-      if (major >= 18) {
-        return { available: true, version: ver, method: `module:${moduleName}` };
-      }
-    } catch {
-      // module not available, try next
+  const moduleAttempts = HPC_NODE_MODULE_NAMES.map(
+    (m) => `module load ${m} 2>/dev/null && node --version && echo "MODULE:${m}" && exit 0`,
+  ).join('; ');
+  try {
+    const cmd = `${moduleInit}; ${moduleAttempts}`;
+    const { stdout } = await sshExec(host, cmd);
+    const parsed = parseVersion(stdout);
+    if (parsed && parsed.major >= 18) {
+      // Extract which module succeeded from the output
+      const moduleMatch = stdout.match(/MODULE:(.+)/);
+      const moduleName = moduleMatch ? moduleMatch[1].trim() : 'unknown';
+      return { available: true, version: parsed.ver, method: `module:${moduleName}` };
     }
+  } catch {
+    // no module available
   }
 
   // Strategy 3: Check common installation paths
@@ -125,10 +145,9 @@ export async function checkRemoteNode(
       // Use bash -c to expand globs like ~/.nvm/versions/node/*/bin/node
       const cmd = `bash -c 'for p in ${nodePath}; do [ -x "$p" ] && "$p" --version && exit 0; done; exit 1'`;
       const { stdout } = await sshExec(host, cmd);
-      const ver = stdout.trim();
-      const major = parseInt(ver.replace(/^v/, ''), 10);
-      if (major >= 18) {
-        return { available: true, version: ver, method: `path:${nodePath}` };
+      const parsed = parseVersion(stdout);
+      if (parsed && parsed.major >= 18) {
+        return { available: true, version: parsed.ver, method: `path:${nodePath}` };
       }
     } catch {
       // path not found, try next
@@ -136,19 +155,19 @@ export async function checkRemoteNode(
   }
 
   // Strategy 4: Try sourcing user's shell profile (may have NVM/module setup)
+  // Note: only sources bash profiles; most HPC systems use bash as default shell.
   try {
     const cmd = 'source ~/.bashrc 2>/dev/null; source ~/.bash_profile 2>/dev/null; node --version';
     const { stdout } = await sshExec(host, cmd);
-    const ver = stdout.trim();
-    const major = parseInt(ver.replace(/^v/, ''), 10);
-    if (major >= 18) {
-      return { available: true, version: ver, method: 'profile' };
+    const parsed = parseVersion(stdout);
+    if (parsed && parsed.major >= 18) {
+      return { available: true, version: parsed.ver, method: 'profile' };
     }
   } catch {
     // profile sourcing failed
   }
 
-  return { available: false, version: null };
+  return { available: false, version: bestVersion };
 }
 
 // ============================================================================

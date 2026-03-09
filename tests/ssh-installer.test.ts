@@ -281,7 +281,7 @@ describe('checkRemoteNode', () => {
     expect(result.method).toBe('direct');
   });
 
-  it('rejects node < 18', async () => {
+  it('rejects node < 18 but preserves version for error classification', async () => {
     mockSshResponse(
       new Map([
         ['node --version', { stdout: 'v16.20.0\n' }],
@@ -290,8 +290,9 @@ describe('checkRemoteNode', () => {
     );
     const host = makeHost();
     const result = await checkRemoteNode(host);
-    // Strategy 1 fails (v16 < 18), falls through to other strategies which all fail
+    // Strategy 1 finds v16 (< 18), falls through; version is preserved for caller
     expect(result.available).toBe(false);
+    expect(result.version).toBe('v16.20.0');
   });
 
   it('tries nodejs binary as fallback', async () => {
@@ -309,20 +310,22 @@ describe('checkRemoteNode', () => {
   });
 
   it('finds node via HPC module system (strategy 2)', async () => {
-    // Strategy 2 commands contain "module load <name>" and end with "&& node --version"
+    // Strategy 2 now batches all module-load attempts into a single SSH call.
+    // The command contains all module names chained with "; ... && exit 0".
+    // The output includes a MODULE:<name> marker to identify which module succeeded.
     mockSshResponse(
       new Map([
         ['node --version', new Error('not found')],
         ['nodejs --version', new Error('not found')],
-        // The HPC command includes init commands + "module load nodejs ... && node --version"
-        ['module load nodejs 2>/dev/null && node --version', { stdout: 'v20.0.0\n' }],
+        // The batched command includes all module load attempts; match on the init prefix
+        ['module load nodejs 2>/dev/null && node --version && echo "MODULE:nodejs" && exit 0', { stdout: 'v20.0.0\nMODULE:nodejs\n' }],
       ]),
     );
     const host = makeHost();
     const result = await checkRemoteNode(host);
     expect(result.available).toBe(true);
     expect(result.version).toBe('v20.0.0');
-    expect(result.method).toMatch(/^module:/);
+    expect(result.method).toBe('module:nodejs');
   });
 
   it('finds node via common paths (strategy 3)', async () => {
