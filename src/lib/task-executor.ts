@@ -1591,11 +1591,14 @@ export class TaskExecutor {
       const lockKey = canonicalDirLockKey(task.workingDirectory);
       console.log(`[executor] Task ${task.id}: direct delivery mode, acquiring directory lock`);
       const lockHandle = await this.directoryLockManager.acquire(lockKey, task.id);
-      console.log(`[executor] Task ${task.id}: directory lock acquired, using raw workdir: ${task.workingDirectory}`);
-      return {
-        workingDirectory: task.workingDirectory,
-        cleanup: async () => { lockHandle.release(); },
-      };
+      const cleanup = async () => { lockHandle.release(); };
+      try {
+        console.log(`[executor] Task ${task.id}: directory lock acquired, using raw workdir: ${task.workingDirectory}`);
+      } catch (err) {
+        await cleanup();
+        throw err;
+      }
+      return { workingDirectory: task.workingDirectory, cleanup };
     }
 
     // Copy delivery mode: copy project to worktree dir (non-git)
