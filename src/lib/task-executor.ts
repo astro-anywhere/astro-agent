@@ -937,24 +937,32 @@ export class TaskExecutor {
     }
   }
 
+  /** Resolve a canonical directory key for task tracking (matches lock keys). */
+  private canonicalDirKey(workdir: string): string {
+    // Strip the `dir::` prefix — we only need the canonical path for tracking.
+    return canonicalDirLockKey(workdir).slice(5);
+  }
+
   /**
    * Track task by directory for parallel execution safety
    */
   private trackTaskDirectory(task: Task): void {
-    const tasks = this.tasksByDirectory.get(task.workingDirectory) || new Set();
+    const key = this.canonicalDirKey(task.workingDirectory);
+    const tasks = this.tasksByDirectory.get(key) || new Set();
     tasks.add(task.id);
-    this.tasksByDirectory.set(task.workingDirectory, tasks);
+    this.tasksByDirectory.set(key, tasks);
   }
 
   /**
    * Untrack task from directory
    */
   private untrackTaskDirectory(task: Task): void {
-    const tasks = this.tasksByDirectory.get(task.workingDirectory);
+    const key = this.canonicalDirKey(task.workingDirectory);
+    const tasks = this.tasksByDirectory.get(key);
     if (tasks) {
       tasks.delete(task.id);
       if (tasks.size === 0) {
-        this.tasksByDirectory.delete(task.workingDirectory);
+        this.tasksByDirectory.delete(key);
       }
     }
   }
@@ -963,7 +971,8 @@ export class TaskExecutor {
    * Get count of active tasks in a directory
    */
   private getActiveTasksInDirectory(workdir: string): number {
-    const tasks = this.tasksByDirectory.get(workdir);
+    const key = this.canonicalDirKey(workdir);
+    const tasks = this.tasksByDirectory.get(key);
     return tasks ? tasks.size : 0;
   }
 
@@ -1515,8 +1524,9 @@ export class TaskExecutor {
       if (this.preserveWorktrees) {
         console.log(`[executor] Task ${task.id}: worktree preserved (debug mode)`);
         // Still release directory locks even in debug mode to avoid deadlocks.
-        // Git worktree paths set branchName; lock-only paths (direct, non-git
-        // fallback, copy fallback) don't — always clean up non-worktree paths.
+        // Git worktree paths set branchName and are preserved for inspection.
+        // Lock-only paths (direct, non-git fallback) and copy worktrees don't
+        // set branchName — always clean those up.
         if (!prepared.branchName) {
           await prepared.cleanup({ keepBranch });
         }
@@ -1617,12 +1627,15 @@ export class TaskExecutor {
       console.log(`[executor] Task ${task.id}: not a git repo, acquiring directory lock for ${task.workingDirectory}`);
       stream.stdout(`[astro] Non-git directory — waiting for exclusive access...\n`);
       const lockHandle = await this.directoryLockManager.acquire(lockKey, task.id);
-      console.log(`[executor] Task ${task.id}: directory lock acquired, proceeding with direct execution`);
-      stream.stdout(`[astro] Directory lock acquired, working directly on files.\n`);
-      return {
-        workingDirectory: task.workingDirectory,
-        cleanup: async () => { lockHandle.release(); },
-      };
+      const cleanup = async () => { lockHandle.release(); };
+      try {
+        console.log(`[executor] Task ${task.id}: directory lock acquired, proceeding with direct execution`);
+        stream.stdout(`[astro] Directory lock acquired, working directly on files.\n`);
+      } catch (err) {
+        await cleanup();
+        throw err;
+      }
+      return { workingDirectory: task.workingDirectory, cleanup };
     }
 
     // Untracked subdirectory of a parent repo: the workdir inherits a git repo
