@@ -277,38 +277,37 @@ The [Astro Dashboard](https://astroanywhere.com) gives you full visibility into 
   'flowchart': {
     'nodeSpacing': 30,
     'rankSpacing': 50,
-    'padding': 24,
+    'padding': 40,
     'htmlLabels': true,
     'curve': 'basis'
   }
 }}%%
 flowchart TB
-    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:20px
-    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:3px,color:#3d3a37,font-size:18px
-    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:18px
+    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:16px
+    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:3px,color:#3d3a37,font-size:16px
+    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:16px
 
-    subgraph Server[" &nbsp; Astro Server &nbsp; &mdash; &nbsp; astroanywhere.com &nbsp; "]
+    subgraph Server["Astro Server"]
         S1[" &nbsp; Plan &nbsp; "]:::server --> S2[" &nbsp; Tasks &nbsp; "]:::server --> S3[" &nbsp; Dispatch &nbsp; "]:::server
     end
 
     Server -- " &nbsp; dispatch tasks &nbsp; " --> runner
     runner -. " &nbsp; report progress &nbsp; " .-> Server
 
-    subgraph runner[" &nbsp; Agent Runner &mdash; this repo &nbsp; "]
+    subgraph runner["Agent Runner"]
         A1[" &nbsp; Claude Code &nbsp; "]:::mist ~~~ A2[" &nbsp; Codex &nbsp; "]:::mist ~~~ A3[" &nbsp; OpenClaw &nbsp; "]:::mist ~~~ A4[" &nbsp; OpenCode &nbsp; "]:::mist
     end
 
     runner -- " &nbsp; deploy jobs &nbsp; " --> compute
     compute -. " &nbsp; results &nbsp; " .-> runner
 
-    subgraph compute[" &nbsp; Compute Backends &nbsp; "]
+    subgraph compute["Compute Backends"]
         C1[" &nbsp; Docker &nbsp; "]:::rose ~~~ C2[" &nbsp; Slurm &nbsp; "]:::rose ~~~ C3[" &nbsp; K8s &nbsp; "]:::rose ~~~ C4[" &nbsp; SSH &nbsp; "]:::rose
     end
 
-    style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:22px
-    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:22px
-
-    style Server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:22px
+    style Server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#1a2744,font-size:24px,font-weight:bold
+    style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:3px,color:#1a2744,font-size:24px,font-weight:bold
+    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:3px,color:#1a2744,font-size:24px,font-weight:bold
 
     linkStyle 0,1 stroke:#9a918a,stroke-width:3px
     linkStyle 2 stroke:#9a918a,stroke-width:3px
