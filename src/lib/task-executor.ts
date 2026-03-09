@@ -1824,7 +1824,19 @@ export class TaskExecutor {
       const task = this.taskQueue.shift();
       if (task) {
         this.executeTask(task).catch((err) => {
-          console.error(`[executor] Queued task ${task.id} failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`);
+          console.error(`[executor] Queued task ${task.id} (project=${task.projectId}) failed:`, err);
+          // Report failure to server so the task doesn't stay stuck forever.
+          // executeTask's internal catches may have already done partial cleanup,
+          // but sendTaskResult and the deletes are idempotent (Set/Map operations).
+          this.wsClient.sendTaskResult({
+            taskId: task.id,
+            status: 'failed',
+            error: `Execution failed: ${err instanceof Error ? err.message : String(err)}`,
+            completedAt: new Date().toISOString(),
+          });
+          this.runningTasks.delete(task.id);
+          this.untrackTaskDirectory(task);
+          this.processQueue();
         });
       }
     }

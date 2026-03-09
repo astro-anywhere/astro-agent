@@ -419,7 +419,15 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     },
     onTaskDispatch: (task: Task) => {
       taskExecutor.submitTask(task).catch((error) => {
-        log('error', `Failed to submit task ${task.id}: ${error.message}`, logLevel);
+        log('error', `Failed to submit task ${task.id} (project=${task.projectId}): ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        // Report failure to server so the task doesn't stay stuck forever.
+        // sendTaskResult also removes the task from activeTasks (heartbeat).
+        wsClient.sendTaskResult({
+          taskId: task.id,
+          status: 'failed',
+          error: `Task submission failed: ${error instanceof Error ? error.message : String(error)}`,
+          completedAt: new Date().toISOString(),
+        });
       });
     },
     onTaskCancel: (taskId: string) => {
@@ -433,7 +441,13 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     onTaskSafetyDecision: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => {
       log('info', `Safety decision for task ${taskId}: ${decision}`, logLevel);
       taskExecutor.handleSafetyDecision(taskId, decision).catch((error) => {
-        log('error', `Failed to handle safety decision for task ${taskId}: ${error.message}`, logLevel);
+        log('error', `Failed to handle safety decision for task ${taskId}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendTaskResult({
+          taskId,
+          status: 'failed',
+          error: `Safety decision handling failed: ${error instanceof Error ? error.message : String(error)}`,
+          completedAt: new Date().toISOString(),
+        });
       });
     },
     onTaskSteer: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string) => {
