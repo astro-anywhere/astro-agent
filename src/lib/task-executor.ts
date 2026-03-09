@@ -1515,8 +1515,9 @@ export class TaskExecutor {
       if (this.preserveWorktrees) {
         console.log(`[executor] Task ${task.id}: worktree preserved (debug mode)`);
         // Still release directory locks even in debug mode to avoid deadlocks.
-        // Git worktree cleanup is skipped but lock cleanup is always needed.
-        if (task.deliveryMode === 'direct' || task.deliveryMode === 'copy') {
+        // Git worktree paths set branchName; lock-only paths (direct, non-git
+        // fallback, copy fallback) don't — always clean up non-worktree paths.
+        if (!prepared.branchName) {
           await prepared.cleanup({ keepBranch });
         }
       } else {
