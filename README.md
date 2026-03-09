@@ -316,6 +316,14 @@ flowchart TB
 
 ---
 
+## Integration in OpenClaw
+
+<!-- Coming soon — waiting for Xi Fu to start -->
+
+Monitor and control Astro directly inside [OpenClaw](https://github.com/openclaw-ai/openclaw). View project status, track running tasks, steer agents, and approve results &mdash; all from the OpenClaw interface.
+
+> *This integration is under development. Details coming soon.*
+
 ---
 
 <p align="center">
