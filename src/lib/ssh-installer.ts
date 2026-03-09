@@ -6,11 +6,13 @@
  * remote host skips its own device auth entirely.
  */
 
-import { execFile as execFileCb } from 'node:child_process';
+import { execFile as execFileCb, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { networkInterfaces } from 'node:os';
-import { resolve, dirname } from 'node:path';
+import { createHash } from 'node:crypto';
+import { networkInterfaces, homedir } from 'node:os';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mkdir } from 'node:fs/promises';
 import type { DiscoveredHost } from '../types.js';
 
 const execFile = promisify(execFileCb);
@@ -36,6 +38,127 @@ export function detectLocalIP(): string {
   }
 
   return '127.0.0.1';
+}
+
+// ============================================================================
+// SSH ControlMaster — persistent multiplexed connections for 2FA hosts
+// ============================================================================
+
+/**
+ * Directory for SSH control sockets managed by astro-agent.
+ */
+const CONTROL_SOCKET_DIR = join(homedir(), '.ssh', 'astro-sockets');
+
+/**
+ * Return the ControlPath for a given host.
+ *
+ * Uses a truncated SHA-256 hash of user@hostname:port to keep the path
+ * well under the Unix domain socket limit (104 bytes on macOS, 108 on Linux).
+ * Result: ~/.ssh/astro-sockets/<16-char hex hash>  (total ~50 bytes)
+ */
+export function controlSocketPath(host: DiscoveredHost): string {
+  const user = host.user ?? 'default';
+  const port = host.port ?? 22;
+  const key = `${user}@${host.hostname}:${port}`;
+  const hash = createHash('sha256').update(key).digest('hex').slice(0, 16);
+  return join(CONTROL_SOCKET_DIR, hash);
+}
+
+/**
+ * Check whether a ControlMaster session already exists for this host.
+ */
+export async function hasControlMaster(host: DiscoveredHost): Promise<boolean> {
+  const socketPath = controlSocketPath(host);
+  try {
+    const target = host.user ? `${host.user}@${host.hostname}` : host.hostname;
+    const args = ['-o', `ControlPath=${socketPath}`, '-O', 'check', target];
+    if (host.port && host.port !== 22) args.unshift('-p', String(host.port));
+    await execFile('ssh', args, { timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Establish an interactive SSH ControlMaster session.
+ *
+ * Spawns an SSH process with stdio inherited so the user can
+ * complete interactive authentication (password, 2FA/Duo push, etc.).
+ * The session persists in the background for 10 minutes via ControlPersist.
+ *
+ * Returns true if the master session was established successfully.
+ */
+export async function establishControlMaster(host: DiscoveredHost): Promise<boolean> {
+  // Ensure the socket directory exists with restricted permissions
+  await mkdir(CONTROL_SOCKET_DIR, { recursive: true, mode: 0o700 });
+
+  const socketPath = controlSocketPath(host);
+  const target = host.user ? `${host.user}@${host.hostname}` : host.hostname;
+
+  const args: string[] = [];
+  if (host.port && host.port !== 22) args.push('-p', String(host.port));
+  if (host.identityFile) args.push('-i', host.identityFile);
+  if (host.proxyJump) args.push('-J', host.proxyJump);
+
+  args.push(
+    '-o', `ControlMaster=yes`,
+    '-o', `ControlPath=${socketPath}`,
+    '-o', `ControlPersist=600`,  // 10 minutes
+    '-o', 'ConnectTimeout=30',
+    '-N',  // no remote command — just hold the session
+    target,
+  );
+
+  const AUTH_TIMEOUT_MS = 120_000; // 2 minutes for user to complete 2FA
+
+  return new Promise<boolean>((resolve) => {
+    const child = spawn('ssh', args, {
+      stdio: 'inherit',  // user sees 2FA prompts, enters password, etc.
+    });
+
+    let settled = false;
+    const finish = (result: boolean) => {
+      if (!settled) { settled = true; resolve(result); }
+    };
+
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      finish(false);
+    }, AUTH_TIMEOUT_MS);
+
+    child.on('close', async (code) => {
+      clearTimeout(timer);
+      // -N + ControlPersist means SSH exits 0 after backgrounding the master
+      if (code === 0) {
+        finish(true);
+      } else {
+        // Check if master established despite non-zero exit (can happen with -N)
+        const running = await hasControlMaster(host);
+        finish(running);
+      }
+    });
+
+    child.on('error', () => {
+      clearTimeout(timer);
+      finish(false);
+    });
+  });
+}
+
+/**
+ * Tear down a ControlMaster session for a host.
+ */
+export async function teardownControlMaster(host: DiscoveredHost): Promise<void> {
+  const socketPath = controlSocketPath(host);
+  const target = host.user ? `${host.user}@${host.hostname}` : host.hostname;
+  try {
+    const args = ['-o', `ControlPath=${socketPath}`, '-O', 'exit', target];
+    if (host.port && host.port !== 22) args.unshift('-p', String(host.port));
+    await execFile('ssh', args, { timeout: 5000 });
+  } catch {
+    // Socket may already be gone
+  }
 }
 
 // ============================================================================
@@ -286,7 +409,12 @@ export function buildSshArgs(host: DiscoveredHost, command: string): string[] {
     args.push('-J', host.proxyJump);
   }
 
-  // Batch mode to avoid password prompts hanging
+  // ControlPath enables multiplexing: if a master session exists, SSH routes
+  // through it without re-authenticating, so BatchMode=yes is fine — the auth
+  // already happened on the master. If no master exists, BatchMode=yes ensures
+  // SSH fails fast instead of hanging on a password/2FA prompt.
+  const socketPath = controlSocketPath(host);
+  args.push('-o', `ControlPath=${socketPath}`);
   args.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10');
 
   const target = host.user ? `${host.user}@${host.hostname}` : host.hostname;
@@ -308,6 +436,9 @@ function buildScpArgs(host: DiscoveredHost, localPath: string, remotePath: strin
     args.push('-o', `ProxyJump=${host.proxyJump}`);
   }
 
+  // Route through ControlMaster socket if available (supports 2FA hosts)
+  const socketPath = controlSocketPath(host);
+  args.push('-o', `ControlPath=${socketPath}`);
   args.push('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10');
 
   const target = host.user ? `${host.user}@${host.hostname}` : host.hostname;

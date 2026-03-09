@@ -253,6 +253,21 @@ describe('SSH Discovery — deduplication', () => {
     expect(hosts).toHaveLength(1)
     expect(hosts[0].user).toBe('ubuntu')
   })
+
+  it('should preserve # in values when not preceded and followed by whitespace', async () => {
+    mockSSHConfig = [
+      'Host myhost',
+      '  HostName server#1.example.com',
+      '  IdentityFile ~/.ssh/id#key',
+    ].join('\n')
+
+    const { discoverRemoteHosts } = await import('../ssh-discovery.js')
+    const hosts = await discoverRemoteHosts()
+
+    expect(hosts).toHaveLength(1)
+    expect(hosts[0].hostname).toBe('server#1.example.com')
+    expect(hosts[0].identityFile).toBe('/home/testuser/.ssh/id#key')
+  })
 })
 
 describe('formatDiscoveredHosts', () => {

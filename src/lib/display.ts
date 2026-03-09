@@ -233,7 +233,7 @@ export interface InstallErrorInfo {
   hostname: string;
   user?: string;
   error: string;
-  reason: 'node_not_found' | 'node_too_old' | 'ssh_failed' | 'install_failed' | 'permission_denied';
+  reason: 'node_not_found' | 'node_too_old' | 'ssh_failed' | 'install_failed' | 'permission_denied' | 'needs_2fa';
   nodeVersion?: string | null;
 }
 
@@ -274,6 +274,11 @@ export function formatInstallErrorBox(errors: InstallErrorInfo[]): string {
       case 'permission_denied':
         lines.push(chalk.red('    Permission denied'));
         lines.push(chalk.dim('    SSH key may not be authorized on this host.'));
+        break;
+      case 'needs_2fa':
+        lines.push(chalk.red('    Two-factor authentication required'));
+        lines.push(chalk.dim('    This host requires interactive auth (Duo, OTP, etc.)'));
+        lines.push(chalk.dim('    that cannot be completed in batch mode.'));
         break;
       case 'install_failed':
         lines.push(chalk.red(`    Installation failed: ${err.error.slice(0, 60)}`));

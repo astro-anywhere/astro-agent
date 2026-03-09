@@ -15,7 +15,10 @@ import { detectProviders } from '../lib/providers.js';
 import { getMachineResources, formatResourceSummary } from '../lib/resources.js';
 import { discoverRemoteHosts } from '../lib/ssh-discovery.js';
 import { requestDeviceCode, pollForToken, registerMachine, DeviceAuthApiError } from '../lib/api-client.js';
-import { detectLocalIP, checkRemoteNode, packAndInstall, sshExec } from '../lib/ssh-installer.js';
+import {
+  detectLocalIP, checkRemoteNode, packAndInstall, sshExec,
+  hasControlMaster, establishControlMaster, teardownControlMaster,
+} from '../lib/ssh-installer.js';
 import {
   formatInstallErrorBox,
   formatAgentDetectionBox,
@@ -636,6 +639,7 @@ async function installOnRemoteHosts(
 ): Promise<DiscoveredHost[]> {
   const installedHosts: DiscoveredHost[] = [];
   const installErrors: InstallErrorInfo[] = [];
+  const controlMasterHosts: DiscoveredHost[] = []; // track hosts with active CM sessions
   console.log();
   const localIP = detectLocalIP();
   // Build URLs that remote hosts can reach
@@ -655,18 +659,87 @@ async function installOnRemoteHosts(
     try {
       await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true');
     } catch (err) {
-      // SSH connection failed entirely
-      const errMsg = err instanceof Error ? err.message : String(err);
-      const reason = errMsg.includes('Permission denied') ? 'permission_denied' : 'ssh_failed';
-      spinner.fail(`${hostName}: SSH connection failed`);
-      installErrors.push({
-        host: hostName,
-        hostname: host.hostname,
-        user: host.user,
-        error: errMsg,
-        reason,
-      });
-      continue;
+      // SSH connection failed — check if this is a 2FA/interactive auth issue.
+      // BatchMode=yes causes SSH to fail when the host requires keyboard-interactive
+      // auth (Duo push, OTP). We detect this and offer a ControlMaster session.
+      const errObj = err as { message?: string; stderr?: string };
+      const errMsg = errObj.message ?? String(err);
+      const errStderr = errObj.stderr ?? '';
+      const errAll = `${errMsg}\n${errStderr}`;
+
+      // Detect 2FA: 'keyboard-interactive' in either message or stderr.
+      // Don't match plain 'password' — that fires on "Permission denied
+      // (publickey,password)" which is a key failure, not 2FA.
+      const is2FA = errAll.includes('keyboard-interactive');
+
+      // Check if a ControlMaster session already exists (from a prior run)
+      const hasMaster = await hasControlMaster(host);
+
+      if (is2FA && !hasMaster) {
+        spinner.warn(`${hostName}: Requires interactive authentication (2FA/Duo)`);
+        console.log();
+        console.log(chalk.yellow(`  ${hostName} requires two-factor authentication.`));
+        console.log(chalk.dim('  Astro can open an interactive SSH session for you to authenticate.'));
+        console.log(chalk.dim('  Once authenticated, all subsequent commands will reuse the session.'));
+        console.log();
+
+        const { authenticate } = await inquirer.prompt<{ authenticate: boolean }>([{
+          type: 'confirm',
+          name: 'authenticate',
+          message: `Authenticate to ${hostName} interactively?`,
+          default: true,
+        }]);
+
+        if (authenticate) {
+          console.log(chalk.dim(`\n  Opening SSH connection to ${hostName}...`));
+          console.log(chalk.dim('  Complete the authentication prompt below.\n'));
+
+          const established = await establishControlMaster(host);
+
+          if (established) {
+            controlMasterHosts.push(host);
+            console.log(chalk.green(`\n  Session established for ${hostName}.`));
+          } else {
+            spinner.fail(`${hostName}: Authentication failed`);
+            installErrors.push({
+              host: hostName,
+              hostname: host.hostname,
+              user: host.user,
+              error: 'Interactive authentication failed or was cancelled',
+              reason: 'needs_2fa',
+            });
+            continue;
+          }
+        } else {
+          spinner.fail(`${hostName}: Skipped (requires 2FA)`);
+          installErrors.push({
+            host: hostName,
+            hostname: host.hostname,
+            user: host.user,
+            error: 'Host requires two-factor authentication',
+            reason: 'needs_2fa',
+          });
+          continue;
+        }
+      } else if (!hasMaster) {
+        const reason = errMsg.includes('Permission denied') ? 'permission_denied' : 'ssh_failed';
+        spinner.fail(`${hostName}: SSH connection failed`);
+        installErrors.push({
+          host: hostName,
+          hostname: host.hostname,
+          user: host.user,
+          error: errMsg,
+          reason,
+        });
+        continue;
+      }
+      // hasMaster=true or just established — retry pkill through the session
+      spinner.start(`${hostName}: Stopping existing agent (if any)...`);
+      try {
+        await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true');
+      } catch {
+        // Non-critical — pkill may fail if no agent is running
+      }
     }
     await new Promise((r) => setTimeout(r, 1000));
 
@@ -777,7 +850,16 @@ async function installOnRemoteHosts(
       if (verbose && err instanceof Error && err.stack) {
         console.error(chalk.dim(`[setup] Stack trace: ${err.stack}`));
       }
+      // Clean up ControlMaster immediately on failure to avoid socket leak
+      if (controlMasterHosts.includes(host)) {
+        await teardownControlMaster(host).catch(() => {});
+      }
     }
+  }
+
+  // Clean up all ControlMaster sessions we established during this run
+  for (const cmHost of controlMasterHosts) {
+    await teardownControlMaster(cmHost).catch(() => {});
   }
 
   // Show error summary box if there were failures
