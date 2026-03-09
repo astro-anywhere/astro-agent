@@ -85,7 +85,7 @@ export interface WebSocketClientOptions {
   onEvent?: RunnerEventHandler;
   onTaskDispatch?: (task: Task) => void;
   onTaskCancel?: (taskId: string) => void;
-  onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean) => void;
+  onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string, branchName?: string) => void;
   onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
   onTaskCleanup?: (taskId: string, branchName?: string) => void;
   onFileList?: (path: string, correlationId: string) => void;
@@ -163,7 +163,7 @@ export class WebSocketClient {
   private onEvent?: RunnerEventHandler;
   private onTaskDispatch?: (task: Task) => void;
   private onTaskCancel?: (taskId: string) => void;
-  private onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean) => void;
+  private onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string, branchName?: string) => void;
   private onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
   private onTaskCleanup?: (taskId: string, branchName?: string) => void;
   private onFileList?: (path: string, correlationId: string) => void;
@@ -705,8 +705,8 @@ export class WebSocketClient {
 
       // Handle task.steer (dot notation from relay) by normalizing to task_steer
       if (raw.type === 'task.steer') {
-        // Relay sends: { type: 'task.steer', taskId, message, action, interrupt }
-        // Normalize to agent-runner format: { type: 'task_steer', payload: { taskId, message, action, interrupt } }
+        // Relay sends: { type: 'task.steer', taskId, message, action, interrupt, sessionId, branchName }
+        // Normalize to agent-runner format: { type: 'task_steer', payload: { ... } }
         const steerMsg: TaskSteerIncomingMessage = {
           type: 'task_steer',
           timestamp: raw.timestamp as string ?? new Date().toISOString(),
@@ -715,6 +715,8 @@ export class WebSocketClient {
             message: raw.message as string,
             action: raw.action as string | undefined,
             interrupt: raw.interrupt as boolean | undefined,
+            sessionId: raw.sessionId as string | undefined,
+            branchName: raw.branchName as string | undefined,
           },
         };
         this.handleTaskSteer(steerMsg);
@@ -1134,8 +1136,8 @@ export class WebSocketClient {
   }
 
   private handleTaskSteer(message: TaskSteerIncomingMessage): void {
-    const { taskId, message: steerMessage, action, interrupt } = message.payload;
-    this.onTaskSteer?.(taskId, steerMessage, action, interrupt);
+    const { taskId, message: steerMessage, action, interrupt, sessionId, branchName } = message.payload;
+    this.onTaskSteer?.(taskId, steerMessage, action, interrupt, sessionId, branchName);
   }
 
   private handleSafetyDecision(message: { type: 'task_safety_decision'; timestamp: string; payload: { taskId: string; decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel' } }): void {

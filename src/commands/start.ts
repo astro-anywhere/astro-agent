@@ -413,9 +413,9 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         log('error', `Failed to handle safety decision for task ${taskId}: ${error.message}`, logLevel);
       });
     },
-    onTaskSteer: (taskId: string, message: string, action?: string, interrupt?: boolean) => {
-      log('info', `Received steer for task ${taskId}: "${message.slice(0, 100)}"${action ? ` (action: ${action})` : ''}${interrupt ? ' (interrupt)' : ''}`, logLevel);
-      taskExecutor.steerTask(taskId, message, interrupt ?? false).then((result) => {
+    onTaskSteer: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string, branchName?: string) => {
+      log('info', `Received steer for task ${taskId}: "${message.slice(0, 100)}"${action ? ` (action: ${action})` : ''}${interrupt ? ' (interrupt)' : ''}${sessionId ? ` session=${sessionId}` : ''}`, logLevel);
+      taskExecutor.steerTask(taskId, message, interrupt ?? false, sessionId, branchName).then((result) => {
         wsClient.sendSteerAck(taskId, result.accepted, result.reason, interrupt);
         log('info', `Steer ack for task ${taskId}: accepted=${result.accepted}${result.reason ? ` reason=${result.reason}` : ''}${interrupt ? ' (interrupt)' : ''}`, logLevel);
       }).catch((err) => {

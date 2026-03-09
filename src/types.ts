@@ -536,6 +536,8 @@ export interface TaskSteerIncomingMessage extends WSMessage {
     message: string;
     action?: string;
     interrupt?: boolean;
+    sessionId?: string;
+    branchName?: string;
   };
 }
 
