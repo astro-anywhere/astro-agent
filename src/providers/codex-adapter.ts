@@ -235,7 +235,8 @@ export class CodexAdapter implements ProviderAdapter {
    * Unlike Claude SDK which has `streamInput()`, Codex exec is non-interactive.
    * For post-completion follow-up, use `resumeTask()` instead.
    */
-  async injectMessage(taskId: string, _content: string, _interrupt = false): Promise<boolean> {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async injectMessage(taskId: string, _content: string): Promise<boolean> {
     console.log(`[codex] injectMessage not supported: Codex does not support mid-execution steering (task ${taskId})`);
     return false;
   }

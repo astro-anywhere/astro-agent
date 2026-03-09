@@ -117,7 +117,7 @@ function scanSlashCommands(workingDirectory?: string): Array<{ name: string; des
  */
 async function killExistingProcesses(): Promise<void> {
   const myPid = process.pid;
-  let pids: string[] = [];
+  const pids: string[] = [];
 
   // Check PID file first
   const pidFile = join(homedir(), '.astro', 'agent-runner.pid');
@@ -419,7 +419,15 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     },
     onTaskDispatch: (task: Task) => {
       taskExecutor.submitTask(task).catch((error) => {
-        log('error', `Failed to submit task ${task.id}: ${error.message}`, logLevel);
+        log('error', `Failed to submit task ${task.id} (project=${task.projectId}): ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        // Report failure to server so the task doesn't stay stuck forever.
+        // sendTaskResult also removes the task from activeTasks (heartbeat).
+        wsClient.sendTaskResult({
+          taskId: task.id,
+          status: 'failed',
+          error: `Task submission failed: ${error instanceof Error ? error.message : String(error)}`,
+          completedAt: new Date().toISOString(),
+        });
       });
     },
     onTaskCancel: (taskId: string) => {
@@ -433,12 +441,18 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     onTaskSafetyDecision: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => {
       log('info', `Safety decision for task ${taskId}: ${decision}`, logLevel);
       taskExecutor.handleSafetyDecision(taskId, decision).catch((error) => {
-        log('error', `Failed to handle safety decision for task ${taskId}: ${error.message}`, logLevel);
+        log('error', `Failed to handle safety decision for task ${taskId}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendTaskResult({
+          taskId,
+          status: 'failed',
+          error: `Safety decision handling failed: ${error instanceof Error ? error.message : String(error)}`,
+          completedAt: new Date().toISOString(),
+        });
       });
     },
-    onTaskSteer: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string, branchName?: string) => {
+    onTaskSteer: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string) => {
       log('info', `Received steer for task ${taskId}: "${message.slice(0, 100)}"${action ? ` (action: ${action})` : ''}${interrupt ? ' (interrupt)' : ''}${sessionId ? ` session=${sessionId}` : ''}`, logLevel);
-      taskExecutor.steerTask(taskId, message, interrupt ?? false, sessionId, branchName).then((result) => {
+      taskExecutor.steerTask(taskId, message, interrupt ?? false, sessionId).then((result) => {
         wsClient.sendSteerAck(taskId, result.accepted, result.reason, interrupt);
         log('info', `Steer ack for task ${taskId}: accepted=${result.accepted}${result.reason ? ` reason=${result.reason}` : ''}${interrupt ? ' (interrupt)' : ''}`, logLevel);
       }).catch((err) => {
@@ -666,7 +680,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           .map(d => {
             const fullPath = join(resolvedPath, d.name);
             let isDirectory = d.isDirectory();
-            let isSymlink = d.isSymbolicLink();
+            const isSymlink = d.isSymbolicLink();
             // Resolve symlinks to check if they point to directories
             if (isSymlink) {
               try {

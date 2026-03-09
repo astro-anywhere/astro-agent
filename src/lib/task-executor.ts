@@ -43,7 +43,7 @@ const execFileAsync = promisify(execFileCb);
  * while preserving valid git ref characters (alphanumeric, /, -, _, .).
  */
 function sanitizeGitRef(ref: string): string {
-  return ref.replace(/[^a-zA-Z0-9/_.\-]/g, '');
+  return ref.replace(/[^a-zA-Z0-9/_.-]/g, '');
 }
 
 /**
@@ -526,7 +526,7 @@ export class TaskExecutor {
    * For completed tasks with a preserved session, this triggers a full
    * resume via the SDK's `resume` option for post-completion follow-up.
    */
-  async steerTask(taskId: string, message: string, interrupt = false, sessionId?: string, _branchName?: string): Promise<{ accepted: boolean; reason?: string }> {
+  async steerTask(taskId: string, message: string, interrupt = false, sessionId?: string): Promise<{ accepted: boolean; reason?: string }> {
     const running = this.runningTasks.get(taskId);
 
     if (running) {
@@ -1118,22 +1118,29 @@ export class TaskExecutor {
       if (canResume) {
         console.log(`[executor] Task ${task.id}: resuming session ${taskWithWorkspace.resumeSessionId} with ${adapter.name}...`);
         const resumeStartedAt = new Date().toISOString();
-        const resumeResult = await adapter.resumeTask(
-          taskWithWorkspace.id,
-          taskWithWorkspace.prompt,
-          taskWithWorkspace.workingDirectory || process.cwd(),
-          taskWithWorkspace.resumeSessionId!,
-          stream,
-          abortController.signal,
-        );
-        result = {
-          taskId: taskWithWorkspace.id,
-          status: resumeResult.success ? 'completed' : 'failed',
-          output: resumeResult.output,
-          error: resumeResult.error,
-          startedAt: resumeStartedAt,
-          completedAt: new Date().toISOString(),
-        };
+        try {
+          const resumeResult = await adapter.resumeTask(
+            taskWithWorkspace.id,
+            taskWithWorkspace.prompt,
+            taskWithWorkspace.workingDirectory || process.cwd(),
+            taskWithWorkspace.resumeSessionId!,
+            stream,
+            abortController.signal,
+          );
+          result = {
+            taskId: taskWithWorkspace.id,
+            status: resumeResult.success ? 'completed' : 'failed',
+            output: resumeResult.output,
+            error: resumeResult.error,
+            startedAt: resumeStartedAt,
+            completedAt: new Date().toISOString(),
+          };
+        } catch (resumeErr) {
+          // Resume failed (session expired, different machine, SDK error) —
+          // fall back to fresh execution with conversation history in messages
+          console.warn(`[executor] Task ${task.id}: resume failed (${resumeErr instanceof Error ? resumeErr.message : resumeErr}), falling back to fresh execution`);
+          result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
+        }
       } else {
         console.log(`[executor] Task ${task.id}: executing with ${adapter.name}...`);
         result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
@@ -1817,7 +1824,19 @@ export class TaskExecutor {
       const task = this.taskQueue.shift();
       if (task) {
         this.executeTask(task).catch((err) => {
-          console.error(`[executor] Queued task ${task.id} failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`);
+          console.error(`[executor] Queued task ${task.id} (project=${task.projectId}) failed:`, err);
+          // Report failure to server so the task doesn't stay stuck forever.
+          // executeTask's internal catches may have already done partial cleanup,
+          // but sendTaskResult and the deletes are idempotent (Set/Map operations).
+          this.wsClient.sendTaskResult({
+            taskId: task.id,
+            status: 'failed',
+            error: `Execution failed: ${err instanceof Error ? err.message : String(err)}`,
+            completedAt: new Date().toISOString(),
+          });
+          this.runningTasks.delete(task.id);
+          this.untrackTaskDirectory(task);
+          this.processQueue();
         });
       }
     }

@@ -309,7 +309,7 @@ export class OpenClawAdapter implements ProviderAdapter {
   /**
    * Mid-execution message injection is not supported for OpenClaw gateway.
    */
-  async injectMessage(_taskId: string, _content: string, _interrupt?: boolean): Promise<boolean> {
+  async injectMessage(): Promise<boolean> {
     return false;
   }
 

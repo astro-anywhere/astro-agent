@@ -19,6 +19,7 @@ const BOX = {
 
 function boxLine(content: string, width: number): string {
   // Strip ANSI codes to measure visible length
+  // eslint-disable-next-line no-control-regex
   const visible = content.replace(/\x1b\[[0-9;]*m/g, '');
   const pad = Math.max(0, width - visible.length);
   return `${BOX.v} ${content}${' '.repeat(pad)} ${BOX.v}`;
@@ -42,6 +43,7 @@ function boxSeparator(width: number): string {
 function renderBox(lines: string[], minWidth = 50): string {
   // Calculate width from longest visible line
   const maxVisible = lines.reduce((max, line) => {
+    // eslint-disable-next-line no-control-regex
     const visible = line.replace(/\x1b\[[0-9;]*m/g, '');
     return Math.max(max, visible.length);
   }, 0);
@@ -299,6 +301,7 @@ export function formatInstallErrorBox(errors: InstallErrorInfo[]): string {
   // Render in a red-tinted box
   const boxLines: string[] = [];
   const maxVisible = lines.reduce((max, line) => {
+    // eslint-disable-next-line no-control-regex
     const visible = line.replace(/\x1b\[[0-9;]*m/g, '');
     return Math.max(max, visible.length);
   }, 0);
@@ -308,6 +311,7 @@ export function formatInstallErrorBox(errors: InstallErrorInfo[]): string {
   const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
   boxLines.push(chalk.red(`${B.tl}${B.h.repeat(width + 2)}${B.tr}`));
   for (const line of lines) {
+    // eslint-disable-next-line no-control-regex
     const visible = line.replace(/\x1b\[[0-9;]*m/g, '');
     const pad = Math.max(0, width - visible.length);
     boxLines.push(chalk.red(B.v) + ` ${line}${' '.repeat(pad)} ` + chalk.red(B.v));
