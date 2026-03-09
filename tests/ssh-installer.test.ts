@@ -238,7 +238,7 @@ describe('checkRemoteNode', () => {
   function mockSshResponse(responses: Map<string, { stdout: string } | Error>) {
     execFileMock.mockImplementation((...allArgs: unknown[]) => {
       const cb = typeof allArgs[allArgs.length - 1] === 'function'
-        ? allArgs[allArgs.length - 1] as Function
+        ? allArgs[allArgs.length - 1] as (...args: unknown[]) => void
         : undefined;
       // args is the second positional arg: execFile('ssh', args, opts, cb)
       const args = allArgs[1] as string[];
@@ -395,7 +395,7 @@ describe('sshExec', () => {
   it('calls ssh with correct args and returns stdout/stderr', async () => {
     execFileMock.mockImplementation((...allArgs: unknown[]) => {
       const cb = typeof allArgs[allArgs.length - 1] === 'function'
-        ? allArgs[allArgs.length - 1] as Function : undefined;
+        ? allArgs[allArgs.length - 1] as (...args: unknown[]) => void : undefined;
       if (cb) cb(null, { stdout: 'hello\n', stderr: '' });
       return { stdin: { write: vi.fn(), end: vi.fn() }, on: vi.fn() };
     });
@@ -414,7 +414,7 @@ describe('sshExec', () => {
   it('propagates errors from ssh', async () => {
     execFileMock.mockImplementation((...allArgs: unknown[]) => {
       const cb = typeof allArgs[allArgs.length - 1] === 'function'
-        ? allArgs[allArgs.length - 1] as Function : undefined;
+        ? allArgs[allArgs.length - 1] as (...args: unknown[]) => void : undefined;
       if (cb) cb(new Error('Connection refused'), { stdout: '', stderr: '' });
       return { stdin: { write: vi.fn(), end: vi.fn() }, on: vi.fn() };
     });

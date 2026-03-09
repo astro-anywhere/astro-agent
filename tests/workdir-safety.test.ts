@@ -203,6 +203,7 @@ vi.mock('../src/providers/index.js', () => ({
 
 import { TaskExecutor } from '../src/lib/task-executor.js';
 import type { Task } from '../src/types.js';
+import type { WebSocketClient } from '../src/lib/websocket-client.js';
 
 function createMockWsClient() {
   return {
@@ -219,7 +220,7 @@ function createMockWsClient() {
     sendApprovalRequest: vi.fn(),
     addActiveTask: vi.fn(),
     removeActiveTask: vi.fn(),
-  } as any;
+  } as unknown as WebSocketClient;
 }
 
 function createTask(overrides: Partial<Task> = {}): Task {
@@ -262,14 +263,14 @@ describe('TaskExecutor safety with worktree', () => {
     // Should NOT send any safety warning or block
     const statusCalls = wsClient.sendTaskStatus.mock.calls;
     const safetyWarning = statusCalls.find(
-      (call: any[]) => typeof call[3] === 'string' && call[3].includes('UNCOMMITTED'),
+      (call: unknown[]) => typeof call[3] === 'string' && call[3].includes('UNCOMMITTED'),
     );
     expect(safetyWarning).toBeUndefined();
 
     // Should NOT have been blocked
     const resultCalls = wsClient.sendTaskResult.mock.calls;
     const blockedResult = resultCalls.find(
-      (call: any[]) => call[0]?.error?.includes('UNCOMMITTED'),
+      (call: unknown[]) => (call[0] as Record<string, string> | undefined)?.error?.includes('UNCOMMITTED'),
     );
     expect(blockedResult).toBeUndefined();
   });
@@ -407,7 +408,7 @@ describe('TaskExecutor safety with worktree', () => {
 
     const resultCalls = wsClient.sendTaskResult.mock.calls;
     const failedResult = resultCalls.find(
-      (call: any[]) => call[0]?.taskId === task.id && call[0]?.status === 'failed',
+      (call: unknown[]) => (call[0] as Record<string, string> | undefined)?.taskId === task.id && (call[0] as Record<string, string> | undefined)?.status === 'failed',
     );
     // Provider is mocked as null, so task should fail with "provider not available"
     expect(failedResult).toBeDefined();
@@ -434,7 +435,7 @@ describe('TaskExecutor safety with worktree', () => {
     expect(wsClient.sendSafetyPrompt).not.toHaveBeenCalled();
     const statusCalls = wsClient.sendTaskStatus.mock.calls;
     const safetyWarning = statusCalls.find(
-      (call: any[]) => typeof call[3] === 'string' && call[3].includes('UNCOMMITTED'),
+      (call: unknown[]) => typeof call[3] === 'string' && call[3].includes('UNCOMMITTED'),
     );
     expect(safetyWarning).toBeUndefined();
   });
@@ -460,7 +461,7 @@ describe('TaskExecutor safety with worktree', () => {
       // Should not be blocked
       const resultCalls = client.sendTaskResult.mock.calls;
       const blockedResult = resultCalls.find(
-        (call: any[]) => call[0]?.error?.includes('UNCOMMITTED'),
+        (call: unknown[]) => (call[0] as Record<string, string> | undefined)?.error?.includes('UNCOMMITTED'),
       );
       expect(blockedResult).toBeUndefined();
     }

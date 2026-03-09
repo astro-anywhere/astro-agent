@@ -43,7 +43,7 @@ const execFileAsync = promisify(execFileCb);
  * while preserving valid git ref characters (alphanumeric, /, -, _, .).
  */
 function sanitizeGitRef(ref: string): string {
-  return ref.replace(/[^a-zA-Z0-9/_.\-]/g, '');
+  return ref.replace(/[^a-zA-Z0-9/_.-]/g, '');
 }
 
 /**
@@ -526,7 +526,7 @@ export class TaskExecutor {
    * For completed tasks with a preserved session, this triggers a full
    * resume via the SDK's `resume` option for post-completion follow-up.
    */
-  async steerTask(taskId: string, message: string, interrupt = false, sessionId?: string, _branchName?: string): Promise<{ accepted: boolean; reason?: string }> {
+  async steerTask(taskId: string, message: string, interrupt = false, sessionId?: string): Promise<{ accepted: boolean; reason?: string }> {
     const running = this.runningTasks.get(taskId);
 
     if (running) {

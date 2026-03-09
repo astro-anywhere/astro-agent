@@ -358,7 +358,7 @@ describe('steerTask routing with session hints', () => {
     taskState: TaskState,
     adapterSessionId: string | undefined,
     sessionIdHint?: string,
-    _branchNameHint?: string,
+    _branchNameHint?: string, // eslint-disable-line @typescript-eslint/no-unused-vars
   ): SteerResult {
     // Mid-execution: task is running
     if (taskState === 'running_claude') {

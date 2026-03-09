@@ -10,7 +10,6 @@ import { execFileSync } from 'node:child_process';
 import {
   mkdtempSync,
   writeFileSync,
-  readFileSync,
   existsSync,
   realpathSync,
   mkdirSync,
@@ -51,24 +50,6 @@ function createLocalRepo(): string {
   return dir;
 }
 
-/**
- * Create a repo with a remote (bare).
- */
-function createRepoWithRemote(): { repoDir: string; bareDir: string } {
-  const bareDir = mkdtempSync(join(tmpdir(), 'astro-lm-test-bare-'));
-  const repoDir = mkdtempSync(join(tmpdir(), 'astro-lm-test-repo-'));
-  tmpDirs.push(bareDir, repoDir);
-  git(bareDir, 'init', '--bare', '--initial-branch=main');
-  git(repoDir, 'init', '--initial-branch=main');
-  git(repoDir, 'config', 'user.email', 'test@test.com');
-  git(repoDir, 'config', 'user.name', 'Test');
-  git(repoDir, 'remote', 'add', 'origin', bareDir);
-  writeFileSync(join(repoDir, 'readme.txt'), 'initial content\n');
-  git(repoDir, 'add', '.');
-  git(repoDir, 'commit', '-m', 'Initial commit');
-  git(repoDir, 'push', '-u', 'origin', 'main');
-  return { repoDir, bareDir };
-}
 
 afterAll(async () => {
   for (const dir of tmpDirs) {
@@ -1370,9 +1351,6 @@ describe('ensureProjectBranch local mode (real git)', { timeout: 15_000 }, () =>
       wt1!.gitRoot, wt1!.branchName, wt1!.projectBranch!, 'First',
     );
     await wt1!.cleanup({ keepBranch: true });
-
-    // Get the project branch SHA after first merge
-    const sha1 = git(repo, 'rev-parse', 'astro/reuse1');
 
     // Second task — should reuse the same project branch
     const wt2 = await createWorktree({
