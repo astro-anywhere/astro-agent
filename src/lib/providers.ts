@@ -7,9 +7,9 @@ import { promisify } from 'node:util';
 import { access, constants, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import WebSocket from 'ws';
 import type { ProviderInfo, ProviderType, ProviderCapabilities, HpcCapability } from '../types.js';
 import { detectSlurm } from './slurm-detect.js';
+import { readGatewayConfig, probeGateway } from './openclaw-gateway.js';
 
 const execAsync = promisify(exec);
 
@@ -293,57 +293,25 @@ async function detectCodex(): Promise<ProviderInfo | null> {
 }
 
 /**
- * Quick probe: connect to a WebSocket URL and check for connect.challenge.
- * Does NOT perform a full handshake — just confirms the gateway is reachable.
- */
-function probeGatewayReachable(url: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    let ws: WebSocket | undefined;
-    const timeout = setTimeout(() => { ws?.removeAllListeners(); ws?.close(); resolve(false) }, 5000);
-    ws = new WebSocket(url);
-    ws.on('message', (data) => {
-      try {
-        const frame = JSON.parse(String(data));
-        if (frame.type === 'event' && frame.event === 'connect.challenge') {
-          clearTimeout(timeout);
-          ws.removeAllListeners();
-          ws.close();
-          resolve(true);
-        }
-      } catch { /* ignore */ }
-    });
-    ws.on('error', () => { clearTimeout(timeout); ws?.removeAllListeners(); resolve(false) });
-    ws.on('close', () => { clearTimeout(timeout); resolve(false) });
-  });
-}
-
-/**
  * Detect OpenClaw gateway availability.
  *
- * Reads ~/.openclaw/openclaw.json for gateway port + auth token,
- * then probes ws://127.0.0.1:{port} for a connect.challenge event.
+ * Uses shared readGatewayConfig() and probeGateway() from openclaw-gateway.ts.
  * The adapter itself handles the full handshake at execution time.
  */
 async function detectOpenClaw(): Promise<ProviderInfo | null> {
   try {
-    const configPath = join(homedir(), '.openclaw', 'openclaw.json');
-    const raw = JSON.parse(await readFile(configPath, 'utf-8'));
-    const port = raw?.gateway?.port as number | undefined;
-    if (!port) return null;
-
-    const bind = (raw?.gateway?.bind as string) || '127.0.0.1';
-    const host = bind === 'loopback' || bind === '127.0.0.1' ? '127.0.0.1' : bind;
-    const url = `ws://${host}:${port}`;
+    const config = readGatewayConfig();
+    if (!config) return null;
 
     // Quick probe — just check for connect.challenge (no full handshake)
-    const reachable = await probeGatewayReachable(url);
+    const reachable = await probeGateway(config.url);
     if (!reachable) return null;
 
     return {
       type: 'openclaw' as ProviderType,
       name: 'OpenClaw',
       version: null,
-      path: url,
+      path: config.url,
       available: true,
       capabilities: {
         streaming: true,

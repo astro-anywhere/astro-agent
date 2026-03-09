@@ -394,6 +394,10 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       logLevel,
     },
     onEvent: (event) => handleEvent(event, logLevel),
+    onOpenClawBridgeReady: (bridge) => {
+      taskExecutor.setOpenClawBridge(bridge);
+      log('info', 'OpenClaw bridge wired to task executor', logLevel);
+    },
     onTaskDispatch: (task: Task) => {
       taskExecutor.submitTask(task).catch((error) => {
         log('error', `Failed to submit task ${task.id}: ${error.message}`, logLevel);

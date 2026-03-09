@@ -15,6 +15,7 @@ import { ClaudeSdkAdapter } from '../providers/claude-sdk-adapter.js';
 import { CodexAdapter } from '../providers/codex-adapter.js';
 import { OpenClawAdapter } from '../providers/openclaw-adapter.js';
 import { OpenCodeAdapter } from '../providers/opencode-adapter.js';
+import type { OpenClawBridge } from './openclaw-bridge.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree, syncProjectWorktree } from './worktree.js';
 import { BranchLockManager } from './branch-lock.js';
@@ -193,6 +194,7 @@ export class TaskExecutor {
   private gitAvailable: boolean = false;
   private hpcCapability: HpcCapability | null;
   private branchLockManager = new BranchLockManager();
+  private openclawBridge: OpenClawBridge | null = null;
 
   // Safety tracking
   private tasksByDirectory: Map<string, Set<string>> = new Map(); // workdir -> taskIds
@@ -220,6 +222,21 @@ export class TaskExecutor {
     });
 
     console.log('[executor] Tip: Filter logs for a specific task with: npx @astroanywhere/agent logs -f | grep "taskId"');
+  }
+
+  /**
+   * Inject the OpenClaw bridge for task execution delegation.
+   * If an OpenClawAdapter is already cached, wire the bridge to it immediately.
+   */
+  setOpenClawBridge(bridge: OpenClawBridge): void {
+    this.openclawBridge = bridge;
+
+    // Wire to existing cached adapter if present
+    const cached = this.adapters.get('openclaw');
+    if (cached instanceof OpenClawAdapter) {
+      cached.setBridge(bridge);
+      console.log('[executor] OpenClaw bridge wired to existing adapter');
+    }
   }
 
   /**
@@ -1696,8 +1713,8 @@ export class TaskExecutor {
       return cached;
     }
 
-    // Create new adapter — pass pre-classified HPC capability to avoid runtime detection
-    const adapter = createProviderAdapter(type, this.hpcCapability);
+    // Create new adapter — pass pre-classified HPC capability and bridge to avoid runtime detection
+    const adapter = createProviderAdapter(type, this.hpcCapability, this.openclawBridge);
     if (!adapter) {
       return null;
     }
