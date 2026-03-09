@@ -1,12 +1,16 @@
 /**
- * OpenClaw Bridge — Persistent gateway connection for channel operations
+ * OpenClaw Bridge — Persistent gateway connection for channel operations + task execution
  *
- * Unlike the per-task OpenClawAdapter (which creates a new connection per task),
- * the bridge maintains a single long-lived WebSocket to the OpenClaw gateway
- * for notification delivery, approval routing, and inbound message forwarding.
+ * Maintains a single long-lived WebSocket to the OpenClaw gateway for:
+ *   1. Channel relay: notification delivery, approval routing, inbound message forwarding
+ *   2. Task execution: session-multiplexed chat.send for adapter-delegated tasks
  *
- * This enables the relay-routed architecture:
- *   Server → Relay → Agent Runner (bridge) → OpenClaw Gateway → User channels
+ * Architecture after consolidation:
+ *   Server → Relay → Agent Runner → OpenClawAdapter (thin wrapper)
+ *                                         ↓ setBridge()
+ *                                   OpenClawBridge (single WS) → local gateway
+ *                                         ↑
+ *                                   Channel relay (notifications/approvals)
  */
 
 import { EventEmitter } from 'node:events';
@@ -15,26 +19,21 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import WebSocket from 'ws';
 import { randomUUID } from 'node:crypto';
+import {
+  type GatewayConfig,
+  type GatewayFrame,
+  readGatewayConfig,
+  parseGatewayFrame,
+  matchesSessionKey,
+  PROTOCOL_VERSION,
+  CONNECT_TIMEOUT_MS,
+} from './openclaw-gateway.js';
+import type { TaskResult, TaskArtifact } from '../types.js';
+import type { TaskOutputStream } from '../providers/base-adapter.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-interface GatewayConfig {
-  port: number;
-  token: string;
-  url: string;
-  defaultRecipient?: string;
-}
-
-interface GatewayFrame {
-  type: 'event' | 'res';
-  id?: string;
-  event?: string;
-  ok?: boolean;
-  payload?: Record<string, unknown>;
-  error?: { code: string; message: string };
-}
 
 interface PendingRequest {
   resolve: (value: unknown) => void;
@@ -42,13 +41,36 @@ interface PendingRequest {
   timeoutId: ReturnType<typeof setTimeout>;
 }
 
+/** Per-task session state for multiplexed execution */
+interface TaskSession {
+  sessionKey: string;
+  outputText: string;
+  artifacts: TaskArtifact[];
+  metrics?: TaskResult['metrics'];
+  lifecycleEnded: boolean;
+  chatFinalReceived: boolean;
+  finished: boolean;
+  stream: TaskOutputStream;
+  signal: AbortSignal;
+  abortHandler: () => void;
+  taskTimeout?: ReturnType<typeof setTimeout>;
+  gracePeriodTimeout?: ReturnType<typeof setTimeout>;
+  resolve: (result: TaskSessionResult) => void;
+}
+
+export interface TaskSessionResult {
+  output: string;
+  error?: string;
+  artifacts?: TaskArtifact[];
+  metrics?: TaskResult['metrics'];
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOL_VERSION = 3;
-const CONNECT_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+const TASK_REQUEST_TIMEOUT_MS = 120_000; // chat.send can take longer to respond
 const APPROVAL_TIMEOUT_MS = 300_000; // 5 minutes
 const RECONNECT_DELAY_MS = 5_000;
 
@@ -61,6 +83,7 @@ export class OpenClawBridge extends EventEmitter {
   private gatewayConfig: GatewayConfig | null = null;
   private pendingRequests = new Map<string, PendingRequest>();
   private pendingApprovals = new Map<string, PendingRequest>();
+  private activeSessions = new Map<string, TaskSession>();
   private _connected = false;
   private _started = false;
   private _connecting = false;
@@ -79,7 +102,7 @@ export class OpenClawBridge extends EventEmitter {
   async start(): Promise<boolean> {
     if (this._started) return this._connected;
 
-    const config = this.readGatewayConfig();
+    const config = readGatewayConfig();
     if (!config) return false;
 
     this.gatewayConfig = config;
@@ -119,6 +142,9 @@ export class OpenClawBridge extends EventEmitter {
       this.pendingApprovals.delete(id);
     }
 
+    // Fail all active task sessions
+    this.failAllActiveSessions('Bridge stopped');
+
     if (this.ws) {
       this.ws.removeAllListeners();
       this.ws.close();
@@ -128,30 +154,6 @@ export class OpenClawBridge extends EventEmitter {
     // Remove external EventEmitter listeners (e.g., 'inbound' from websocket-client)
     // to prevent leaks if the bridge is restarted after stop()
     this.removeAllListeners();
-  }
-
-  // ─── Gateway Config ─────────────────────────────────────────────
-
-  private readGatewayConfig(): GatewayConfig | null {
-    try {
-      const configPath = join(homedir(), '.openclaw', 'openclaw.json');
-      if (!existsSync(configPath)) return null;
-
-      const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
-      const port = raw?.gateway?.port as number | undefined;
-      if (!port) return null;
-
-      const token = (raw?.gateway?.auth?.token as string) || '';
-      const bind = (raw?.gateway?.bind as string) || '127.0.0.1';
-      const host = bind === 'loopback' || bind === '127.0.0.1' ? '127.0.0.1' : bind;
-
-      // Read default notification recipient from astro-specific config
-      const defaultRecipient = (raw?.astro?.notifyTo as string) || undefined;
-
-      return { port, token, url: `ws://${host}:${port}`, defaultRecipient };
-    } catch {
-      return null;
-    }
   }
 
   // ─── Gateway Connection ─────────────────────────────────────────
@@ -184,12 +186,8 @@ export class OpenClawBridge extends EventEmitter {
       this.ws = ws;
 
       ws.on('message', (data) => {
-        let frame: GatewayFrame;
-        try {
-          frame = JSON.parse(String(data));
-        } catch {
-          return;
-        }
+        const frame = parseGatewayFrame(data);
+        if (!frame) return;
 
         // Challenge → send connect
         if (frame.type === 'event' && frame.event === 'connect.challenge') {
@@ -206,7 +204,7 @@ export class OpenClawBridge extends EventEmitter {
                 platform: process.platform,
                 mode: 'backend',
               },
-              caps: [],
+              caps: ['tool-events'],
               auth: { token: this.gatewayConfig!.token },
               role: 'operator',
               scopes: ['operator.read', 'operator.write', 'operator.admin'],
@@ -242,8 +240,12 @@ export class OpenClawBridge extends EventEmitter {
       });
 
       ws.on('close', () => {
+        const wasConnected = this._connected;
         this._connected = false;
         this.ws = null;
+        if (wasConnected) {
+          this.failAllActiveSessions('Gateway connection closed unexpectedly');
+        }
         this.emit('disconnected');
         if (this._started) {
           this.scheduleReconnect();
@@ -273,7 +275,7 @@ export class OpenClawBridge extends EventEmitter {
 
   // ─── Request/Response ───────────────────────────────────────────
 
-  private sendRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private sendRequest(method: string, params: Record<string, unknown>, timeoutMs?: number): Promise<unknown> {
     return new Promise((resolve, reject) => {
       if (!this.isConnected) {
         reject(new Error('OpenClaw gateway not connected'));
@@ -281,10 +283,11 @@ export class OpenClawBridge extends EventEmitter {
       }
 
       const id = randomUUID();
+      const effectiveTimeout = timeoutMs ?? REQUEST_TIMEOUT_MS;
       const timeoutId = setTimeout(() => {
         this.pendingRequests.delete(id);
         reject(new Error(`Request ${method} timed out`));
-      }, REQUEST_TIMEOUT_MS);
+      }, effectiveTimeout);
 
       this.pendingRequests.set(id, { resolve, reject, timeoutId });
 
@@ -319,6 +322,12 @@ export class OpenClawBridge extends EventEmitter {
   }
 
   private handleEvent(frame: GatewayFrame): void {
+    // Route agent and chat events to active task sessions
+    if (frame.event === 'agent' || frame.event === 'chat') {
+      this.routeTaskEvent(frame);
+      return;
+    }
+
     if (frame.event === 'approval.response') {
       // Direct approval response (if gateway supports it in the future)
       const approvalId = frame.payload?.approvalId as string;
@@ -345,6 +354,8 @@ export class OpenClawBridge extends EventEmitter {
       // Otherwise forward as a regular inbound message
       this.emit('inbound', frame.payload);
     }
+
+    // Ignore tick/health/presence/heartbeat silently
   }
 
   private resolveApproval(approvalId: string, response: string): void {
@@ -357,7 +368,251 @@ export class OpenClawBridge extends EventEmitter {
     this.emit('approval-response', { approvalId, response });
   }
 
-  // ─── Public API ─────────────────────────────────────────────────
+  // ─── Task Execution (Session Multiplexing) ─────────────────────
+
+  /**
+   * Execute a task by sending chat.send through the shared WebSocket connection.
+   * Returns a Promise that resolves when the task completes (lifecycle.end + chat.final).
+   */
+  executeTask(
+    sessionKey: string,
+    message: string,
+    stream: TaskOutputStream,
+    signal: AbortSignal,
+    timeout?: number,
+  ): Promise<TaskSessionResult> {
+    return new Promise((resolve, reject) => {
+      if (!this.isConnected) {
+        reject(new Error('OpenClaw gateway not connected'));
+        return;
+      }
+
+      const session: TaskSession = {
+        sessionKey,
+        outputText: '',
+        artifacts: [],
+        metrics: undefined,
+        lifecycleEnded: false,
+        chatFinalReceived: false,
+        finished: false,
+        stream,
+        signal,
+        abortHandler: () => {},
+        resolve,
+      };
+
+      // Abort handler
+      session.abortHandler = () => {
+        try {
+          this.ws?.send(JSON.stringify({
+            type: 'req',
+            id: `abort-${randomUUID()}`,
+            method: 'chat.abort',
+            params: { sessionKey },
+          }));
+        } catch { /* ignore */ }
+        this.finishSession(sessionKey, 'Task cancelled');
+      };
+      signal.addEventListener('abort', session.abortHandler);
+
+      // Task-level timeout
+      if (timeout) {
+        session.taskTimeout = setTimeout(() => {
+          this.finishSession(sessionKey, 'Task timed out');
+        }, timeout);
+      }
+
+      this.activeSessions.set(sessionKey, session);
+
+      // Send chat.send via the shared request mechanism
+      const idempotencyKey = randomUUID();
+      this.sendRequest('chat.send', {
+        sessionKey,
+        message,
+        idempotencyKey,
+      }, TASK_REQUEST_TIMEOUT_MS).then((payload) => {
+        const p = payload as Record<string, unknown> | undefined;
+        const runId = p?.runId as string | undefined;
+        if (runId) {
+          stream.status('running', 10, 'Task dispatched to agent');
+        }
+      }).catch((err) => {
+        this.finishSession(sessionKey, `Gateway rejected task: ${err.message}`);
+      });
+    });
+  }
+
+  /**
+   * Send a chat message to resume an existing session.
+   * Simplified variant of executeTask without artifact tracking.
+   */
+  sendChatMessage(
+    sessionKey: string,
+    message: string,
+    stream: TaskOutputStream,
+    signal: AbortSignal,
+  ): Promise<TaskSessionResult> {
+    return this.executeTask(sessionKey, message, stream, signal);
+  }
+
+  /** Route agent/chat events to the correct TaskSession */
+  private routeTaskEvent(frame: GatewayFrame): void {
+    const p = frame.payload || {};
+
+    // Find the matching session by sessionKey
+    let session: TaskSession | undefined;
+    for (const s of this.activeSessions.values()) {
+      if (matchesSessionKey(p.sessionKey, s.sessionKey)) {
+        session = s;
+        break;
+      }
+    }
+    if (!session || session.finished) return;
+
+    if (frame.event === 'agent') {
+      this.handleAgentEvent(session, p);
+    } else if (frame.event === 'chat') {
+      this.handleChatEvent(session, p);
+    }
+  }
+
+  private handleAgentEvent(session: TaskSession, payload: Record<string, unknown>): void {
+    const streamType = payload.stream as string;
+    const eventData = payload.data as Record<string, unknown> | undefined;
+
+    if (streamType === 'lifecycle') {
+      const phase = eventData?.phase as string;
+      if (phase === 'start') {
+        session.stream.sessionInit(
+          (payload.sessionKey as string) || session.sessionKey,
+          (eventData?.model as string) || undefined,
+        );
+      } else if (phase === 'end') {
+        // Extract usage metrics from lifecycle.end
+        const usage = eventData?.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+        const cost = (eventData?.total_cost_usd ?? eventData?.cost_usd) as number | undefined;
+        const numTurns = eventData?.num_turns as number | undefined;
+        const durationMs = eventData?.duration_ms as number | undefined;
+        const model = eventData?.model as string | undefined;
+        if (usage || cost !== undefined) {
+          session.metrics = {
+            inputTokens: usage?.input_tokens,
+            outputTokens: usage?.output_tokens,
+            totalCost: cost,
+            numTurns,
+            durationMs,
+            model,
+          };
+        }
+        session.lifecycleEnded = true;
+        this.tryFinishAfterLifecycle(session);
+      }
+    } else if (streamType === 'assistant') {
+      const delta = eventData?.delta as string || eventData?.text as string;
+      if (delta) {
+        session.outputText += delta;
+        session.stream.text(delta);
+      }
+    } else if (streamType === 'tool_use') {
+      const toolName = (eventData?.name as string) || (eventData?.toolName as string) || 'unknown';
+      const toolInput = eventData?.input || eventData?.toolInput || {};
+      session.stream.toolUse(toolName, toolInput);
+    } else if (streamType === 'tool_result') {
+      const toolName = (eventData?.name as string) || (eventData?.toolName as string) || 'unknown';
+      const result = eventData?.result || eventData?.output || '';
+      const success = eventData?.success !== false;
+      session.stream.toolResult(toolName, result, success);
+    } else if (streamType === 'file_change') {
+      const filePath = eventData?.path as string || eventData?.file as string;
+      const rawAction = (eventData?.type as string) || (eventData?.action as string) || 'modified';
+      const action = (['created', 'modified', 'deleted'].includes(rawAction) ? rawAction : 'modified') as 'created' | 'modified' | 'deleted';
+      if (filePath) {
+        session.artifacts.push({ type: 'file', name: filePath, path: filePath, metadata: { action } });
+        session.stream.fileChange(filePath, action);
+      }
+    }
+  }
+
+  private handleChatEvent(session: TaskSession, payload: Record<string, unknown>): void {
+    const state = payload.state as string;
+
+    if (state === 'final') {
+      session.chatFinalReceived = true;
+      // Extract final message content
+      const message = payload.message as Record<string, unknown> | undefined;
+      if (message) {
+        const content = message.content as Array<{ type: string; text?: string }> | undefined;
+        if (content) {
+          for (const block of content) {
+            if (block.type === 'text' && block.text) {
+              // Only add if not already captured via agent delta events
+              if (!session.outputText.includes(block.text)) {
+                session.outputText += block.text;
+              }
+            }
+          }
+        }
+      }
+      // Extract model/usage from chat.final if not yet captured
+      if (!session.metrics) {
+        const usage = payload.usage as { input_tokens?: number; output_tokens?: number } | undefined;
+        const cost = (payload.total_cost_usd ?? payload.cost_usd) as number | undefined;
+        const model = (payload.model ?? (payload.message as Record<string, unknown>)?.model) as string | undefined;
+        if (usage || cost !== undefined || model) {
+          session.metrics = {
+            inputTokens: usage?.input_tokens,
+            outputTokens: usage?.output_tokens,
+            totalCost: cost,
+            model,
+          };
+        }
+      }
+      // If lifecycle already ended, finish immediately
+      if (session.lifecycleEnded) {
+        this.finishSession(session.sessionKey);
+      }
+    }
+  }
+
+  /** Finish when both lifecycle.end and chat.final have been seen, or
+   *  after a short grace period if only lifecycle.end arrived. */
+  private tryFinishAfterLifecycle(session: TaskSession): void {
+    if (session.chatFinalReceived) {
+      this.finishSession(session.sessionKey);
+    } else {
+      // Grace period: if chat.final doesn't arrive within 500ms, finish anyway
+      session.gracePeriodTimeout = setTimeout(() => {
+        if (!session.finished) this.finishSession(session.sessionKey);
+      }, 500);
+    }
+  }
+
+  private finishSession(sessionKey: string, error?: string): void {
+    const session = this.activeSessions.get(sessionKey);
+    if (!session || session.finished) return;
+
+    session.finished = true;
+    session.signal.removeEventListener('abort', session.abortHandler);
+    if (session.taskTimeout) clearTimeout(session.taskTimeout);
+    if (session.gracePeriodTimeout) clearTimeout(session.gracePeriodTimeout);
+    this.activeSessions.delete(sessionKey);
+
+    session.resolve({
+      output: session.outputText,
+      error,
+      artifacts: session.artifacts.length > 0 ? session.artifacts : undefined,
+      metrics: session.metrics,
+    });
+  }
+
+  /** Fail all active task sessions — called on WebSocket close before reconnect */
+  private failAllActiveSessions(error: string): void {
+    for (const sessionKey of [...this.activeSessions.keys()]) {
+      this.finishSession(sessionKey, error);
+    }
+  }
+
+  // ─── Public API (Channel Relay) ────────────────────────────────
 
   async sendNotification(notification: {
     type: string;
@@ -553,7 +808,6 @@ export class OpenClawBridge extends EventEmitter {
     const data = await resp.json() as { ok: boolean; result?: { total_voter_count: number; options: Array<{ text: string; voter_count: number }> } };
     return data.ok ? data.result ?? null : null;
   }
-
 
   private getNotificationPrefix(type: string): string {
     switch (type) {

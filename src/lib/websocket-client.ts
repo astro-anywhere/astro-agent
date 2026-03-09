@@ -100,6 +100,7 @@ export interface WebSocketClientOptions {
   onBranchList?: (payload: BranchListRequestMessage['payload']) => void;
   onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
   onSessionsList?: (correlationId: string, maxAgeMs?: number) => void;
+  onOpenClawBridgeReady?: (bridge: OpenClawBridge) => void;
   version?: string;
   wsToken?: string;
 }
@@ -178,6 +179,7 @@ export class WebSocketClient {
   private onBranchList?: (payload: BranchListRequestMessage['payload']) => void;
   private onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
   private onSessionsList?: (correlationId: string, maxAgeMs?: number) => void;
+  private onOpenClawBridgeReady?: (bridge: OpenClawBridge) => void;
 
   constructor(options: WebSocketClientOptions) {
     this.runnerId = options.runnerId;
@@ -205,6 +207,7 @@ export class WebSocketClient {
     this.onBranchList = options.onBranchList;
     this.onGitInit = options.onGitInit;
     this.onSessionsList = options.onSessionsList;
+    this.onOpenClawBridgeReady = options.onOpenClawBridgeReady;
   }
 
   /**
@@ -950,6 +953,11 @@ export class WebSocketClient {
         return;
       }
       console.log('[ws-client] OpenClaw bridge started for channel relay');
+
+      // Notify task executor so it can wire the bridge to the adapter
+      if (this.onOpenClawBridgeReady) {
+        this.onOpenClawBridgeReady(bridge);
+      }
 
       // Forward inbound messages from OpenClaw to the server
       bridge.on('inbound', (payload: Record<string, unknown>) => {

@@ -1,55 +1,36 @@
 /**
- * OpenClaw provider adapter — Gateway WebSocket mode
+ * OpenClaw provider adapter — Thin wrapper delegating to OpenClawBridge
  *
- * Connects to the local OpenClaw gateway via WebSocket and dispatches tasks
- * using `chat.send`. Each task gets its own session key for isolation.
+ * When a bridge is injected via setBridge(), task execution goes through
+ * the bridge's shared WebSocket connection (session-multiplexed).
+ * Falls back to standalone connections when no bridge is available.
  *
- * Gateway discovery:
- *   1. Read ~/.openclaw/openclaw.json for gateway port + auth token
- *   2. Probe ws://127.0.0.1:{port} for connect.challenge
- *   3. Handshake with client.id='gateway-client', mode='backend'
- *
- * Execution flow:
- *   chat.send({ sessionKey, message, idempotencyKey })
- *   → gateway streams `agent` + `chat` events over WebSocket
- *   → adapter translates to TaskOutputStream calls
- *   → returns TaskResult on session completion
+ * The HTTP llm-task path (runLlmTask) remains in the adapter since it
+ * uses a separate HTTP POST, not the WebSocket.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { randomUUID } from 'node:crypto';
-import WebSocket from 'ws';
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary } from '../types.js';
 import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream } from './base-adapter.js';
-
-// ---------------------------------------------------------------------------
-// Types — OpenClaw Gateway Protocol v3
-// ---------------------------------------------------------------------------
-
-interface GatewayConfig {
-  port: number;
-  token: string;
-  url: string;
-}
-
-interface GatewayFrame {
-  type: 'event' | 'res';
-  id?: string;
-  event?: string;
-  ok?: boolean;
-  payload?: Record<string, unknown>;
-  error?: { code: string; message: string };
-  seq?: number;
-}
+import type { OpenClawBridge, TaskSessionResult } from '../lib/openclaw-bridge.js';
+import {
+  type GatewayConfig,
+  readGatewayConfig,
+  probeGateway,
+  parseGatewayFrame,
+  makeSessionKey,
+  matchesSessionKey,
+  PROTOCOL_VERSION,
+  CONNECT_TIMEOUT_MS,
+} from '../lib/openclaw-gateway.js';
+import WebSocket from 'ws';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROTOCOL_VERSION = 3;
-const CONNECT_TIMEOUT_MS = 10_000;
+/** TTL for preserved sessions (10 minutes) */
+const SESSION_TTL_MS = 10 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Adapter
@@ -63,9 +44,6 @@ interface PreservedSession {
   createdAt: number;
 }
 
-/** TTL for preserved sessions (10 minutes) */
-const SESSION_TTL_MS = 10 * 60 * 1000;
-
 export class OpenClawAdapter implements ProviderAdapter {
   readonly type = 'openclaw';
   readonly name = 'OpenClaw';
@@ -75,19 +53,38 @@ export class OpenClawAdapter implements ProviderAdapter {
   private lastError?: string;
   private gatewayConfig: GatewayConfig | null = null;
   private lastAvailableCheck: { available: boolean; at: number } | null = null;
+  private bridge: OpenClawBridge | null = null;
 
   /** Preserved sessions for multi-turn resume, keyed by taskId */
   private preservedSessions = new Map<string, PreservedSession>();
 
+  // ─── Bridge Injection ───────────────────────────────────────────
+
+  /**
+   * Inject the shared bridge for task execution.
+   * Called by task-executor when the bridge becomes available.
+   */
+  setBridge(bridge: OpenClawBridge): void {
+    this.bridge = bridge;
+  }
+
+  // ─── Availability ───────────────────────────────────────────────
+
   async isAvailable(): Promise<boolean> {
-    const config = this.readGatewayConfig();
+    // If bridge is connected, we're available
+    if (this.bridge?.isConnected) {
+      this.lastAvailableCheck = { available: true, at: Date.now() };
+      return true;
+    }
+
+    const config = readGatewayConfig();
     if (!config) return false;
 
     this.gatewayConfig = config;
 
     // Probe the gateway with a quick connect
     try {
-      const ok = await this.probeGateway(config);
+      const ok = await probeGateway(config.url);
       this.lastAvailableCheck = { available: ok, at: Date.now() };
       return ok;
     } catch {
@@ -96,8 +93,11 @@ export class OpenClawAdapter implements ProviderAdapter {
     }
   }
 
+  // ─── Task Execution ─────────────────────────────────────────────
+
   async execute(task: Task, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
-    if (!this.gatewayConfig) {
+    // Ensure we have config or bridge
+    if (!this.bridge?.isConnected && !this.gatewayConfig) {
       const available = await this.isAvailable();
       if (!available) {
         return {
@@ -128,14 +128,42 @@ export class OpenClawAdapter implements ProviderAdapter {
             metrics: result.metrics,
           };
         } catch (err) {
-          // Fall through to runViaGateway() agent mode
+          // Fall through to agent mode
           console.warn('[openclaw] llm-task failed, falling back to agent mode:', err);
         }
       }
 
       stream.status('running', 0, 'Connecting to OpenClaw gateway');
-      const sessionKey = `astro:task:${task.id}`;
-      const result = await this.runViaGateway(task, stream, signal);
+      const sessionKey = makeSessionKey(task.id);
+
+      // Build the prompt
+      let effectivePrompt = task.systemPrompt
+        ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
+        : task.prompt;
+
+      // Prepend conversation history if available
+      if (task.messages && task.messages.length > 0) {
+        const conversationContext = task.messages
+          .map(m => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
+          .join('\n\n');
+        effectivePrompt = `${conversationContext}\n\nHuman: ${effectivePrompt}`;
+      }
+
+      let result: TaskSessionResult;
+
+      if (this.bridge?.isConnected) {
+        // Bridge-backed execution (shared WebSocket)
+        stream.status('running', 5, 'Connected to gateway');
+        result = await this.bridge.executeTask(
+          sessionKey, effectivePrompt, stream, signal, task.timeout,
+        );
+      } else {
+        // Fallback: standalone connection
+        result = await this.runViaStandaloneConnection(
+          sessionKey, effectivePrompt, stream, signal, task.timeout,
+        );
+      }
+
       const isCancelled = signal.aborted || result.error === 'Task cancelled';
 
       // Preserve session for multi-turn resume (unless cancelled/failed)
@@ -205,8 +233,7 @@ export class OpenClawAdapter implements ProviderAdapter {
   }
 
   async getStatus(): Promise<ProviderStatus> {
-    // Use cached availability if checked within the last 30 seconds to avoid
-    // opening a new WebSocket probe on every status poll
+    // Use cached availability if checked within the last 30 seconds
     let available: boolean;
     if (this.lastAvailableCheck && Date.now() - this.lastAvailableCheck.at < 30_000) {
       available = this.lastAvailableCheck.available;
@@ -226,7 +253,6 @@ export class OpenClawAdapter implements ProviderAdapter {
 
   /**
    * Resume a completed session by sending another chat.send to the same sessionKey.
-   * The OpenClaw gateway preserves session history per sessionKey.
    */
   async resumeTask(
     taskId: string,
@@ -236,30 +262,30 @@ export class OpenClawAdapter implements ProviderAdapter {
     stream: TaskOutputStream,
     signal: AbortSignal,
   ): Promise<{ success: boolean; output: string; error?: string }> {
-    if (!this.gatewayConfig) {
-      // Attempt availability check as fallback (mirrors execute() pattern)
-      const available = await this.isAvailable();
-      if (!available || !this.gatewayConfig) {
-        return { success: false, output: '', error: 'OpenClaw gateway not available' };
-      }
-    }
-
-    // Use the preserved session key, or resolve from the provider sessionId.
-    // The sessionId may already be a valid session key (e.g. 'astro:task:...' or
-    // 'agent:main:astro:task:...'), so don't blindly wrap it in 'astro:task:'.
+    // Use the preserved session key, or resolve from the provider sessionId
     const session = this.preservedSessions.get(taskId);
     const sessionKey = session?.sessionKey || this.resolveSessionKey(sessionId);
 
     this.activeTasks++;
-    let ws: WebSocket | undefined;
     try {
-      ws = await this.connectToGateway(this.gatewayConfig);
-      stream.status('running', 5, 'Resuming OpenClaw session');
+      let result: TaskSessionResult;
 
-      // sendChatMessage() registers ws error/close handlers before sending,
-      // so it owns cleanup (calls ws.close() in its finish() helper)
-      const result = await this.sendChatMessage(ws, sessionKey, message, stream, signal);
-      ws = undefined;
+      if (this.bridge?.isConnected) {
+        stream.status('running', 5, 'Resuming OpenClaw session');
+        result = await this.bridge.sendChatMessage(sessionKey, message, stream, signal);
+      } else {
+        // Fallback: standalone connection for resume
+        if (!this.gatewayConfig) {
+          const available = await this.isAvailable();
+          if (!available || !this.gatewayConfig) {
+            return { success: false, output: '', error: 'OpenClaw gateway not available' };
+          }
+        }
+        stream.status('running', 5, 'Resuming OpenClaw session');
+        result = await this.runViaStandaloneConnection(
+          sessionKey, message, stream, signal,
+        );
+      }
 
       // Update preserved session timestamp
       if (session) {
@@ -272,7 +298,6 @@ export class OpenClawAdapter implements ProviderAdapter {
         error: result.error,
       };
     } catch (error) {
-      ws?.close();
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.lastError = errorMsg;
       return { success: false, output: '', error: errorMsg };
@@ -283,7 +308,6 @@ export class OpenClawAdapter implements ProviderAdapter {
 
   /**
    * Mid-execution message injection is not supported for OpenClaw gateway.
-   * The gateway processes one chat.send at a time per session.
    */
   async injectMessage(_taskId: string, _content: string, _interrupt?: boolean): Promise<boolean> {
     return false;
@@ -318,7 +342,6 @@ export class OpenClawAdapter implements ProviderAdapter {
 
   /**
    * Generate a structured execution summary by resuming the completed OpenClaw session.
-   * Sends the summary prompt to the same session key via chat.send.
    */
   async generateSummary(taskId: string, workingDirectory?: string): Promise<ExecutionSummary | undefined> {
     const session = this.preservedSessions.get(taskId);
@@ -327,9 +350,9 @@ export class OpenClawAdapter implements ProviderAdapter {
       return undefined;
     }
 
-    if (!this.gatewayConfig) {
+    if (!this.bridge?.isConnected && !this.gatewayConfig) {
       const available = await this.isAvailable();
-      if (!available || !this.gatewayConfig) {
+      if (!available) {
         console.warn(`[openclaw] Gateway not available for summary generation (task ${taskId})`);
         return undefined;
       }
@@ -361,10 +384,6 @@ export class OpenClawAdapter implements ProviderAdapter {
 
   /**
    * Resolve a provider session ID to a valid OpenClaw session key.
-   * The sessionId from the frontend may be:
-   *   - 'astro:task:{taskId}' (direct)
-   *   - 'agent:main:astro:task:{taskId}' (gateway-prefixed)
-   * Avoid double-wrapping by checking for existing prefixes.
    */
   private resolveSessionKey(sessionId: string): string {
     if (sessionId.startsWith('astro:task:')) return sessionId;
@@ -373,160 +392,28 @@ export class OpenClawAdapter implements ProviderAdapter {
     return `astro:task:${sessionId}`;
   }
 
-  // ─── Gateway Config Discovery ────────────────────────────────────
+  // ─── Standalone Connection (Fallback) ──────────────────────────
 
-  private readGatewayConfig(): GatewayConfig | null {
-    try {
-      const configPath = join(homedir(), '.openclaw', 'openclaw.json');
-      if (!existsSync(configPath)) return null;
-
-      const raw = JSON.parse(readFileSync(configPath, 'utf-8'));
-      const port = raw?.gateway?.port as number | undefined;
-      if (!port) return null;
-
-      const token = (raw?.gateway?.auth?.token as string) || '';
-      const bind = (raw?.gateway?.bind as string) || '127.0.0.1';
-      const host = bind === 'loopback' || bind === '127.0.0.1' ? '127.0.0.1' : bind;
-
-      return {
-        port,
-        token,
-        url: `ws://${host}:${port}`,
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  // ─── Gateway Probe ───────────────────────────────────────────────
-
-  private probeGateway(config: GatewayConfig): Promise<boolean> {
-    return new Promise((resolve) => {
-      let resolved = false;
-      const done = (val: boolean) => { if (!resolved) { resolved = true; resolve(val); } };
-
-      let ws: WebSocket | undefined;
-      const timeout = setTimeout(() => {
-        ws?.removeAllListeners();
-        ws?.close();
-        done(false);
-      }, 5000);
-
-      ws = new WebSocket(config.url);
-
-      ws.on('message', (data) => {
-        try {
-          const frame = JSON.parse(String(data)) as GatewayFrame;
-          if (frame.type === 'event' && frame.event === 'connect.challenge') {
-            clearTimeout(timeout);
-            ws!.removeAllListeners();
-            ws!.close();
-            done(true);
-          }
-        } catch {
-          // ignore
-        }
-      });
-
-      ws.on('error', () => {
-        clearTimeout(timeout);
-        ws?.removeAllListeners();
-        done(false);
-      });
-
-      ws.on('close', () => {
-        clearTimeout(timeout);
-        done(false);
-      });
-    });
-  }
-
-  // ─── Gateway Connection ──────────────────────────────────────────
-
-  private connectToGateway(config: GatewayConfig): Promise<WebSocket> {
-    return new Promise((resolve, reject) => {
-      let ws: WebSocket | undefined;
-      const timeout = setTimeout(() => {
-        ws?.removeAllListeners();
-        ws?.close();
-        reject(new Error('Gateway connection timeout'));
-      }, CONNECT_TIMEOUT_MS);
-
-      ws = new WebSocket(config.url);
-
-      const handshakeHandler = (data: Buffer) => {
-        try {
-          const frame = JSON.parse(String(data)) as GatewayFrame;
-
-          // Step 1: Receive challenge, send connect
-          if (frame.type === 'event' && frame.event === 'connect.challenge') {
-            ws!.send(JSON.stringify({
-              type: 'req',
-              id: 'connect-1',
-              method: 'connect',
-              params: {
-                minProtocol: PROTOCOL_VERSION,
-                maxProtocol: PROTOCOL_VERSION,
-                client: {
-                  id: 'gateway-client',
-                  version: 'dev',
-                  platform: process.platform,
-                  mode: 'backend',
-                },
-                caps: ['tool-events'],
-                auth: { token: config.token },
-                role: 'operator',
-                scopes: ['operator.read', 'operator.write'],
-              },
-            }));
-          }
-
-          // Step 2: Receive connect response
-          if (frame.type === 'res' && frame.id === 'connect-1') {
-            clearTimeout(timeout);
-            ws!.removeListener('message', handshakeHandler);
-            ws!.removeListener('error', errorHandler);
-            if (frame.ok) {
-              resolve(ws!);
-            } else {
-              ws!.close();
-              reject(new Error(`Gateway handshake failed: ${frame.error?.message || 'unknown'}`));
-            }
-          }
-        } catch {
-          // ignore parse errors during handshake
-        }
-      };
-
-      const errorHandler = (err: Error) => {
-        clearTimeout(timeout);
-        ws?.removeListener('message', handshakeHandler);
-        reject(err);
-      };
-
-      ws.on('message', handshakeHandler);
-      ws.on('error', errorHandler);
-    });
-  }
-
-  // ─── Task Execution via Gateway ──────────────────────────────────
-
-  private async runViaGateway(
-    task: Task,
+  /**
+   * Execute via a standalone WebSocket connection when no bridge is available.
+   * This preserves backward compatibility for cases where the bridge isn't wired.
+   */
+  private async runViaStandaloneConnection(
+    sessionKey: string,
+    message: string,
     stream: TaskOutputStream,
     signal: AbortSignal,
-  ): Promise<{
-    output: string;
-    error?: string;
-    artifacts?: TaskArtifact[];
-    metrics?: TaskResult['metrics'];
-  }> {
-    const ws = await this.connectToGateway(this.gatewayConfig!);
+    timeout?: number,
+  ): Promise<TaskSessionResult> {
+    const config = this.gatewayConfig;
+    if (!config) {
+      throw new Error('Gateway config not available');
+    }
+
+    const ws = await this.connectToGateway(config);
     stream.status('running', 5, 'Connected to gateway');
 
     return new Promise((resolve) => {
-
-      const sessionKey = `astro:task:${task.id}`;
       const idempotencyKey = randomUUID();
       const artifacts: TaskArtifact[] = [];
       let outputText = '';
@@ -553,21 +440,16 @@ export class OpenClawAdapter implements ProviderAdapter {
         });
       };
 
-      /** Finish when both lifecycle.end and chat.final have been seen, or
-       *  after a short grace period if only lifecycle.end arrived. */
       const tryFinishAfterLifecycle = () => {
         if (chatFinalReceived) {
           finish();
         } else {
-          // Grace period: if chat.final doesn't arrive within 500ms, finish anyway
           gracePeriodTimeout = setTimeout(() => { if (!finished) finish(); }, 500);
         }
       };
 
-      // Handle abort
       const abortHandler = () => {
         if (runId) {
-          // Try to abort the chat
           try {
             ws.send(JSON.stringify({
               type: 'req',
@@ -575,34 +457,22 @@ export class OpenClawAdapter implements ProviderAdapter {
               method: 'chat.abort',
               params: { sessionKey },
             }));
-          } catch {
-            // ignore
-          }
+          } catch { /* ignore */ }
         }
         finish('Task cancelled');
       };
       signal.addEventListener('abort', abortHandler);
 
-      // Handle timeout
       let taskTimeout: ReturnType<typeof setTimeout> | undefined;
-      if (task.timeout) {
-        taskTimeout = setTimeout(() => {
-          finish('Task timed out');
-        }, task.timeout);
+      if (timeout) {
+        taskTimeout = setTimeout(() => { finish('Task timed out'); }, timeout);
       }
 
-      // Handle incoming events
       ws.on('message', (data) => {
         if (finished) return;
+        const frame = parseGatewayFrame(data);
+        if (!frame) return;
 
-        let frame: GatewayFrame;
-        try {
-          frame = JSON.parse(String(data));
-        } catch {
-          return;
-        }
-
-        // Handle chat.send response
         if (frame.type === 'res' && frame.id === 'chat-send-1') {
           if (frame.ok) {
             runId = frame.payload?.runId as string;
@@ -613,14 +483,9 @@ export class OpenClawAdapter implements ProviderAdapter {
           return;
         }
 
-        // Handle agent events
         if (frame.type === 'event' && frame.event === 'agent') {
           const p = frame.payload || {};
-
-          // Filter to our session — gateway prepends 'agent:main:' to sessionKey
-          if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) {
-            return;
-          }
+          if (!matchesSessionKey(p.sessionKey, sessionKey)) return;
 
           const streamType = p.stream as string;
           const eventData = p.data as Record<string, unknown> | undefined;
@@ -633,7 +498,6 @@ export class OpenClawAdapter implements ProviderAdapter {
                 (eventData?.model as string) || undefined,
               );
             } else if (phase === 'end') {
-              // Extract usage metrics from lifecycle.end if available
               const usage = eventData?.usage as { input_tokens?: number; output_tokens?: number } | undefined;
               const cost = (eventData?.total_cost_usd ?? eventData?.cost_usd) as number | undefined;
               const numTurns = eventData?.num_turns as number | undefined;
@@ -676,43 +540,30 @@ export class OpenClawAdapter implements ProviderAdapter {
               stream.fileChange(filePath, action);
             }
           }
-
           return;
         }
 
-        // Handle chat events (for final state + model info)
         if (frame.type === 'event' && frame.event === 'chat') {
           const p = frame.payload || {};
+          if (!matchesSessionKey(p.sessionKey, sessionKey)) return;
 
-          // Filter to our session — gateway prepends 'agent:main:' to sessionKey
-          if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) {
-            return;
-          }
-
-          const state = p.state as string;
-
-          if (state === 'final') {
+          if ((p.state as string) === 'final') {
             chatFinalReceived = true;
-            // Extract final message content
-            const message = p.message as Record<string, unknown> | undefined;
-            if (message) {
-              const content = message.content as Array<{ type: string; text?: string }> | undefined;
+            const chatMessage = p.message as Record<string, unknown> | undefined;
+            if (chatMessage) {
+              const content = chatMessage.content as Array<{ type: string; text?: string }> | undefined;
               if (content) {
                 for (const block of content) {
-                  if (block.type === 'text' && block.text) {
-                    // Only add if not already captured via agent delta events
-                    if (!outputText.includes(block.text)) {
-                      outputText += block.text;
-                    }
+                  if (block.type === 'text' && block.text && !outputText.includes(block.text)) {
+                    outputText += block.text;
                   }
                 }
               }
             }
-            // Extract model/usage from chat.final if not yet captured
             if (!lastMetrics) {
               const usage = p.usage as { input_tokens?: number; output_tokens?: number } | undefined;
               const cost = (p.total_cost_usd ?? p.cost_usd) as number | undefined;
-              const model = (p.model ?? message?.model) as string | undefined;
+              const model = (p.model ?? (p.message as Record<string, unknown>)?.model) as string | undefined;
               if (usage || cost !== undefined || model) {
                 lastMetrics = {
                   inputTokens: usage?.input_tokens,
@@ -722,198 +573,87 @@ export class OpenClawAdapter implements ProviderAdapter {
                 };
               }
             }
-            // If lifecycle already ended, finish immediately
             if (lifecycleEnded) finish();
           }
-
           return;
         }
-
-        // Handle tick/health/presence (ignore)
-        if (frame.type === 'event') {
-          const ignoredEvents = ['tick', 'health', 'presence', 'heartbeat'];
-          if (frame.event && ignoredEvents.includes(frame.event)) return;
-        }
       });
 
-      ws.on('close', () => {
-        if (!finished) {
-          finish('Gateway connection closed unexpectedly');
-        }
-      });
+      ws.on('close', () => { if (!finished) finish('Gateway connection closed unexpectedly'); });
+      ws.on('error', (err) => { if (!finished) finish(`Gateway WebSocket error: ${err.message}`); });
 
-      ws.on('error', (err) => {
-        if (!finished) {
-          finish(`Gateway WebSocket error: ${err.message}`);
-        }
-      });
-
-      // Build the prompt
-      let effectivePrompt = task.systemPrompt
-        ? `${task.systemPrompt}\n\n---\n\n${task.prompt}`
-        : task.prompt;
-
-      // Prepend conversation history if available (fallback for multi-turn when
-      // session resume isn't used or preservedSessions lookup failed)
-      if (task.messages && task.messages.length > 0) {
-        const conversationContext = task.messages
-          .map(m => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
-          .join('\n\n');
-        effectivePrompt = `${conversationContext}\n\nHuman: ${effectivePrompt}`;
-      }
-
-      // Send chat.send
       try {
         ws.send(JSON.stringify({
           type: 'req',
           id: 'chat-send-1',
           method: 'chat.send',
-          params: {
-            sessionKey,
-            message: effectivePrompt,
-            idempotencyKey,
-          },
+          params: { sessionKey, message, idempotencyKey },
         }));
       } catch (err) {
         finish(`Failed to send chat.send: ${err instanceof Error ? err.message : String(err)}`);
       }
-
-      // Note: signal listener and timeout cleanup is handled in finish()
     });
   }
 
-  // ─── Reusable Chat Message Sender (for resume) ────────────────────
-
   /**
-   * Send a chat message to an already-connected gateway WebSocket.
-   * Used by resumeTask() to continue a conversation on the same sessionKey.
+   * Connect to gateway with full handshake (standalone fallback).
    */
-  private sendChatMessage(
-    ws: WebSocket,
-    sessionKey: string,
-    message: string,
-    stream: TaskOutputStream,
-    signal: AbortSignal,
-  ): Promise<{ output: string; error?: string }> {
-    return new Promise((resolve) => {
-      const idempotencyKey = randomUUID();
-      let outputText = '';
-      let finished = false;
-      let lifecycleEnded = false;
-      let chatFinalReceived = false;
-      let gracePeriodTimeout: ReturnType<typeof setTimeout> | undefined;
-
-      const finish = (error?: string) => {
-        if (finished) return;
-        finished = true;
-        signal.removeEventListener('abort', abortHandler);
-        if (gracePeriodTimeout) clearTimeout(gracePeriodTimeout);
+  private connectToGateway(config: GatewayConfig): Promise<WebSocket> {
+    return new Promise((resolve, reject) => {
+      const ws: WebSocket = new WebSocket(config.url);
+      const timeout = setTimeout(() => {
         ws.removeAllListeners();
         ws.close();
-        resolve({ output: outputText, error });
-      };
+        reject(new Error('Gateway connection timeout'));
+      }, CONNECT_TIMEOUT_MS);
 
-      const tryFinishAfterLifecycle = () => {
-        if (chatFinalReceived) {
-          finish();
-        } else {
-          gracePeriodTimeout = setTimeout(() => { if (!finished) finish(); }, 500);
-        }
-      };
+      const handshakeHandler = (data: Buffer) => {
+        const frame = parseGatewayFrame(data);
+        if (!frame) return;
 
-      const abortHandler = () => {
-        try {
-          ws.send(JSON.stringify({
+        if (frame.type === 'event' && frame.event === 'connect.challenge') {
+          ws!.send(JSON.stringify({
             type: 'req',
-            id: 'abort-resume',
-            method: 'chat.abort',
-            params: { sessionKey },
+            id: 'connect-1',
+            method: 'connect',
+            params: {
+              minProtocol: PROTOCOL_VERSION,
+              maxProtocol: PROTOCOL_VERSION,
+              client: {
+                id: 'gateway-client',
+                version: 'dev',
+                platform: process.platform,
+                mode: 'backend',
+              },
+              caps: ['tool-events'],
+              auth: { token: config.token },
+              role: 'operator',
+              scopes: ['operator.read', 'operator.write'],
+            },
           }));
-        } catch { /* ignore */ }
-        finish('Task cancelled');
+        }
+
+        if (frame.type === 'res' && frame.id === 'connect-1') {
+          clearTimeout(timeout);
+          ws!.removeListener('message', handshakeHandler);
+          ws!.removeListener('error', errorHandler);
+          if (frame.ok) {
+            resolve(ws!);
+          } else {
+            ws!.close();
+            reject(new Error(`Gateway handshake failed: ${frame.error?.message || 'unknown'}`));
+          }
+        }
       };
-      signal.addEventListener('abort', abortHandler);
 
-      ws.on('message', (data) => {
-        if (finished) return;
+      const errorHandler = (err: Error) => {
+        clearTimeout(timeout);
+        ws?.removeListener('message', handshakeHandler);
+        reject(err);
+      };
 
-        let frame: GatewayFrame;
-        try {
-          frame = JSON.parse(String(data));
-        } catch { return; }
-
-        if (frame.type === 'res' && frame.id === 'chat-resume-1') {
-          if (!frame.ok) {
-            finish(`Gateway rejected resume: ${frame.error?.message || 'unknown'}`);
-          }
-          return;
-        }
-
-        if (frame.type === 'event' && frame.event === 'agent') {
-          const p = frame.payload || {};
-          if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) return;
-
-          const streamType = p.stream as string;
-          const eventData = p.data as Record<string, unknown> | undefined;
-
-          if (streamType === 'lifecycle') {
-            const phase = eventData?.phase as string;
-            if (phase === 'end') {
-              lifecycleEnded = true;
-              tryFinishAfterLifecycle();
-            }
-          } else if (streamType === 'assistant') {
-            const delta = eventData?.delta as string || eventData?.text as string;
-            if (delta) {
-              outputText += delta;
-              stream.text(delta);
-            }
-          } else if (streamType === 'tool_use') {
-            const toolName = (eventData?.name as string) || 'unknown';
-            stream.toolUse(toolName, eventData?.input || {});
-          } else if (streamType === 'tool_result') {
-            const toolName = (eventData?.name as string) || 'unknown';
-            stream.toolResult(toolName, eventData?.result || '', eventData?.success !== false);
-          } else if (streamType === 'file_change') {
-            const filePath = eventData?.path as string || eventData?.file as string;
-            if (filePath) {
-              const rawAction = (eventData?.type as string) || 'modified';
-              const action = (['created', 'modified', 'deleted'].includes(rawAction) ? rawAction : 'modified') as 'created' | 'modified' | 'deleted';
-              stream.fileChange(filePath, action);
-            }
-          }
-          return;
-        }
-
-        if (frame.type === 'event' && frame.event === 'chat') {
-          const p = frame.payload || {};
-          if (p.sessionKey !== `agent:main:${sessionKey}` && p.sessionKey !== sessionKey) return;
-          if ((p.state as string) === 'final') {
-            chatFinalReceived = true;
-            if (lifecycleEnded) finish();
-          }
-          return;
-        }
-      });
-
-      ws.on('close', () => { if (!finished) finish('Gateway connection closed'); });
-      ws.on('error', (err) => { if (!finished) finish(`Gateway error: ${err.message}`); });
-
-      // Send the resume message
-      try {
-        ws.send(JSON.stringify({
-          type: 'req',
-          id: 'chat-resume-1',
-          method: 'chat.send',
-          params: {
-            sessionKey,
-            message,
-            idempotencyKey,
-          },
-        }));
-      } catch (err) {
-        finish(`Failed to send chat.send: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      ws.on('message', handshakeHandler);
+      ws.on('error', errorHandler);
     });
   }
 
@@ -921,8 +661,7 @@ export class OpenClawAdapter implements ProviderAdapter {
 
   /**
    * Use the Gateway's HTTP `POST /tools/invoke` endpoint for structured JSON
-   * plan generation. The `llm-task` tool supports JSON Schema validation,
-   * guaranteeing well-formed output without prompt engineering.
+   * plan generation.
    */
   private async runLlmTask(
     task: Task,
@@ -933,7 +672,7 @@ export class OpenClawAdapter implements ProviderAdapter {
     error?: string;
     metrics?: TaskResult['metrics'];
   }> {
-    const config = this.gatewayConfig;
+    const config = this.gatewayConfig || readGatewayConfig();
     if (!config) {
       throw new Error('Gateway config not available');
     }

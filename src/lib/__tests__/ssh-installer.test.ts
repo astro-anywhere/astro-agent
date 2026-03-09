@@ -9,6 +9,7 @@ const mockExecFileCb = vi.hoisted(() => vi.fn());
 
 vi.mock('node:child_process', () => ({
   execFile: mockExecFileCb,
+  spawn: vi.fn(),
 }));
 vi.mock('node:util', () => ({
   promisify: () => mockExecFileAsync,
@@ -19,9 +20,13 @@ vi.mock('node:os', () => ({
       { family: 'IPv4', address: '192.168.1.100', internal: false },
     ],
   }),
+  homedir: () => '/home/testuser',
 }));
 vi.mock('node:url', () => ({
   fileURLToPath: () => '/mock/src/lib/ssh-installer.ts',
+}));
+vi.mock('node:fs/promises', () => ({
+  mkdir: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('node:path', async () => {
   const actual = await vi.importActual<typeof import('node:path')>('node:path');
@@ -32,7 +37,7 @@ vi.mock('node:path', async () => {
   };
 });
 
-import { buildSshArgs, detectLocalIP } from '../ssh-installer.js';
+import { buildSshArgs, detectLocalIP, controlSocketPath } from '../ssh-installer.js';
 import type { DiscoveredHost } from '../../types.js';
 
 const testHost: DiscoveredHost = {
@@ -42,6 +47,44 @@ const testHost: DiscoveredHost = {
   source: 'ssh-config',
 };
 
+describe('controlSocketPath', () => {
+  it('should return a path under ~/.ssh/astro-sockets/', () => {
+    const path = controlSocketPath(testHost);
+    expect(path).toMatch(/^\/home\/testuser\/\.ssh\/astro-sockets\/[0-9a-f]{16}$/);
+  });
+
+  it('should produce different hashes for different ports', () => {
+    const host: DiscoveredHost = { ...testHost, port: 2222 };
+    const path1 = controlSocketPath(testHost);
+    const path2 = controlSocketPath(host);
+    expect(path1).not.toBe(path2);
+  });
+
+  it('should produce different hashes for different users', () => {
+    const host: DiscoveredHost = { ...testHost, user: undefined };
+    const path1 = controlSocketPath(testHost);
+    const path2 = controlSocketPath(host);
+    expect(path1).not.toBe(path2);
+  });
+
+  it('should produce deterministic paths for the same host', () => {
+    const path1 = controlSocketPath(testHost);
+    const path2 = controlSocketPath(testHost);
+    expect(path1).toBe(path2);
+  });
+
+  it('should stay well under Unix socket path limit', () => {
+    const longHost: DiscoveredHost = {
+      ...testHost,
+      hostname: 'very-long-subdomain.cluster.department.university.edu',
+      user: 'longusername',
+    };
+    const path = controlSocketPath(longHost);
+    // macOS limit is 104, Linux is 108
+    expect(path.length).toBeLessThan(104);
+  });
+});
+
 describe('buildSshArgs', () => {
   it('should build basic SSH args with user and hostname', () => {
     const args = buildSshArgs(testHost, 'echo hello');
@@ -50,6 +93,13 @@ describe('buildSshArgs', () => {
     expect(args).toContain('echo hello');
     expect(args).toContain('-o');
     expect(args).toContain('BatchMode=yes');
+  });
+
+  it('should include ControlPath for multiplexing', () => {
+    const args = buildSshArgs(testHost, 'echo hello');
+    const cpArg = args.find(a => a.startsWith('ControlPath='));
+    expect(cpArg).toBeDefined();
+    expect(cpArg).toMatch(/ControlPath=.*astro-sockets\/[0-9a-f]{16}$/);
   });
 
   it('should include port flag when non-default port', () => {

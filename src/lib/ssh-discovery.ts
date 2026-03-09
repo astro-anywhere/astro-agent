@@ -14,13 +14,19 @@ const GIT_FORGE_HOSTS = new Set([
   'ssh.dev.azure.com', 'vs-ssh.visualstudio.com',
 ]);
 
+/** Module-level verbose flag, set by discoverRemoteHosts() */
+let _verbose = false;
+function log(msg: string): void {
+  if (_verbose) console.log(msg);
+}
+
 /**
  * Parse SSH config file and extract host configurations
  */
 async function parseSSHConfig(): Promise<SSHHost[]> {
   const sshConfigPath = join(homedir(), '.ssh', 'config');
 
-  console.log(`[ssh-discovery] Parsing SSH config from: ${sshConfigPath}`);
+  log(`[ssh-discovery] Parsing SSH config from: ${sshConfigPath}`);
 
   try {
     const content = await readFile(sshConfigPath, 'utf-8');
@@ -48,11 +54,11 @@ async function parseSSHConfig(): Promise<SSHHost[]> {
         if (currentHost) {
           const hn = currentHost.hostname.toLowerCase();
           if (hn === 'localhost' || hn === '127.0.0.1' || GIT_FORGE_HOSTS.has(hn)) {
-            console.log(`[ssh-discovery] ⊗ Skipped non-compute host: ${currentHost.name} (${currentHost.hostname})`);
+            log(`[ssh-discovery] ⊗ Skipped non-compute host: ${currentHost.name} (${currentHost.hostname})`);
             skippedCount++;
           } else {
             hosts.push(currentHost);
-            console.log(`[ssh-discovery] ✓ Added host: ${currentHost.name} (${currentHost.hostname})`);
+            log(`[ssh-discovery] ✓ Added host: ${currentHost.name} (${currentHost.hostname})`);
           }
         }
 
@@ -64,7 +70,7 @@ async function parseSSHConfig(): Promise<SSHHost[]> {
           hostPattern === 'localhost' ||
           hostPattern === '127.0.0.1'
         ) {
-          console.log(`[ssh-discovery] ⊗ Skipped pattern/localhost: ${hostPattern}`);
+          log(`[ssh-discovery] ⊗ Skipped pattern/localhost: ${hostPattern}`);
           skippedCount++;
           currentHost = null;
           continue;
@@ -75,23 +81,27 @@ async function parseSSHConfig(): Promise<SSHHost[]> {
           hostname: hostPattern, // Default to the host alias
         };
       } else if (currentHost && value) {
+        // Strip inline comments: require whitespace before AND after '#'
+        // so that '#' inside values (e.g., paths) is preserved.
+        // Matches "value  # comment" but not "value#fragment".
+        const stripComment = (v: string) => v.trim().replace(/\s+#\s.*$/, '');
+
         switch (keyLower) {
           case 'hostname': {
-            // Strip inline comments (e.g., "1.2.3.4  # my server" → "1.2.3.4")
-            currentHost.hostname = value.trim().replace(/\s+#.*$/, '');
+            currentHost.hostname = stripComment(value);
             break;
           }
           case 'user':
-            currentHost.user = value.trim();
+            currentHost.user = stripComment(value);
             break;
           case 'port':
-            currentHost.port = parseInt(value.trim(), 10);
+            currentHost.port = parseInt(stripComment(value), 10);
             break;
           case 'identityfile':
-            currentHost.identityFile = value.trim().replace('~', homedir());
+            currentHost.identityFile = stripComment(value).replace('~', homedir());
             break;
           case 'proxyjump':
-            currentHost.proxyJump = value.trim();
+            currentHost.proxyJump = stripComment(value);
             break;
         }
       }
@@ -101,20 +111,20 @@ async function parseSSHConfig(): Promise<SSHHost[]> {
     if (currentHost) {
       const hn = currentHost.hostname.toLowerCase();
       if (hn === 'localhost' || hn === '127.0.0.1' || GIT_FORGE_HOSTS.has(hn)) {
-        console.log(`[ssh-discovery] ⊗ Skipped non-compute host: ${currentHost.name} (${currentHost.hostname})`);
+        log(`[ssh-discovery] ⊗ Skipped non-compute host: ${currentHost.name} (${currentHost.hostname})`);
         skippedCount++;
       } else {
         hosts.push(currentHost);
-        console.log(`[ssh-discovery] ✓ Added host: ${currentHost.name} (${currentHost.hostname})`);
+        log(`[ssh-discovery] ✓ Added host: ${currentHost.name} (${currentHost.hostname})`);
       }
     }
 
-    console.log(`[ssh-discovery] Parsed ${hosts.length} valid hosts (skipped ${skippedCount} wildcards/localhost)`);
+    log(`[ssh-discovery] Parsed ${hosts.length} valid hosts (skipped ${skippedCount} wildcards/localhost)`);
     return hosts;
   } catch (error) {
     // SSH config doesn't exist or can't be read
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      console.log(`[ssh-discovery] No SSH config file found at ${sshConfigPath}`);
+      log(`[ssh-discovery] No SSH config file found at ${sshConfigPath}`);
       return [];
     }
     console.error(`[ssh-discovery] Error reading SSH config:`, error);
@@ -253,20 +263,22 @@ async function parseKnownHosts(): Promise<string[]> {
 /**
  * Discover all remote hosts from various sources
  */
-export async function discoverRemoteHosts(): Promise<DiscoveredHost[]> {
-  console.log('[ssh-discovery] Starting remote host discovery...');
+export async function discoverRemoteHosts(options?: { verbose?: boolean }): Promise<DiscoveredHost[]> {
+  _verbose = options?.verbose ?? false;
+
+  log('[ssh-discovery] Starting remote host discovery...');
 
   const discovered: DiscoveredHost[] = [];
   const seenNames = new Set<string>();
   const seenHostnames = new Set<string>(); // resolved hostnames/IPs for cross-source dedup
 
   // Parse SSH config (highest priority)
-  console.log('[ssh-discovery] 1/3 Checking SSH config (~/.ssh/config)...');
+  log('[ssh-discovery] 1/3 Checking SSH config (~/.ssh/config)...');
   const sshHosts = await parseSSHConfig();
   for (const host of sshHosts) {
     const resolvedLower = host.hostname.toLowerCase();
     if (seenHostnames.has(resolvedLower)) {
-      console.log(`[ssh-discovery] ⊗ Skipped duplicate hostname: ${host.name} → ${host.hostname} (already discovered)`);
+      log(`[ssh-discovery] ⊗ Skipped duplicate hostname: ${host.name} → ${host.hostname} (already discovered)`);
       continue;
     }
     seenNames.add(host.name);
@@ -276,10 +288,10 @@ export async function discoverRemoteHosts(): Promise<DiscoveredHost[]> {
       source: 'ssh-config',
     });
   }
-  console.log(`[ssh-discovery] Found ${discovered.length} hosts from SSH config`);
+  log(`[ssh-discovery] Found ${discovered.length} hosts from SSH config`);
 
   // Discover VS Code tunnels
-  console.log('[ssh-discovery] 2/3 Checking VS Code Remote SSH...');
+  log('[ssh-discovery] 2/3 Checking VS Code Remote SSH...');
   const vscodeTunnels = await discoverVSCodeTunnels();
   let vscodeAdded = 0;
   for (const host of vscodeTunnels) {
@@ -294,10 +306,10 @@ export async function discoverRemoteHosts(): Promise<DiscoveredHost[]> {
       vscodeAdded++;
     }
   }
-  console.log(`[ssh-discovery] Found ${vscodeAdded} unique VS Code hosts`);
+  log(`[ssh-discovery] Found ${vscodeAdded} unique VS Code hosts`);
 
   // Parse known_hosts (lowest priority - just suggests hostnames)
-  console.log('[ssh-discovery] 3/3 Checking known_hosts...');
+  log('[ssh-discovery] 3/3 Checking known_hosts...');
   const knownHostnames = await parseKnownHosts();
   let knownHostsAdded = 0;
   for (const hostname of knownHostnames) {
@@ -313,9 +325,9 @@ export async function discoverRemoteHosts(): Promise<DiscoveredHost[]> {
       knownHostsAdded++;
     }
   }
-  console.log(`[ssh-discovery] Found ${knownHostsAdded} unique hosts from known_hosts`);
+  log(`[ssh-discovery] Found ${knownHostsAdded} unique hosts from known_hosts`);
 
-  console.log(`[ssh-discovery] Discovery complete: ${discovered.length} total unique hosts`);
+  log(`[ssh-discovery] Discovery complete: ${discovered.length} total unique hosts`);
   return discovered;
 }
 

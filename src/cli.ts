@@ -13,6 +13,13 @@
  *   npx @astroanywhere/agent@latest status  - Show current status
  */
 
+// Force IPv4-first DNS resolution. When a VPN is active, macOS may resolve
+// hostnames to IPv6 addresses routed through utun* tunnel interfaces that
+// don't support the connection, causing "socket is not connected" errors.
+// This must run before any network calls (fetch, WebSocket, etc.).
+import dns from 'node:dns';
+dns.setDefaultResultOrder('ipv4first');
+
 import { Command } from 'commander';
 import {
   setupCommand,
