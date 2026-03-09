@@ -62,23 +62,23 @@ $ npx @astroanywhere/agent@latest launch
 
   Astro Agent Runner v0.2.1
 
-  ╭──────────────────────────────────────────────────────────────╮
-  │   my-macbook (this device)                                   │
-  │   Apple Silicon · darwin/arm64 · v0.2.1                      │
-  │                                                              │
-  │   Hardware                                                   │
-  │     CPU   Apple M3 Max (16 cores)                            │
-  │     RAM   128 GB (98 GB available)                           │
-  │     GPU   Apple M3 Max (48 GB)                               │
-  │                                                              │
-  │   AI Providers                                               │
-  │     ✓ claude-sdk v1.0.22 · model: claude-sonnet-4-20250514  │
-  │     ✓ codex v0.1.2                                          │
-  │     ✓ openclaw v0.3.1                                       │
-  │     ✓ opencode v0.2.0                                       │
-  │                                                              │
-  │   Runner: a1b2c3d4…                                         │
-  ╰──────────────────────────────────────────────────────────────╯
+  +--------------------------------------------------------------+
+  |  my-macbook (this device)                                    |
+  |  Apple Silicon - darwin/arm64 - v0.2.1                       |
+  |                                                              |
+  |  Hardware                                                    |
+  |    CPU   Apple M3 Max (16 cores)                             |
+  |    RAM   128 GB (98 GB available)                            |
+  |    GPU   Apple M3 Max (48 GB)                                |
+  |                                                              |
+  |  AI Agents                                                   |
+  |    > claude-sdk v1.0.22 - model: sonnet-4                    |
+  |    > codex v0.1.2                                            |
+  |    > openclaw v0.3.1                                         |
+  |    > opencode v0.2.0                                         |
+  |                                                              |
+  |  Runner: a1b2c3d4                                            |
+  +--------------------------------------------------------------+
 
   Discovering SSH hosts... found 2: hpc-login, dev-vm
 
@@ -87,34 +87,34 @@ $ npx @astroanywhere/agent@latest launch
     https://astroanywhere.com/device?code=ABCD-1234
 
   Waiting for approval...
-  ✓ Authenticated as you@example.com
-  ✓ Machine "my-macbook" registered
+  > Authenticated as you@example.com
+  > Machine "my-macbook" registered
 
   Installing on remote hosts...
 
-  ╭──────────────────────────────────────────────────╮
-  │   ● hpc-login (running)                          │
-  │   user@hpc.university.edu                        │
-  │   linux/x86_64 · 128 cores · 1024 GB RAM        │
-  │     NVIDIA A100 (80 GB) × 4                      │
-  │                                                  │
-  │   AI Providers                                   │
-  │     ✓ claude-sdk v1.0.22                         │
-  │     ✓ openclaw v0.3.1                            │
-  ╰──────────────────────────────────────────────────╯
+  +------------------------------------------------+
+  |  [*] hpc-login (running)                       |
+  |  user@hpc.university.edu                       |
+  |  linux/x86_64 - 128 cores - 1024 GB RAM        |
+  |    NVIDIA A100 (80 GB) x4                      |
+  |                                                |
+  |  AI Agents                                     |
+  |    > claude-sdk v1.0.22                        |
+  |    > openclaw v0.3.1                           |
+  +------------------------------------------------+
 
-  ╭──────────────────────────────────────────────────╮
-  │   ● dev-vm (running)                             │
-  │   ubuntu@10.0.1.50                               │
-  │   linux/x86_64 · 8 cores · 32 GB RAM            │
-  │                                                  │
-  │   AI Providers                                   │
-  │     ✓ codex v0.1.2                               │
-  │     ✓ opencode v0.2.0                            │
-  ╰──────────────────────────────────────────────────╯
+  +------------------------------------------------+
+  |  [*] dev-vm (running)                          |
+  |  ubuntu@10.0.1.50                              |
+  |  linux/x86_64 - 8 cores - 32 GB RAM            |
+  |                                                |
+  |  AI Agents                                     |
+  |    > codex v0.1.2                              |
+  |    > opencode v0.2.0                           |
+  +------------------------------------------------+
 
   Remote agents: 2 running, 0 failed
-  ✓ Connected to relay
+  > Connected to relay
 
   Ready. Listening for tasks...
 ```
@@ -237,30 +237,30 @@ Stored at `~/.config/astro-agent/config.json`. Most users never need to touch th
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────┐
-│  Astro Dashboard (browser)                             │
-│  Plan → Dispatch → Monitor → Steer → Approve → Ship   │
-└───────────────────────┬────────────────────────────────┘
-                        │ SSE / REST
-                        ▼
-┌────────────────────────────────────────────────────────┐
-│  Astro Backend + Relay Server                          │
-│  Dispatch engine · Streaming events · WebSocket relay  │
-└───────────────────────┬────────────────────────────────┘
-                        │ WebSocket
-                        ▼
-┌────────────────────────────────────────────────────────┐
-│  Agent Runner (this repo)                              │
-│                                                        │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐      │
-│  │ Claude SDK  │ │ Codex CLI   │ │ OpenClaw    │      │
-│  │ (Anthropic) │ │ (OpenAI)    │ │ (Gateway)   │      │
-│  └─────────────┘ └─────────────┘ └─────────────┘      │
-│  ┌─────────────┐ ┌─────────────┐                      │
-│  │ OpenCode    │ │ Slurm/HPC   │                      │
-│  │ (CLI)       │ │ (sbatch)    │                      │
-│  └─────────────┘ └─────────────┘                      │
-└────────────────────────────────────────────────────────┘
++--------------------------------------------------------+
+|  Astro Dashboard (browser)                             |
+|  Plan > Dispatch > Monitor > Steer > Approve > Ship    |
++--------------------------+-----------------------------+
+                           | SSE / REST
+                           v
++--------------------------------------------------------+
+|  Astro Backend + Relay Server                          |
+|  Dispatch engine / Streaming events / WebSocket relay  |
++--------------------------+-----------------------------+
+                           | WebSocket
+                           v
++--------------------------------------------------------+
+|  Agent Runner (this repo)                              |
+|                                                        |
+|  +--------------+ +--------------+ +--------------+    |
+|  | Claude SDK   | | Codex CLI    | | OpenClaw     |    |
+|  | (Anthropic)  | | (OpenAI)     | | (Gateway)    |    |
+|  +--------------+ +--------------+ +--------------+    |
+|  +--------------+ +--------------+                     |
+|  | OpenCode     | | Slurm/HPC    |                     |
+|  | (CLI)        | | (sbatch)     |                     |
+|  +--------------+ +--------------+                     |
++--------------------------------------------------------+
 ```
 
 ## Related
