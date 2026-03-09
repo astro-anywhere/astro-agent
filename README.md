@@ -283,9 +283,9 @@ The [Astro Dashboard](https://astroanywhere.com) gives you full visibility into 
   }
 }}%%
 flowchart TB
-    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:16px
-    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:3px,color:#3d3a37,font-size:16px
-    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:16px
+    classDef server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#3d3a37,font-size:30px
+    classDef mist fill:#dce4ec,stroke:#9ab0c4,stroke-width:3px,color:#3d3a37,font-size:30px
+    classDef rose fill:#eaddd8,stroke:#c4a99c,stroke-width:3px,color:#3d3a37,font-size:30px
 
     subgraph Server["Astro Server"]
         S1[" &nbsp; Plan &nbsp; "]:::server --> S2[" &nbsp; Tasks &nbsp; "]:::server --> S3[" &nbsp; Dispatch &nbsp; "]:::server
@@ -305,9 +305,9 @@ flowchart TB
         C1[" &nbsp; Docker &nbsp; "]:::rose ~~~ C2[" &nbsp; Slurm &nbsp; "]:::rose ~~~ C3[" &nbsp; K8s &nbsp; "]:::rose ~~~ C4[" &nbsp; SSH &nbsp; "]:::rose
     end
 
-    style Server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#1a2744,font-size:24px,font-weight:bold
-    style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:3px,color:#1a2744,font-size:24px,font-weight:bold
-    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:3px,color:#1a2744,font-size:24px,font-weight:bold
+    style Server fill:#f0ebe4,stroke:#b8a99a,stroke-width:3px,color:#1a2744,font-size:40px,font-weight:bold
+    style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:3px,color:#1a2744,font-size:40px,font-weight:bold
+    style compute fill:#f5eeea,stroke:#c4a99c,stroke-width:3px,color:#1a2744,font-size:40px,font-weight:bold
 
     linkStyle 0,1 stroke:#9a918a,stroke-width:3px
     linkStyle 2 stroke:#9a918a,stroke-width:3px
