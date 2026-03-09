@@ -11,11 +11,7 @@
   <br />
   <a href="https://astroanywhere.com/landing/">Website</a>
   &nbsp;&middot;&nbsp;
-  <a href="https://astroanywhere.com">Dashboard</a>
-  &nbsp;&middot;&nbsp;
   <a href="#get-started">Get Started</a>
-  &nbsp;&middot;&nbsp;
-  <a href="https://github.com/fuxialexander/astro">Astro Platform</a>
   <br />
   <br />
 </p>
