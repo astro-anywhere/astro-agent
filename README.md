@@ -14,8 +14,19 @@
   <a href="https://astroanywhere.com">Dashboard</a>
   &nbsp;&middot;&nbsp;
   <a href="#install">Get Started</a>
+  &nbsp;&middot;&nbsp;
+  <a href="https://github.com/fuxialexander/astro">Astro Platform</a>
   <br />
   <br />
+</p>
+
+---
+
+## Demo
+
+<!-- TODO: Add video demo -->
+<p align="center">
+  <em>Video demo coming soon &mdash; watch a task dispatched from the browser, executed by the agent runner, and streamed back live.</em>
 </p>
 
 ---
@@ -24,7 +35,7 @@
 
 [**Astro**](https://astroanywhere.com/landing/) is mission control for the AI age. It turns ambitious goals into dependency graphs, dispatches tasks across your machines in parallel, and surfaces the decisions that need you.
 
-You plan in the browser. Your machines do the work. The **Agent Runner** is the piece that runs on your machines — it receives tasks, executes AI agents (Claude, Codex), and streams results back.
+You plan in the browser. Your machines do the work. The **Agent Runner** is the piece that runs on your machines &mdash; it receives tasks, executes AI agents, and streams results back.
 
 > **Self-hosting** is on the roadmap. Currently Astro runs as a hosted service at [astroanywhere.com](https://astroanywhere.com).
 
@@ -38,16 +49,37 @@ Create an account at [astroanywhere.com](https://astroanywhere.com) &mdash; you'
 npx @astroanywhere/agent@latest launch
 ```
 
-One command. It detects your AI providers, finds your SSH hosts, authenticates you, sets up everything, and starts listening for tasks.
+One command. It detects your AI providers, discovers your machine hardware, finds your SSH hosts, authenticates you, sets up everything, and starts listening for tasks.
 
 No global install. `npx` fetches the latest version.
 
 ## What Happens
 
+When you run `launch`, the agent runner detects your hardware, discovers installed AI providers, authenticates with Astro, and begins listening for tasks. Here's what you'll see:
+
 ```
 $ npx @astroanywhere/agent@latest launch
 
-  Detecting providers... claude-sdk
+  Astro Agent Runner v0.2.0
+
+  ╭────────────────────────────────────────────────────────╮
+  │   my-macbook (this device)                             │
+  │   Apple Silicon Workstation · darwin/arm64 · v0.2.0    │
+  │                                                        │
+  │   Hardware                                             │
+  │     CPU   Apple M3 Max (16 cores)                      │
+  │     RAM   128 GB (98 GB available)                     │
+  │     GPU   Apple M3 Max (48 GB)                         │
+  │                                                        │
+  │   AI Providers                                         │
+  │     ✓ claude-sdk v1.0.22 · model: claude-sonnet-4-20250514 │
+  │     ✓ codex v0.1.2                                     │
+  │     ✓ openclaw v0.3.1                                  │
+  │     ✓ opencode v0.2.0                                  │
+  │                                                        │
+  │   Runner: a1b2c3d4…                                    │
+  ╰────────────────────────────────────────────────────────╯
+
   Discovering SSH hosts... found 3: lab-gpu, hpc-login, aws-dev
 
   To authenticate, open this URL in your browser:
@@ -56,12 +88,40 @@ $ npx @astroanywhere/agent@latest launch
 
   Waiting for approval...
   ✓ Authenticated as you@example.com
-  ✓ Machine "my_laptop" registered
+  ✓ Machine "my-macbook" registered
 
   Installing on remote hosts...
-  ✓ lab-gpu: installed and started
-  ✓ hpc-login: installed and started
-  ✓ aws-dev: installed and started
+
+  ╭──────────────────────────────────────────────╮
+  │   ● lab-gpu (running)                        │
+  │   user@10.0.1.50                             │
+  │   linux/x86_64 · 64 cores · 512 GB RAM       │
+  │     NVIDIA A100 (80 GB)                       │
+  │     NVIDIA A100 (80 GB)                       │
+  │                                               │
+  │   AI Providers                                │
+  │     ✓ claude-sdk v1.0.22                      │
+  │     ✓ openclaw v0.3.1                         │
+  ╰──────────────────────────────────────────────╯
+
+  ╭──────────────────────────────────────────────╮
+  │   ● hpc-login (running)                      │
+  │   user@hpc.university.edu                    │
+  │   linux/x86_64 · 128 cores · 1024 GB RAM     │
+  │                                               │
+  │   AI Providers                                │
+  │     ✓ claude-sdk v1.0.22                      │
+  ╰──────────────────────────────────────────────╯
+
+  ╭──────────────────────────────────────────────╮
+  │   ● aws-dev (running)                        │
+  │   ec2-user@ec2-54-x-x-x.compute.aws.com     │
+  │   linux/x86_64 · 8 cores · 32 GB RAM         │
+  │                                               │
+  │   AI Providers                                │
+  │     ✓ codex v0.1.2                            │
+  │     ✓ opencode v0.2.0                         │
+  ╰──────────────────────────────────────────────╯
 
   Remote agents: 3 running, 0 failed
   ✓ Connected to relay
@@ -78,6 +138,7 @@ Your laptop and all remote hosts appear in Astro's **Environments** page. Dispat
 | **Plan** | Describe a goal &rarr; Astro breaks it into a dependency graph | Graph, List, Timeline views |
 | **Execute** | Dispatch to any machine &mdash; laptop, server, HPC | Parallel, isolated branches |
 | **Monitor** | Real-time agent output, tool calls, file changes | Live streaming |
+| **Steer** | Send guidance, redirect, or resume completed sessions | Multi-turn conversations |
 | **Decide** | Approve, reject, or redirect from any device | No terminal needed |
 | **Ship** | PRs created automatically per task | Branch-per-task isolation |
 | **Scale** | Multi-machine routing by load & capability | SSH config auto-discovery |
@@ -87,13 +148,33 @@ Your laptop and all remote hosts appear in Astro's **Environments** page. Dispat
 When you execute a task in Astro, it lands on one of your machines. The agent runner:
 
 - Creates an isolated git branch for the task
-- Runs Claude (or Codex) with your project's full context
+- Runs the selected AI agent with your project's full context
 - Streams progress back to the Astro UI in real time
 - Commits changes, pushes the branch, and opens a PR
+- Supports mid-execution steering and post-completion session resume
 
 Multiple tasks run in parallel &mdash; each on its own branch, no conflicts.
 
 Your API keys stay on your machine. Astro never sees them.
+
+## AI Providers
+
+Auto-detected at startup. No configuration needed if any of these are installed:
+
+| Provider | Type | How to Enable | Resume Support |
+|---|---|---|---|
+| **Claude SDK** | Anthropic Direct API | Run `astro-agent auth` or set `ANTHROPIC_API_KEY` | Mid-execution + post-completion |
+| **Codex** | OpenAI CLI agent | Install [Codex CLI](https://github.com/openai/codex) (`npm i -g @openai/codex`) | Post-completion |
+| **OpenClaw** | Gateway WebSocket | Install [OpenClaw](https://github.com/openclaw-ai/openclaw) (`npm i -g openclaw`) | Post-completion |
+| **OpenCode** | CLI headless mode | Install [OpenCode](https://github.com/opencode-ai/opencode) (`bun i -g opencode`) | Post-completion |
+
+All providers support:
+- Task execution with full project context injection
+- Real-time streaming of agent output, tool calls, and file changes
+- Session preservation for multi-turn resume after completion
+- Automatic execution summaries
+
+**Claude SDK** additionally supports mid-execution steering &mdash; send guidance or redirect the agent while it's still running (via the Claude Agent SDK's `injectMessage`).
 
 ## Commands
 
@@ -125,6 +206,8 @@ npx @astroanywhere/agent@latest config --set maxTasks=8
 
 `launch` reads your `~/.ssh/config`, discovers hosts, installs the agent runner over SSH, and starts them &mdash; all from your laptop.
 
+Each remote host gets its own hardware detection and provider discovery. The agent runner reports back machine type (GPU Workstation, Apple Silicon, High-Memory Server, etc.), hardware specs (CPU, RAM, GPU), and available providers.
+
 To set up a single remote machine manually, SSH in and run:
 
 ```bash
@@ -132,16 +215,6 @@ npx @astroanywhere/agent@latest launch --no-ssh-config
 ```
 
 Astro picks the best available machine for each task based on load and capabilities.
-
-## AI Providers
-
-Auto-detected. No configuration needed if any of these are installed:
-
-| Provider | How to Enable |
-|---|---|
-| **Claude SDK** | Run `astro-agent auth` or set `ANTHROPIC_API_KEY` |
-| **Claude Code** | Install [Claude Code](https://claude.ai/code) |
-| **Codex** | Install Codex CLI |
 
 ## MCP Integration
 
@@ -170,6 +243,42 @@ Stored at `~/.config/astro-agent/config.json`. Most users never need to touch th
 | `ANTHROPIC_API_KEY` | Claude API key (alternative to OAuth) |
 | `ASTRO_MACHINE_NAME` | Custom machine name |
 | `ASTRO_LOG_LEVEL` | Override log level |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Astro Dashboard (browser)                              │
+│  Plan → Dispatch → Monitor → Steer → Approve → Ship    │
+└──────────────────────┬──────────────────────────────────┘
+                       │ SSE / REST
+                       ▼
+┌──────────────────────────────────────────────────────────┐
+│  Astro Backend + Relay Server                            │
+│  Dispatch engine · Streaming events · WebSocket relay    │
+└──────────────────────┬───────────────────────────────────┘
+                       │ WebSocket
+                       ▼
+┌──────────────────────────────────────────────────────────┐
+│  Agent Runner (this repo)                                │
+│                                                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐   │
+│  │ Claude SDK   │  │ Codex CLI    │  │ OpenClaw     │   │
+│  │ (Anthropic)  │  │ (OpenAI)     │  │ (Gateway WS) │   │
+│  └──────────────┘  └──────────────┘  └──────────────┘   │
+│  ┌──────────────┐  ┌──────────────┐                      │
+│  │ OpenCode     │  │ Slurm/HPC    │                      │
+│  │ (CLI)        │  │ (sbatch)     │                      │
+│  └──────────────┘  └──────────────┘                      │
+└──────────────────────────────────────────────────────────┘
+```
+
+## Related
+
+- [Astro Platform](https://github.com/fuxialexander/astro) &mdash; the full planning + execution platform
+- [Astro CLI](https://github.com/astro-anywhere/cli) &mdash; terminal UI for managing projects and tasks
+- [Website](https://astroanywhere.com/landing/) &mdash; product overview
+- [Dashboard](https://astroanywhere.com) &mdash; sign up and start planning
 
 ---
 
