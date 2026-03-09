@@ -13,7 +13,7 @@
   &nbsp;&middot;&nbsp;
   <a href="https://astroanywhere.com">Dashboard</a>
   &nbsp;&middot;&nbsp;
-  <a href="#install">Get Started</a>
+  <a href="#get-started">Get Started</a>
   &nbsp;&middot;&nbsp;
   <a href="https://github.com/fuxialexander/astro">Astro Platform</a>
   <br />
@@ -22,40 +22,27 @@
 
 ---
 
-## Demo
-
-<!-- TODO: Add video demo -->
-<p align="center">
-  <em>Video demo coming soon &mdash; watch a task dispatched from the browser, executed by the agent runner, and streamed back live.</em>
-</p>
-
----
-
 ## What is Astro?
 
-[**Astro**](https://astroanywhere.com/landing/) is an orchestrator for AI agents. It connects multiple jobs across different machines and compute backends &mdash; your laptop, GPU servers, HPC clusters, cloud VMs &mdash; so AI agents can work in parallel on the tasks that matter.
+[**Astro**](https://astroanywhere.com/landing/) is an orchestrator for AI coding agents. It takes a complex goal, decomposes it into a dependency graph of tasks, and executes them **in parallel** across your machines &mdash; your laptop, GPU servers, HPC clusters, cloud VMs.
 
-Mission control lives in the browser. Your machines do the work. The **Agent Runner** is the piece that runs on each machine &mdash; it receives tasks, executes AI agents on the available compute backends, and streams results back.
+Mission control lives in the browser. Your machines do the work. The **Agent Runner** is the piece that runs on each machine &mdash; it receives tasks, runs AI agents, and streams results back.
 
 > **Self-hosting** is on the roadmap. Currently Astro runs as a hosted service at [astroanywhere.com](https://astroanywhere.com).
 
-## Prerequisites
+---
 
-Create an account at [astroanywhere.com](https://astroanywhere.com) &mdash; you'll need it to authenticate your machines.
+## Get Started
 
-## Install
+Create an account at [astroanywhere.com](https://astroanywhere.com), then run:
 
 ```bash
 npx @astroanywhere/agent@latest launch
 ```
 
-One command. It detects your AI providers, discovers your machine hardware, finds your SSH hosts, authenticates you, sets up everything, and starts listening for tasks.
+One command. It detects your AI agents, discovers your machine hardware, finds your SSH hosts, authenticates you, sets up everything, and starts listening for tasks. No global install &mdash; `npx` fetches the latest version.
 
-No global install. `npx` fetches the latest version.
-
-## What Happens
-
-When you run `launch`, the agent runner detects your hardware, discovers installed AI providers, authenticates with Astro, and begins listening for tasks. Here's what you'll see:
+### What You'll See
 
 ```
 $ npx @astroanywhere/agent@latest launch
@@ -72,7 +59,7 @@ $ npx @astroanywhere/agent@latest launch
   |    GPU   Apple M3 Max (48 GB)                                |
   |                                                              |
   |  AI Agents                                                   |
-  |    > claude-sdk v1.0.22 - model: sonnet-4                    |
+  |    > claude-code v1.0.22 - model: sonnet-4                   |
   |    > codex v0.1.2                                            |
   |    > openclaw v0.3.1                                         |
   |    > opencode v0.2.0                                         |
@@ -99,7 +86,7 @@ $ npx @astroanywhere/agent@latest launch
   |    NVIDIA A100 (80 GB) x4                      |
   |                                                |
   |  AI Agents                                     |
-  |    > claude-sdk v1.0.22                        |
+  |    > claude-code v1.0.22                       |
   |    > openclaw v0.3.1                           |
   +------------------------------------------------+
 
@@ -119,7 +106,20 @@ $ npx @astroanywhere/agent@latest launch
   Ready. Listening for tasks...
 ```
 
-Your laptop and all remote hosts appear in Astro's **Environments** page. Dispatch tasks to any of them.
+Your laptop and all remote hosts appear in the [Astro Dashboard](https://astroanywhere.com). Dispatch tasks to any of them.
+
+### Remote Machines via SSH
+
+`launch` reads your `~/.ssh/config`, discovers reachable hosts, installs the agent runner over SSH, and starts them &mdash; all from your laptop. To set up a single remote machine manually:
+
+```bash
+ssh user@remote-host
+npx @astroanywhere/agent@latest launch --no-ssh-config
+```
+
+Astro picks the best available machine for each task based on load and capabilities.
+
+---
 
 ## Key Features
 
@@ -176,7 +176,7 @@ flowchart LR
 
 ### 2. Multi-Agent Support
 
-Astro works with the AI coding agents you already use. Install any of the supported agents &mdash; Astro detects them at startup and dispatches tasks automatically.
+Astro works with the AI coding agents you already use. Install any supported agent &mdash; Astro detects it at startup and dispatches tasks automatically.
 
 | Agent | Link | Steering |
 |---|---|---|
@@ -233,73 +233,7 @@ The [Astro Dashboard](https://astroanywhere.com) gives you full visibility acros
 - **Decide** &mdash; approve, reject, or rerun from any device &mdash; no terminal needed
 - **Scale** &mdash; multi-machine routing by load and capability
 
-## Commands
-
-```bash
-# First time — set up everything and start
-npx @astroanywhere/agent@latest launch
-
-# Local only, skip SSH host discovery
-npx @astroanywhere/agent@latest launch --no-ssh-config
-
-# Start (already set up)
-npx @astroanywhere/agent@latest start -f
-
-# Stop
-npx @astroanywhere/agent@latest stop
-
-# Check what's running
-npx @astroanywhere/agent@latest status
-
-# Set up Claude authentication
-npx @astroanywhere/agent@latest auth
-
-# View or change settings
-npx @astroanywhere/agent@latest config --show
-npx @astroanywhere/agent@latest config --set maxTasks=8
-```
-
-## Remote Machines
-
-`launch` reads your `~/.ssh/config`, discovers hosts, installs the agent runner over SSH, and starts them &mdash; all from your laptop.
-
-Each remote host gets its own hardware detection and provider discovery. The agent runner reports back machine type (GPU Workstation, Apple Silicon, High-Memory Server, etc.), hardware specs (CPU, RAM, GPU), and available providers.
-
-To set up a single remote machine manually, SSH in and run:
-
-```bash
-npx @astroanywhere/agent@latest launch --no-ssh-config
-```
-
-Astro picks the best available machine for each task based on load and capabilities.
-
-## MCP Integration
-
-Use the agent runner as an MCP server inside Claude Code:
-
-```bash
-npx @astroanywhere/agent@latest mcp
-```
-
-This gives Claude Code access to Astro tools &mdash; attach to tasks, send updates, check status.
-
-## Configuration
-
-Stored at `~/.config/astro-agent/config.json`. Most users never need to touch this.
-
-| Setting | Default | Description |
-|---|---|---|
-| `maxTasks` | `4` | Max concurrent tasks |
-| `logLevel` | `info` | Logging verbosity |
-| `autoStart` | `false` | Start on login |
-
-## Environment Variables
-
-| Variable | Description |
-|---|---|
-| `ANTHROPIC_API_KEY` | Claude API key (alternative to OAuth) |
-| `ASTRO_MACHINE_NAME` | Custom machine name |
-| `ASTRO_LOG_LEVEL` | Override log level |
+---
 
 ## Architecture
 
@@ -336,7 +270,7 @@ flowchart TB
 
     subgraph runner["Agent Runner &mdash; this repo"]
         direction LR
-        A1["Claude SDK"]:::mist
+        A1["Claude Code"]:::mist
         A2["Codex"]:::mist
         A3["OpenClaw"]:::mist
         A4["OpenCode"]:::mist
@@ -363,6 +297,8 @@ flowchart TB
 ```
 
 > **Astro Server** generates plans, breaks them into tasks, and dispatches to agent runners. Each **Agent Runner** (this repo) selects an AI agent, deploys jobs to compute backends, and streams progress back to the server.
+
+---
 
 ## Related
 
