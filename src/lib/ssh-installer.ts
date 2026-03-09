@@ -494,7 +494,7 @@ export async function startRemoteAgents(
   for (const host of hosts) {
     // 1. Always kill existing agent so we start fresh with latest binary/config.
     log(host.name, 'Stopping existing agent (if any)...');
-    await sshExec(host, 'pkill -f "astro-agent start" 2>/dev/null || true').catch(() => {});
+    await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true').catch(() => {});
     await new Promise((r) => setTimeout(r, 1000));
 
     // 2. Build start command with forwarded options
@@ -527,7 +527,7 @@ export async function startRemoteAgents(
     try {
       const { stdout } = await sshExec(
         host,
-        '(pgrep -f "astro-agent" 2>/dev/null || ps aux | awk \'/[a]stro-agent/{print $2}\') || true',
+        '(pgrep -f "[a]stro-agent" 2>/dev/null || ps aux | awk \'/[a]stro-agent/{print $2}\') || true',
       );
       if (stdout.trim()) {
         log(host.name, 'Agent started — reading status...');
