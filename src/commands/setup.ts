@@ -664,14 +664,13 @@ async function installOnRemoteHosts(
       // so the user can authenticate interactively once.
       const errMsg = err instanceof Error ? err.message : String(err);
 
-      // Detect 2FA/interactive auth requirement. BatchMode=yes produces specific
-      // error messages when the server requires keyboard-interactive or password
-      // auth (which includes Duo, OTP prompts). We look for these indicators
-      // specifically to avoid misclassifying plain SSH key failures.
-      const is2FA = errMsg.includes('keyboard-interactive') ||
-        errMsg.includes('password') ||
-        // "Permission denied (keyboard-interactive)" is the most common 2FA signal
-        (errMsg.includes('Permission denied') && errMsg.includes('interactive'));
+      // Detect 2FA/interactive auth requirement. When a server requires
+      // keyboard-interactive auth (Duo, OTP), BatchMode=yes produces:
+      //   "Permission denied (keyboard-interactive)."
+      // We specifically match 'keyboard-interactive' to avoid false positives
+      // from servers that offer password auth alongside publickey:
+      //   "Permission denied (publickey,password)."  ← NOT 2FA
+      const is2FA = errMsg.includes('keyboard-interactive');
 
       // Check if a ControlMaster session already exists (shouldn't, but be safe)
       const hasMaster = await hasControlMaster(host);
