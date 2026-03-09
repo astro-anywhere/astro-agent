@@ -226,6 +226,93 @@ export function formatNoProvidersWarning(): string {
   ].join('\n');
 }
 
+// ── Installation error box ───────────────────────────────────────────
+
+export interface InstallErrorInfo {
+  host: string;
+  hostname: string;
+  user?: string;
+  error: string;
+  reason: 'node_not_found' | 'node_too_old' | 'ssh_failed' | 'install_failed' | 'permission_denied';
+  nodeVersion?: string | null;
+  suggestion?: string;
+}
+
+/**
+ * Format an error box for hosts where installation failed.
+ * Shows the error in red with suggestions for manual installation.
+ */
+export function formatInstallErrorBox(errors: InstallErrorInfo[]): string {
+  if (errors.length === 0) return '';
+
+  const lines: string[] = [];
+
+  lines.push(chalk.red.bold('  Installation Errors'));
+  lines.push('');
+  lines.push(chalk.dim('  The following hosts could not be set up via SSH.'));
+  lines.push(chalk.dim('  Please log in directly and install Astro Agent manually.'));
+  lines.push('');
+
+  for (const err of errors) {
+    const userHost = err.user ? `${err.user}@${err.hostname}` : err.hostname;
+    lines.push(`  ${chalk.red('✗')} ${chalk.bold(err.host)} ${chalk.dim(`(${userHost})`)}`);
+
+    // Show specific error reason
+    switch (err.reason) {
+      case 'node_not_found':
+        lines.push(chalk.red('    Node.js not found'));
+        lines.push(chalk.dim('    This host may use a module system (Lmod, Environment Modules)'));
+        lines.push(chalk.dim('    that requires interactive login to load Node.js.'));
+        break;
+      case 'node_too_old':
+        lines.push(chalk.red(`    Node.js ${err.nodeVersion || 'version'} is too old (need >= 18)`));
+        lines.push(chalk.dim('    Upgrade Node.js or load a newer module version.'));
+        break;
+      case 'ssh_failed':
+        lines.push(chalk.red('    SSH connection failed'));
+        lines.push(chalk.dim('    Check SSH keys, permissions, or network connectivity.'));
+        break;
+      case 'permission_denied':
+        lines.push(chalk.red('    Permission denied'));
+        lines.push(chalk.dim('    SSH key may not be authorized on this host.'));
+        break;
+      case 'install_failed':
+        lines.push(chalk.red(`    Installation failed: ${err.error.slice(0, 60)}`));
+        break;
+    }
+
+    // Show manual installation instructions
+    lines.push('');
+    lines.push(chalk.cyan('    Manual installation:'));
+    lines.push(chalk.dim(`      1. ssh ${userHost}`));
+    if (err.reason === 'node_not_found' || err.reason === 'node_too_old') {
+      lines.push(chalk.dim('      2. module load nodejs  # or: nvm use 20'));
+    }
+    lines.push(chalk.dim('      3. npx @astroanywhere/agent@latest launch'));
+    lines.push('');
+  }
+
+  // Render in a red-tinted box
+  const boxLines: string[] = [];
+  const maxVisible = lines.reduce((max, line) => {
+    const visible = line.replace(/\x1b\[[0-9;]*m/g, '');
+    return Math.max(max, visible.length);
+  }, 0);
+  const width = Math.max(60, maxVisible);
+
+  // Red box borders
+  const B = { tl: '╭', tr: '╮', bl: '╰', br: '╯', h: '─', v: '│' };
+  boxLines.push(chalk.red(`${B.tl}${B.h.repeat(width + 2)}${B.tr}`));
+  for (const line of lines) {
+    const visible = line.replace(/\x1b\[[0-9;]*m/g, '');
+    const pad = Math.max(0, width - visible.length);
+    boxLines.push(chalk.red(B.v) + ` ${line}${' '.repeat(pad)} ` + chalk.red(B.v));
+  }
+  boxLines.push(chalk.red(`${B.bl}${B.h.repeat(width + 2)}${B.br}`));
+
+  return boxLines.join('\n');
+}
+
 // ── Box separator for visual grouping ────────────────────────────────
 
 export { boxSeparator, renderBox };

@@ -43,24 +43,111 @@ export function detectLocalIP(): string {
 // ============================================================================
 
 /**
+ * Common HPC module system initialization commands.
+ * These source the module system so `module load` works in non-interactive SSH.
+ */
+const HPC_MODULE_INIT_COMMANDS = [
+  // Lmod (most common on modern HPC clusters)
+  'source /etc/profile.d/lmod.sh 2>/dev/null',
+  'source /etc/profile.d/z00_lmod.sh 2>/dev/null',
+  'source /usr/share/lmod/lmod/init/bash 2>/dev/null',
+  // Environment Modules (TCL-based)
+  'source /etc/profile.d/modules.sh 2>/dev/null',
+  'source /usr/share/Modules/init/bash 2>/dev/null',
+  // General profile (may include module init)
+  'source /etc/profile 2>/dev/null',
+];
+
+/**
+ * Common module names for Node.js across different HPC systems.
+ */
+const HPC_NODE_MODULE_NAMES = [
+  'nodejs',
+  'node',
+  'nodejs/20',
+  'nodejs/18',
+  'node/20',
+  'node/18',
+  'Node.js',
+  'nodejs/latest',
+];
+
+/**
+ * Common paths where Node.js might be installed on HPC/Linux systems.
+ */
+const COMMON_NODE_PATHS = [
+  '$HOME/.local/bin/node',
+  '$HOME/.nvm/versions/node/*/bin/node',
+  '/usr/local/bin/node',
+  '/opt/node/bin/node',
+  '/opt/nodejs/bin/node',
+];
+
+/**
  * SSH to a host and check whether Node.js ≥ 18 is available.
- * Returns { available, version } or throws on SSH failure.
+ * Handles HPC module systems (Lmod, Environment Modules), NVM, and common paths.
+ * Returns { available, version, method } or throws on SSH failure.
  */
 export async function checkRemoteNode(
   host: DiscoveredHost,
-): Promise<{ available: boolean; version: string | null }> {
-  // Try both `node` and `nodejs` — some distros (e.g. Debian/Ubuntu) only have `nodejs`
+): Promise<{ available: boolean; version: string | null; method?: string }> {
+  // Strategy 1: Direct check (works on standard Linux/macOS)
   for (const bin of ['node', 'nodejs']) {
     try {
       const { stdout } = await sshExec(host, `${bin} --version`);
-      const ver = stdout.trim(); // e.g. "v20.11.0"
+      const ver = stdout.trim();
       const major = parseInt(ver.replace(/^v/, ''), 10);
-      if (major >= 18) return { available: true, version: ver };
-      // Found but too old — keep trying in case the other binary is newer
+      if (major >= 18) return { available: true, version: ver, method: 'direct' };
     } catch {
       // binary not found, try next
     }
   }
+
+  // Strategy 2: HPC module system — initialize modules and try loading node
+  const moduleInit = HPC_MODULE_INIT_COMMANDS.join('; ');
+  for (const moduleName of HPC_NODE_MODULE_NAMES) {
+    try {
+      const cmd = `${moduleInit}; module load ${moduleName} 2>/dev/null && node --version`;
+      const { stdout } = await sshExec(host, cmd);
+      const ver = stdout.trim();
+      const major = parseInt(ver.replace(/^v/, ''), 10);
+      if (major >= 18) {
+        return { available: true, version: ver, method: `module:${moduleName}` };
+      }
+    } catch {
+      // module not available, try next
+    }
+  }
+
+  // Strategy 3: Check common installation paths
+  for (const nodePath of COMMON_NODE_PATHS) {
+    try {
+      // Use bash -c to expand globs like ~/.nvm/versions/node/*/bin/node
+      const cmd = `bash -c 'for p in ${nodePath}; do [ -x "$p" ] && "$p" --version && exit 0; done; exit 1'`;
+      const { stdout } = await sshExec(host, cmd);
+      const ver = stdout.trim();
+      const major = parseInt(ver.replace(/^v/, ''), 10);
+      if (major >= 18) {
+        return { available: true, version: ver, method: `path:${nodePath}` };
+      }
+    } catch {
+      // path not found, try next
+    }
+  }
+
+  // Strategy 4: Try sourcing user's shell profile (may have NVM/module setup)
+  try {
+    const cmd = 'source ~/.bashrc 2>/dev/null; source ~/.bash_profile 2>/dev/null; node --version';
+    const { stdout } = await sshExec(host, cmd);
+    const ver = stdout.trim();
+    const major = parseInt(ver.replace(/^v/, ''), 10);
+    if (major >= 18) {
+      return { available: true, version: ver, method: 'profile' };
+    }
+  } catch {
+    // profile sourcing failed
+  }
+
   return { available: false, version: null };
 }
 
