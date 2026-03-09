@@ -639,6 +639,7 @@ async function installOnRemoteHosts(
 ): Promise<DiscoveredHost[]> {
   const installedHosts: DiscoveredHost[] = [];
   const installErrors: InstallErrorInfo[] = [];
+  const controlMasterHosts: DiscoveredHost[] = []; // track hosts with active CM sessions
   console.log();
   const localIP = detectLocalIP();
   // Build URLs that remote hosts can reach
@@ -659,20 +660,19 @@ async function installOnRemoteHosts(
       await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true');
     } catch (err) {
       // SSH connection failed — check if this is a 2FA/interactive auth issue.
-      // BatchMode=yes causes SSH to fail when the host requires password, OTP, or
-      // Duo push. We detect this and offer to establish a ControlMaster session
-      // so the user can authenticate interactively once.
-      const errMsg = err instanceof Error ? err.message : String(err);
+      // BatchMode=yes causes SSH to fail when the host requires keyboard-interactive
+      // auth (Duo push, OTP). We detect this and offer a ControlMaster session.
+      const errObj = err as { message?: string; stderr?: string };
+      const errMsg = errObj.message ?? String(err);
+      const errStderr = errObj.stderr ?? '';
+      const errAll = `${errMsg}\n${errStderr}`;
 
-      // Detect 2FA/interactive auth requirement. When a server requires
-      // keyboard-interactive auth (Duo, OTP), BatchMode=yes produces:
-      //   "Permission denied (keyboard-interactive)."
-      // We specifically match 'keyboard-interactive' to avoid false positives
-      // from servers that offer password auth alongside publickey:
-      //   "Permission denied (publickey,password)."  ← NOT 2FA
-      const is2FA = errMsg.includes('keyboard-interactive');
+      // Detect 2FA: 'keyboard-interactive' in either message or stderr.
+      // Don't match plain 'password' — that fires on "Permission denied
+      // (publickey,password)" which is a key failure, not 2FA.
+      const is2FA = errAll.includes('keyboard-interactive');
 
-      // Check if a ControlMaster session already exists (shouldn't, but be safe)
+      // Check if a ControlMaster session already exists (from a prior run)
       const hasMaster = await hasControlMaster(host);
 
       if (is2FA && !hasMaster) {
@@ -697,14 +697,8 @@ async function installOnRemoteHosts(
           const established = await establishControlMaster(host);
 
           if (established) {
+            controlMasterHosts.push(host);
             console.log(chalk.green(`\n  Session established for ${hostName}.`));
-            // Retry the initial command through the multiplexed session
-            spinner.start(`${hostName}: Stopping existing agent (if any)...`);
-            try {
-              await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true');
-            } catch {
-              // Non-critical — pkill may fail if no agent is running
-            }
           } else {
             spinner.fail(`${hostName}: Authentication failed`);
             installErrors.push({
@@ -739,7 +733,13 @@ async function installOnRemoteHosts(
         });
         continue;
       }
-      // If hasMaster is true, we already have a session — continue normally
+      // hasMaster=true or just established — retry pkill through the session
+      spinner.start(`${hostName}: Stopping existing agent (if any)...`);
+      try {
+        await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true');
+      } catch {
+        // Non-critical — pkill may fail if no agent is running
+      }
     }
     await new Promise((r) => setTimeout(r, 1000));
 
@@ -850,15 +850,16 @@ async function installOnRemoteHosts(
       if (verbose && err instanceof Error && err.stack) {
         console.error(chalk.dim(`[setup] Stack trace: ${err.stack}`));
       }
+      // Clean up ControlMaster immediately on failure to avoid socket leak
+      if (controlMasterHosts.includes(host)) {
+        await teardownControlMaster(host).catch(() => {});
+      }
     }
   }
 
-  // Clean up any ControlMaster sessions we established for 2FA hosts
-  for (const hostName of selectedHosts) {
-    const host = discoveredHosts.find((h) => h.name === hostName);
-    if (host) {
-      await teardownControlMaster(host).catch(() => {});
-    }
+  // Clean up all ControlMaster sessions we established during this run
+  for (const cmHost of controlMasterHosts) {
+    await teardownControlMaster(cmHost).catch(() => {});
   }
 
   // Show error summary box if there were failures
