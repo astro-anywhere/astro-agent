@@ -179,15 +179,18 @@ export interface TaskExecutorOptions {
   hpcCapability?: HpcCapability | null; // Pre-classified HPC info from startup detection
 }
 
-/** Canonicalize a directory path for use as a lock key (follows symlinks, normalizes). */
-function canonicalDirLockKey(workdir: string): string {
-  let canonical: string;
+/** Resolve a canonical absolute path for a directory (follows symlinks, normalizes). */
+function canonicalDirPath(workdir: string): string {
   try {
-    canonical = realpathSync(workdir);
+    return realpathSync(workdir);
   } catch {
-    canonical = resolve(workdir);
+    return resolve(workdir);
   }
-  return `dir::${canonical}`;
+}
+
+/** Canonicalize a directory path for use as a lock key. */
+function canonicalDirLockKey(workdir: string): string {
+  return `dir::${canonicalDirPath(workdir)}`;
 }
 
 export class TaskExecutor {
@@ -495,6 +498,9 @@ export class TaskExecutor {
       });
     }
     this.taskQueue = [];
+
+    // Clear directory tracking so stale entries don't inflate parallel task counts
+    this.tasksByDirectory.clear();
 
     // Release all locks to unblock any waiting tasks
     this.branchLockManager.releaseAll();
@@ -939,8 +945,7 @@ export class TaskExecutor {
 
   /** Resolve a canonical directory key for task tracking (matches lock keys). */
   private canonicalDirKey(workdir: string): string {
-    // Strip the `dir::` prefix — we only need the canonical path for tracking.
-    return canonicalDirLockKey(workdir).slice(5);
+    return canonicalDirPath(workdir);
   }
 
   /**
