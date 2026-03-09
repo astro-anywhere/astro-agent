@@ -266,22 +266,14 @@ flowchart TB
     runner -. "report progress" .-> Server
 
     subgraph runner["Agent Runner &mdash; this repo"]
-        direction LR
-        A1["Claude Code"]:::mist
-        A2["Codex"]:::mist
-        A3["OpenClaw"]:::mist
-        A4["OpenCode"]:::mist
+        A1["Claude Code"]:::mist ~~~ A2["Codex"]:::mist ~~~ A3["OpenClaw"]:::mist ~~~ A4["OpenCode"]:::mist
     end
 
     runner -- "deploy jobs" --> compute
     compute -. "results" .-> runner
 
     subgraph compute["Compute Backends"]
-        direction LR
-        C1["Docker"]:::rose
-        C2["Slurm"]:::rose
-        C3["K8s"]:::rose
-        C4["SSH"]:::rose
+        C1["Docker"]:::rose ~~~ C2["Slurm"]:::rose ~~~ C3["K8s"]:::rose ~~~ C4["SSH"]:::rose
     end
 
     style runner fill:#f7f4f0,stroke:#b8a99a,stroke-width:2px,color:#3d3a37
@@ -296,13 +288,6 @@ flowchart TB
 > **Astro Server** generates plans, breaks them into tasks, and dispatches to agent runners. Each **Agent Runner** (this repo) selects an AI agent, deploys jobs to compute backends, and streams progress back to the server.
 
 ---
-
-## Related
-
-- [Astro Platform](https://github.com/fuxialexander/astro) &mdash; the full planning + execution platform
-- [Astro CLI](https://github.com/astro-anywhere/cli) &mdash; terminal UI for managing projects and tasks
-- [Website](https://astroanywhere.com/landing/) &mdash; product overview
-- [Dashboard](https://astroanywhere.com) &mdash; sign up and start planning
 
 ---
 
