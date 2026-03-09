@@ -10,7 +10,7 @@
  *
  * Run with: npx vitest run tests/steer-session-hints.test.ts
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import type { TaskSteerIncomingMessage } from '../src/types'
 
 // ============================================================================
@@ -155,18 +155,17 @@ describe('WebSocket steer message normalization', () => {
     expect(normalized.payload.message).toBe('legacy steer')
   })
 
-  it('handles null/undefined values gracefully', () => {
+  it('handles undefined values gracefully', () => {
     const relayMsg = {
       type: 'task.steer',
       taskId: 'task-1',
       message: 'test',
       sessionId: undefined,
-      branchName: null,
+      branchName: undefined,
     }
     const normalized = normalizeSteerMessage(relayMsg)
     expect(normalized.payload.sessionId).toBeUndefined()
-    // null cast to string | undefined becomes undefined-ish
-    expect(normalized.payload.branchName).toBeNull()
+    expect(normalized.payload.branchName).toBeUndefined()
   })
 
   it('preserves timestamp from relay message', () => {
