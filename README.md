@@ -175,6 +175,96 @@ npm i -g openclaw                     # or OpenClaw
 
 > **Note:** The agent runner uses Slurm to submit AI agent jobs to compute nodes automatically. Once installed, Astro dispatches tasks as Slurm jobs &mdash; you don't need to manage `sbatch` yourself.
 
+### Re-setup &amp; Force Setup
+
+When you reinstall the agent runner on a device that was previously configured, the existing configuration (SSH hosts, authentication tokens, relay settings) is reused from the first run. This means new SSH hosts won't be discovered and stale settings won't be refreshed.
+
+To force a full re-setup:
+
+```bash
+npx @astroanywhere/agent@latest launch --force-setup
+```
+
+This re-runs the entire setup flow: re-detects AI agents, re-discovers SSH hosts, re-authenticates with the relay, and updates all stored configuration. Use this when:
+
+- You've added new SSH hosts to `~/.ssh/config`
+- Authentication tokens have expired or changed
+- You've installed or removed AI agents
+- The agent runner was updated to a new version with config changes
+- Remote hosts were reconfigured or replaced
+
+You can also run setup independently without starting the agent:
+
+```bash
+npx @astroanywhere/agent@latest setup --with-ssh-config
+```
+
+---
+
+## Commands
+
+The agent runner provides several commands for managing your setup:
+
+| Command | Description |
+|---|---|
+| `launch` | Setup (if needed) + start &mdash; the recommended one-command entry point |
+| `start` | Start the agent runner (assumes setup is already complete) |
+| `stop` | Stop the running agent process |
+| `status` | Show current agent status, machine info, and connection state |
+| `logs` | View agent runner logs (`-f` to follow, `-n` for line count, `--host` for remote) |
+| `setup` | Run initial setup independently (detect agents, authenticate, configure relay) |
+| `auth` | Set or clear Claude OAuth token for agent SDK authentication |
+| `config` | Show, modify, reset, or import configuration |
+| `providers` | List detected AI agent providers on this machine |
+| `resources` | Show machine hardware (CPU, memory, GPU) |
+| `hosts` | Discover remote hosts from SSH config |
+| `connect` | Alias for `start --foreground` &mdash; run in the current terminal |
+| `mcp` | Start MCP server for Claude Code integration (stdio mode) |
+
+### Common Options
+
+**`launch`** supports all setup and start options in one command:
+
+```bash
+# Force re-setup + start in foreground
+npx @astroanywhere/agent@latest launch --force-setup -f
+
+# Skip SSH discovery (local-only mode)
+npx @astroanywhere/agent@latest launch --no-ssh-config
+
+# Skip remote host launching (setup SSH but only run local)
+npx @astroanywhere/agent@latest launch --no-launch-all
+
+# Non-interactive mode (for scripts and batch jobs)
+npx @astroanywhere/agent@latest launch --non-interactive --no-ssh-config
+```
+
+**`start`** controls the runtime behavior:
+
+```bash
+# Run in foreground with debug logging
+npx @astroanywhere/agent@latest start -f --log-level debug
+
+# Limit concurrent tasks
+npx @astroanywhere/agent@latest start --max-tasks 2
+
+# Keep worktrees after task completion (for debugging)
+npx @astroanywhere/agent@latest start --preserve-worktrees
+```
+
+**`logs`** helps with troubleshooting:
+
+```bash
+# Follow logs in real time
+npx @astroanywhere/agent@latest logs -f
+
+# Show last 100 lines
+npx @astroanywhere/agent@latest logs -n 100
+
+# View logs from a remote host
+npx @astroanywhere/agent@latest logs --host hpc-login
+```
+
 ---
 
 ## Key Features
@@ -213,13 +303,17 @@ We auto-detect authentication from Claude Code CLI sessions, environment variabl
 claude setup-token
 ```
 
-Copy the token from the output and add it to your shell config (e.g., `~/.bashrc`):
+Copy the token from the output and add it to your shell config:
 
 ```bash
-export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>
-```
+# macOS (zsh)
+echo 'export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>' >> ~/.zshrc
+source ~/.zshrc
 
-Restart your shell or run `source ~/.bashrc` before re-running setup.
+# Linux (bash)
+echo 'export CLAUDE_CODE_OAUTH_TOKEN=<paste-token-here>' >> ~/.bashrc
+source ~/.bashrc
+```
 
 ### 3. GitHub-Native Workflow
 
