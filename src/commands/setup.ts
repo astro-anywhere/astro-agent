@@ -11,6 +11,7 @@ import { hostname as osHostname } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from '../lib/config.js';
+import { detectClaudeAuth } from '../lib/claude-auth.js';
 import { detectProviders } from '../lib/providers.js';
 import { getMachineResources, formatResourceSummary } from '../lib/resources.js';
 import { discoverRemoteHosts } from '../lib/ssh-discovery.js';
@@ -243,10 +244,13 @@ export async function setupCommand(options: SetupOptions = {}): Promise<SetupRes
     console.log(chalk.bold('Claude SDK Authentication\n'));
 
     const hasExistingToken = !!config.getClaudeOauthToken();
-    const hasEnvToken = !!process.env.CLAUDE_CODE_OAUTH_TOKEN || !!process.env.ANTHROPIC_API_KEY;
+    const envAuth = detectClaudeAuth();
 
-    if (hasEnvToken) {
-      console.log(chalk.green('✓ Claude authentication detected via environment variable\n'));
+    if (envAuth) {
+      const status = envAuth.complete
+        ? chalk.green(`✓ Claude authentication detected: ${envAuth.label}`)
+        : chalk.yellow(`⚠ Claude authentication partially configured: ${envAuth.label}\n  Missing: ${envAuth.missing?.join(', ')}`);
+      console.log(status + '\n');
     } else if (hasExistingToken) {
       console.log(chalk.green('✓ Claude OAuth token already configured\n'));
       const { reconfigure } = await inquirer.prompt<{ reconfigure: boolean }>([
