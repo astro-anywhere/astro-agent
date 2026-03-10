@@ -210,8 +210,19 @@ export class SlurmJobMonitor {
       // Layer 3: sacct failed — increment failure count and untrack after threshold
       job.pollFailures++;
       if (job.pollFailures >= MAX_POLL_FAILURES) {
-        console.warn(`[slurm-monitor] Job ${slurmJobId} unreachable after ${MAX_POLL_FAILURES} polls — untracking`);
+        console.warn(`[slurm-monitor] Job ${slurmJobId} unreachable after ${MAX_POLL_FAILURES} polls — sending failure and untracking`);
+        this.wsClient.sendTaskResult({
+          taskId: executionId,
+          status: 'failed',
+          error: `Slurm job ${slurmJobId} unreachable after ${MAX_POLL_FAILURES} poll failures`,
+          completedAt: new Date().toISOString(),
+        });
         this.untrackJob(slurmJobId);
+        // Remove from heartbeat if no other jobs remain for this execution
+        const remaining = this.getJobsForExecution(executionId);
+        if (remaining.length === 0) {
+          this.wsClient.removeActiveTask(executionId);
+        }
       }
       return;
     }
@@ -244,12 +255,15 @@ export class SlurmJobMonitor {
         };
 
         this.wsClient.sendTaskResult(result);
-        // Remove from heartbeat AFTER sending result — same ordering invariant
-        // as the rest of the codebase. For deferred Slurm tasks, the executeTask
-        // finally block skips removeActiveTask, so this is the authoritative removal.
-        this.wsClient.removeActiveTask(executionId);
         console.log(`[slurm-monitor] Job ${slurmJobId} terminal: ${state}`);
         this.untrackJob(slurmJobId);
+
+        // Only remove from heartbeat when this was the last tracked job for the
+        // execution. Otherwise other Slurm jobs for the same task are still running.
+        const remaining = this.getJobsForExecution(executionId);
+        if (remaining.length === 0) {
+          this.wsClient.removeActiveTask(executionId);
+        }
       } else {
         // Non-terminal state change — send progress
         const progress = state === 'RUNNING' ? 50 : state === 'PENDING' ? 10 : 25;
