@@ -201,6 +201,165 @@ npx @astroanywhere/agent@latest setup --with-ssh-config
 
 ---
 
+# How to Use Astro
+
+Four ways to use Astro, from simplest to most flexible.
+
+---
+
+## 1. Try the Built-in Templates
+
+The fastest way to see Astro in action. Each template is a pre-built workflow that generates a complete deliverable &mdash; just provide your inputs.
+
+<p align="center">
+  <img src="docs/usage-examples.svg" alt="Built-in templates workflow" width="800"/>
+</p>
+
+### Moat &amp; Fragility Analysis
+
+Generate a comprehensive stock analysis report with competitive advantage scoring, moat assessment (7 Powers framework), and anti-fragility rating.
+
+**What you provide:**
+- Ticker symbols (e.g., `AAPL, GOOG, MSFT`)
+- A working directory for output files
+
+**What you get:** PDF report with charts, scoring tables, and investment recommendations.
+
+```
+Create a new project → select "Moat & Fragility Analysis" template
+→ enter tickers and output directory → Astro generates plan → execute
+```
+
+### Academic Paper Review
+
+Generate a structured peer review with scoring rubric, methodology critique, and improvement suggestions.
+
+**What you provide:**
+- A PDF of the paper (or arXiv URL)
+- A working directory for the review output
+
+**What you get:** Detailed review document following conference standards.
+
+### Academic Presentation
+
+Generate conference-ready presentation slides from a research paper.
+
+**What you provide:**
+- A PDF of the paper (or arXiv URL)
+- A working directory for the slides
+
+**What you get:** Slide deck with figures, key results, and speaker notes.
+
+> **All templates run as parallel task graphs.** Astro decomposes the work into independent subtasks (data collection, analysis, writing) and executes them across your machines simultaneously.
+
+---
+
+## 2. Plan &amp; Execute Complex Tasks
+
+For tasks that don't fit a template &mdash; building features, refactoring codebases, writing research pipelines. Describe your goal in natural language and let Astro decompose it into a dependency graph of tasks.
+
+<p align="center">
+  <img src="docs/usage-plan-execute.svg" alt="Plan and execute workflow" width="800"/>
+</p>
+
+### The Workflow
+
+**Step 1 &mdash; Describe your goal.** Write what you want to achieve in plain language. Point Astro at a repository or working directory.
+
+```
+"Build a REST API with authentication, CRUD endpoints for users and posts,
+ database migrations, and comprehensive test coverage"
+```
+
+**Step 2 &mdash; AI generates a plan.** Astro creates a dependency graph of tasks, each with a clear scope, estimated effort, and dependencies. You see the full graph before anything executes.
+
+**Step 3 &mdash; Review and refine.** You can:
+- **Chat with the planning agent** to replan &mdash; *"Split the auth task into JWT and OAuth"*
+- **Edit tasks directly** &mdash; add, remove, reorder, change descriptions
+- **Adjust dependencies** &mdash; make tasks parallel or sequential
+
+**Step 4 &mdash; Execute.** Tasks dispatch to your machines in dependency order. Independent tasks run in parallel on separate git branches. You get real-time visibility into every agent session.
+
+**Step 5 &mdash; Steer mid-flight.** While tasks execute, you can:
+- **Send guidance** to a running agent &mdash; *"Use Postgres instead of SQLite"*
+- **Approve or reject** tool calls and file changes
+- **Replan remaining tasks** based on what you've seen so far
+
+Each completed task produces a pull request (or commits, depending on your delivery mode). Review and merge at your pace.
+
+---
+
+## 3. Custom Projects &amp; Task Graphs
+
+For recurring workflows or custom pipelines, create your own projects with hand-crafted task graphs. Mix independent and dependent tasks to model any workflow.
+
+<p align="center">
+  <img src="docs/usage-custom-tasks.svg" alt="Custom task graphs" width="800"/>
+</p>
+
+### Example: Daily Research Digest
+
+Create a project called **"Daily Research Digest"** with three tasks:
+
+| Task | Dependencies | What it does |
+|---|---|---|
+| **Scrape trending from X/Twitter** | None | Collect today's trending topics in AI/ML |
+| **Get top papers from HuggingFace** | None | Fetch today's top papers from Daily Papers |
+| **Summarize &amp; generate report** | Both above | Combine sources into a Markdown digest |
+
+The first two tasks run **in parallel** (no dependencies). The summary task waits for both to finish, then produces the final report.
+
+### Example: Data Pipeline
+
+Create a sequential pipeline where each step depends on the previous:
+
+```
+Collect Data → Process & Analyze → Generate Report → Done
+```
+
+### Example: Multi-Feature Development
+
+Create parallel feature branches that merge independently:
+
+| Task | Dependencies | Delivery |
+|---|---|---|
+| Add user authentication | None | PR to `main` |
+| Build API endpoints | None | PR to `main` |
+| Write database migrations | None | PR to `main` |
+| Integration tests | All three above | PR to `main` |
+
+Three features develop in parallel on isolated git worktrees. The integration test task waits for all three, then runs against the combined code.
+
+### How to Create Custom Tasks
+
+1. **Create a project** in the Dashboard &mdash; give it a name and point it at a directory or repo
+2. **Add tasks manually** &mdash; each task has a title, description, and optional dependencies
+3. **Draw dependencies** &mdash; connect tasks in the graph view to define execution order
+4. **Execute** &mdash; Astro dispatches tasks respecting the dependency graph
+
+---
+
+## 4. Playground &mdash; Single Agent Sessions
+
+For quick, one-off tasks that don't need planning. The Playground launches a direct **Claude Code** or **Codex** session on any of your registered machines.
+
+```
+Open Playground → pick a machine → describe what you want → go
+```
+
+This is equivalent to opening a terminal and running `claude` or `codex` directly, but with:
+- **Machine selection** &mdash; run on your laptop, a GPU server, or an HPC node
+- **Full observability** &mdash; see the session from any device, no terminal needed
+- **Session persistence** &mdash; close the browser, come back later, the session is still there
+- **Steering** &mdash; send messages to the agent mid-execution from the Dashboard
+
+Use Playground when you want to:
+- Quickly prototype or debug something on a specific machine
+- Run a one-off analysis without creating a full project
+- Test an agent on a new codebase before committing to a plan
+
+---
+
 ## Authentication
 
 > **Key concept:** Astro does not access your API keys directly. The agent runner spawns AI agents (Claude Code, Codex, etc.) as subprocesses and passes your shell environment through. Each agent handles its own authentication using its own credentials. Your keys never leave your machine and Astro never sees them.
