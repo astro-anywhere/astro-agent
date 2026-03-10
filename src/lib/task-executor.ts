@@ -389,6 +389,11 @@ export class TaskExecutor {
         status: 'cancelled',
         completedAt: new Date().toISOString(),
       });
+      // Queued tasks are in activeTasks (added by handleTaskDispatch) but not
+      // in runningTasks. handleTaskCancel already called activeTasks.delete
+      // before reaching here, so this is a defensive no-op in the normal flow,
+      // but ensures cleanup if cancelTask is ever called from another path.
+      this.wsClient.removeActiveTask(taskId);
       return true;
     }
 
@@ -486,16 +491,18 @@ export class TaskExecutor {
         status: 'cancelled',
         completedAt: new Date().toISOString(),
       });
+      this.wsClient.removeActiveTask(taskId);
     }
     this.runningTasks.clear();
 
-    // Clear queue
+    // Clear queue — queued tasks may be in activeTasks (added in handleTaskDispatch)
     for (const task of this.taskQueue) {
       this.wsClient.sendTaskResult({
         taskId: task.id,
         status: 'cancelled',
         completedAt: new Date().toISOString(),
       });
+      this.wsClient.removeActiveTask(task.id);
     }
     this.taskQueue = [];
 
@@ -912,6 +919,7 @@ export class TaskExecutor {
             error: `Failed to initialize git: ${error instanceof Error ? error.message : String(error)}`,
             completedAt: new Date().toISOString(),
           });
+          this.wsClient.removeActiveTask(task.id);
         }
         break;
 
@@ -922,6 +930,7 @@ export class TaskExecutor {
           status: 'cancelled',
           completedAt: new Date().toISOString(),
         });
+        this.wsClient.removeActiveTask(task.id);
         break;
     }
   }
@@ -1007,6 +1016,8 @@ export class TaskExecutor {
           error: `Sandbox creation failed: ${errorMsg}`,
           completedAt: new Date().toISOString(),
         });
+        this.runningTasks.delete(task.id);
+        this.wsClient.removeActiveTask(task.id);
         this.untrackTaskDirectory(task);
         this.processQueue();
         return;
@@ -1026,6 +1037,8 @@ export class TaskExecutor {
         completedAt: new Date().toISOString(),
       });
       if (sandbox) await sandbox.cleanup();
+      this.runningTasks.delete(task.id);
+      this.wsClient.removeActiveTask(task.id);
       this.untrackTaskDirectory(task);
       this.processQueue();
       return;
@@ -1090,8 +1103,10 @@ export class TaskExecutor {
         : await this.prepareTaskWorkspace(normalizedTask, stream);
     } catch (prepErr) {
       this.runningTasks.delete(normalizedTask.id);
-      this.wsClient.removeActiveTask(normalizedTask.id);
       this.untrackTaskDirectory(task);
+      // Do NOT removeActiveTask here — the caller's catch will send
+      // sendTaskResult first, then removeActiveTask. Removing from heartbeat
+      // before the result is sent is the exact race this PR fixes.
       throw prepErr;
     }
     const taskWithWorkspace = { ...normalizedTask, workingDirectory: prepared.workingDirectory };
@@ -1563,7 +1578,17 @@ export class TaskExecutor {
       this.untrackTaskDirectory(task);
 
       this.runningTasks.delete(task.id);
-      this.wsClient.removeActiveTask(task.id);
+
+      // If Slurm jobs are still tracked for this task, keep it in the heartbeat
+      // so the server's dead-job detector doesn't flag it prematurely. The
+      // SlurmJobMonitor will call removeActiveTask after sending the final result.
+      const deferredJobs = this.jobMonitor.getJobsForExecution(task.id);
+      if (deferredJobs.length === 0) {
+        this.wsClient.removeActiveTask(task.id);
+      } else {
+        console.log(`[executor] Task ${task.id}: ${deferredJobs.length} Slurm job(s) still running — keeping in heartbeat until completion`);
+      }
+
       this.processQueue();
     }
   }
@@ -1835,6 +1860,7 @@ export class TaskExecutor {
             completedAt: new Date().toISOString(),
           });
           this.runningTasks.delete(task.id);
+          this.wsClient.removeActiveTask(task.id);
           this.untrackTaskDirectory(task);
           this.processQueue();
         });
