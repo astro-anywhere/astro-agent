@@ -287,10 +287,14 @@ export class TaskExecutor {
 
     if (!isTextOnlyTask && task.skipSafetyCheck) {
       // Server already approved safety for this directory — skip the prompt.
-      // Still need to handle init-git if directory isn't a git repo.
-      const needsGitInit = this.gitAvailable && !(await isGitRepo(normalizedTask.workingDirectory));
-      if (needsGitInit) {
-        await initializeGit(normalizedTask.workingDirectory);
+      // Only init git when the original safety decision was 'init-git'.
+      // When safetyDecision is 'proceed' (user chose non-git direct execution)
+      // or undefined (builtin template, text-only, etc.), skip git init entirely.
+      if (normalizedTask.safetyDecision === 'init-git') {
+        const needsGitInit = this.gitAvailable && !(await isGitRepo(normalizedTask.workingDirectory));
+        if (needsGitInit) {
+          await initializeGit(normalizedTask.workingDirectory);
+        }
       }
       this.trackTaskDirectory(normalizedTask);
       if (this.runningTasks.size < this.maxConcurrentTasks) {
