@@ -486,16 +486,18 @@ export class TaskExecutor {
         status: 'cancelled',
         completedAt: new Date().toISOString(),
       });
+      this.wsClient.removeActiveTask(taskId);
     }
     this.runningTasks.clear();
 
-    // Clear queue
+    // Clear queue — queued tasks may be in activeTasks (added in handleTaskDispatch)
     for (const task of this.taskQueue) {
       this.wsClient.sendTaskResult({
         taskId: task.id,
         status: 'cancelled',
         completedAt: new Date().toISOString(),
       });
+      this.wsClient.removeActiveTask(task.id);
     }
     this.taskQueue = [];
 
