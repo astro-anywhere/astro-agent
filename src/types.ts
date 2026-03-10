@@ -186,6 +186,12 @@ export interface Task {
   /** Skip safety check — server already approved this working directory */
   skipSafetyCheck?: boolean;
 
+  /** The original safety decision that caused skipSafetyCheck to be set.
+   *  'proceed' = user chose non-git direct execution (do NOT init git).
+   *  'init-git' = user chose to initialize git (init git if not already done).
+   *  undefined = builtin template, text-only task, or other auto-skip reason. */
+  safetyDecision?: 'proceed' | 'init-git';
+
   /** Base URL of the Astro server — used for linking back to tasks in PR bodies */
   astroBaseUrl?: string;
 
