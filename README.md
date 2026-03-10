@@ -299,7 +299,7 @@ For recurring workflows or custom pipelines, create your own projects with hand-
 
 ### Example: Daily Research Digest
 
-Create a project called **"Daily Research Digest"** with three tasks:
+Create a project called **"Daily Research Digest"** with three tasks, or [click to import](https://astroanywhere.com/share/de2f74d9-c451-4bca-99bd-7f3797519e7d):
 
 | Task | Dependencies | What it does |
 |---|---|---|
