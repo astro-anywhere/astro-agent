@@ -140,7 +140,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     try {
       const abortController = new AbortController();
 
-      // Minimal prompt to check authentication
+      // Minimal prompt to check authentication.
+      // Pass env and executable path so Bedrock/Vertex/third-party auth works.
       const gen = query({
         prompt: 'respond with ok',
         options: {
@@ -149,6 +150,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           permissionMode: 'plan',
           tools: [],
           persistSession: true,
+          ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
+          env: { ...process.env },
         },
       });
 
@@ -1202,12 +1205,13 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       errorMessage =
         'Claude Code is not authenticated on this machine. The CLI reported "Not logged in · Please run /login".\n\n' +
         'The Mac keychain credential is not accessible (common on remote or headless machines).\n' +
-        'To fix this, generate a Claude auth token on an authenticated machine:\n' +
-        '  1. Run: claude setup-token\n' +
-        '  2. Set the token in the agent environment: CLAUDE_CODE_OAUTH_TOKEN=<token>\n' +
-        '     (add it to ~/.astro/config.json under "environment" or export it in your shell)\n' +
-        '  3. Alternatively, set ANTHROPIC_API_KEY to use direct API key authentication.';
-      stream.status('failed', progress, 'Authentication error: Claude Code not logged in — set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY');
+        'To fix this, configure one of the following authentication methods:\n' +
+        '  1. OAuth token: export CLAUDE_CODE_OAUTH_TOKEN=<token> (run `claude setup-token` first)\n' +
+        '  2. API key: export ANTHROPIC_API_KEY=sk-ant-...\n' +
+        '  3. Bedrock: export CLAUDE_CODE_USE_BEDROCK=1 AWS_REGION=us-west-2 AWS_PROFILE=default\n' +
+        '  4. Vertex AI: export CLAUDE_CODE_USE_VERTEX=1 CLOUD_ML_REGION=us-east5 ANTHROPIC_VERTEX_PROJECT_ID=...\n' +
+        '  (add to your shell profile or ~/.astro/config.json under "environment")';
+      stream.status('failed', progress, 'Authentication error: Claude Code not logged in — set CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, or configure Bedrock/Vertex');
     }
 
     return {
