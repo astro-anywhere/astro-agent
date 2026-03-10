@@ -480,8 +480,10 @@ export class WebSocketClient {
     };
     this.send(msg);
 
-    // Remove from active tasks
-    this.activeTasks.delete(result.taskId);
+    // Do NOT remove from activeTasks here — keep the task in the heartbeat
+    // so the server's dead job checker doesn't flag it as dead before the
+    // result message is delivered. The task-executor's finally block calls
+    // removeActiveTask() after cleanup, which is the authoritative removal.
   }
 
   /**
