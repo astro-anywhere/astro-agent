@@ -244,6 +244,10 @@ export class SlurmJobMonitor {
         };
 
         this.wsClient.sendTaskResult(result);
+        // Remove from heartbeat AFTER sending result — same ordering invariant
+        // as the rest of the codebase. For deferred Slurm tasks, the executeTask
+        // finally block skips removeActiveTask, so this is the authoritative removal.
+        this.wsClient.removeActiveTask(executionId);
         console.log(`[slurm-monitor] Job ${slurmJobId} terminal: ${state}`);
         this.untrackJob(slurmJobId);
       } else {

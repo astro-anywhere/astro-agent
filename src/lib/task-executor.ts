@@ -1573,7 +1573,17 @@ export class TaskExecutor {
       this.untrackTaskDirectory(task);
 
       this.runningTasks.delete(task.id);
-      this.wsClient.removeActiveTask(task.id);
+
+      // If Slurm jobs are still tracked for this task, keep it in the heartbeat
+      // so the server's dead-job detector doesn't flag it prematurely. The
+      // SlurmJobMonitor will call removeActiveTask after sending the final result.
+      const deferredJobs = this.jobMonitor.getJobsForExecution(task.id);
+      if (deferredJobs.length === 0) {
+        this.wsClient.removeActiveTask(task.id);
+      } else {
+        console.log(`[executor] Task ${task.id}: keeping in heartbeat for ${deferredJobs.length} deferred Slurm job(s)`);
+      }
+
       this.processQueue();
     }
   }
