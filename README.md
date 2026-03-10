@@ -365,6 +365,9 @@ npx @astroanywhere/agent@latest start --preserve-worktrees
 # Follow logs in real time
 npx @astroanywhere/agent@latest logs -f
 
+# Filter logs for a specific task
+npx @astroanywhere/agent@latest logs -f | grep "taskId"
+
 # Show last 100 lines
 npx @astroanywhere/agent@latest logs -n 100
 
