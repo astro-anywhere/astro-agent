@@ -389,10 +389,12 @@ export class TaskExecutor {
         status: 'cancelled',
         completedAt: new Date().toISOString(),
       });
-      // Queued tasks are in activeTasks (added by handleTaskDispatch) but not
-      // in runningTasks. handleTaskCancel already called activeTasks.delete
-      // before reaching here, so this is a defensive no-op in the normal flow,
-      // but ensures cleanup if cancelTask is ever called from another path.
+      // Note: for cancellation the ordering is reversed compared to
+      // completion/failure paths (which do sendTaskResult → removeActiveTask).
+      // handleTaskCancel in websocket-client.ts removes from activeTasks BEFORE
+      // calling onTaskCancel, so the task is already gone from the heartbeat by
+      // the time we reach here. This defensive call is a no-op in the normal
+      // cancel flow, but ensures cleanup if cancelTask is ever called directly.
       this.wsClient.removeActiveTask(taskId);
       return true;
     }
