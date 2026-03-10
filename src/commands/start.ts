@@ -450,6 +450,8 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           error: `Safety decision handling failed: ${error instanceof Error ? error.message : String(error)}`,
           completedAt: new Date().toISOString(),
         });
+        // Remove from heartbeat — sendTaskResult no longer does this automatically.
+        wsClient.removeActiveTask(taskId);
       });
     },
     onTaskSteer: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string) => {

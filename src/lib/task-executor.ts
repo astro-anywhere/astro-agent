@@ -914,6 +914,7 @@ export class TaskExecutor {
             error: `Failed to initialize git: ${error instanceof Error ? error.message : String(error)}`,
             completedAt: new Date().toISOString(),
           });
+          this.wsClient.removeActiveTask(task.id);
         }
         break;
 
@@ -924,6 +925,7 @@ export class TaskExecutor {
           status: 'cancelled',
           completedAt: new Date().toISOString(),
         });
+        this.wsClient.removeActiveTask(task.id);
         break;
     }
   }
