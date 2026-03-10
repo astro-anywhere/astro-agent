@@ -121,8 +121,16 @@ export async function createWorktree(
     }
   }
 
-  // Detect the repo's default branch (main/master/develop) for fallback
-  const defaultBranch = dispatchBaseBranch ?? await readBaseBranch(gitRoot, agentDirName) ?? await getDefaultBranch(gitRoot);
+  // Detect the repo's default branch (main/master/develop) for fallback.
+  // Validate dispatch-provided baseBranch exists before using it.
+  // The server may send 'main' as a default even for repos where 'main' doesn't exist
+  // (e.g., non-git directories that later gained a git repo via agent init).
+  const dispatchBranchValid = dispatchBaseBranch
+    && (await refExists(gitRoot, `refs/heads/${dispatchBaseBranch}`)
+      || await refExists(gitRoot, `refs/remotes/origin/${dispatchBaseBranch}`));
+  const defaultBranch = (dispatchBranchValid ? dispatchBaseBranch : null)
+    ?? await readBaseBranch(gitRoot, agentDirName)
+    ?? await getDefaultBranch(gitRoot);
 
   // Ensure the project branch exists on origin. If this is the first task,
   // create it from origin/{defaultBranch}. Idempotent.
@@ -644,6 +652,19 @@ async function getDefaultBranch(gitRoot: string): Promise<string> {
     );
     const branch = stdout.trim();
     if (branch && branch !== 'HEAD') return branch;
+  } catch {
+    // Fallback
+  }
+
+  // 6. Any local branch (last resort before hardcoded 'main')
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', gitRoot, 'branch', '--format=%(refname:short)'],
+      { env: withGitEnv(), timeout: 5_000 }
+    );
+    const branches = stdout.trim().split('\n').filter(b => b.trim());
+    if (branches.length > 0) return branches[0];
   } catch {
     // Fallback
   }
