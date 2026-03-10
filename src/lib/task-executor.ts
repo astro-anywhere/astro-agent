@@ -337,8 +337,10 @@ export class TaskExecutor {
       }
     }
 
-    // Track task by directory
-    this.trackTaskDirectory(normalizedTask);
+    // Track task by directory (skip for text-only tasks without a working directory)
+    if (normalizedTask.workingDirectory) {
+      this.trackTaskDirectory(normalizedTask);
+    }
 
     // Check if we can run immediately
     if (this.runningTasks.size < this.maxConcurrentTasks) {
@@ -973,6 +975,7 @@ export class TaskExecutor {
    * Untrack task from directory
    */
   private untrackTaskDirectory(task: Task): void {
+    if (!task.workingDirectory) return;
     const key = this.canonicalDirKey(task.workingDirectory);
     const tasks = this.tasksByDirectory.get(key);
     if (tasks) {
