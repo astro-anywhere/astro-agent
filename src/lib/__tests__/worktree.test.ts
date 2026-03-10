@@ -352,4 +352,153 @@ describe('createWorktree', () => {
     // Trailing slash is resolved by path.resolve(), .astro/worktrees goes inside git root
     expect(mockMkdir).toHaveBeenCalledWith('/project/.astro/worktrees', { recursive: true });
   });
+
+  it('should fall back to auto-detection when dispatchBaseBranch does not exist as a ref', async () => {
+    mockExecFileAsync
+      .mockResolvedValueOnce({ stdout: '/project\n' })         // 0: getGitRoot
+      .mockResolvedValueOnce({ stdout: '' })                    // 1: hasCommits
+      .mockResolvedValueOnce({ stdout: '' })                    // 2: pruneWorktrees
+      .mockResolvedValueOnce({ stdout: '' })                    // 3: removeLingeringWorktrees: list
+      .mockResolvedValueOnce({ stdout: '' })                    // 4: ensureBranchAvailable
+      .mockResolvedValueOnce({ stdout: '' })                    // 5: deleteRemoteBranch
+      .mockResolvedValueOnce({ stdout: '' })                    // 6: repoHasRemote (no remote → skip fetch)
+      .mockRejectedValueOnce(new Error('not a ref'))            // 7: refExists refs/heads/main → does not exist
+      .mockRejectedValueOnce(new Error('not a ref'))            // 8: refExists refs/remotes/origin/main → does not exist
+      // readBaseBranch: mockReadFile returns '' → JSON.parse fails → null
+      // getDefaultBranch fallback chain:
+      .mockRejectedValueOnce(new Error('no symbolic-ref'))      // 9: step 2: symbolic-ref
+      .mockRejectedValueOnce(new Error('no remote branches'))   // 10: step 3: branch -r
+      .mockRejectedValueOnce(new Error('no local branches'))    // 11: step 4: branch --list
+      .mockResolvedValueOnce({ stdout: 'astro/c6fdf6\n' })     // 12: step 5: rev-parse --abbrev-ref HEAD → returns 'astro/c6fdf6'
+      .mockRejectedValueOnce(new Error('no remote ref'))        // 13: refExists origin/astro/c6fdf6 (line 156)
+      .mockRejectedValueOnce(new Error('no sha'))               // 14: commitBeforeSha (caught)
+      .mockResolvedValueOnce({ stdout: '' });                   // 15: git worktree add
+
+    mockMkdir.mockResolvedValue(undefined);
+
+    const result = await createWorktree({
+      workingDirectory: '/project',
+      taskId: 'test-task-fallback',
+      baseBranch: 'main', // server sends 'main' but it doesn't exist
+    });
+
+    expect(result).not.toBeNull();
+    // The worktree add should use 'astro/c6fdf6' (auto-detected), NOT 'main'
+    const worktreeAddCall = mockExecFileAsync.mock.calls.find(
+      (call: unknown[]) => Array.isArray(call[1]) && (call[1] as string[]).includes('worktree')
+        && (call[1] as string[]).includes('add')
+    );
+    expect(worktreeAddCall).toBeDefined();
+    // startPoint should be 'astro/c6fdf6' (not 'main'), since refExists for origin/ also failed
+    expect((worktreeAddCall![1] as string[])).toContain('astro/c6fdf6');
+    expect((worktreeAddCall![1] as string[])).not.toContain('main');
+    expect((worktreeAddCall![1] as string[])).not.toContain('origin/main');
+  });
+
+  it('should use dispatchBaseBranch when it exists as a valid local ref', async () => {
+    mockExecFileAsync
+      .mockResolvedValueOnce({ stdout: '/project\n' })         // 0: getGitRoot
+      .mockResolvedValueOnce({ stdout: '' })                    // 1: hasCommits
+      .mockResolvedValueOnce({ stdout: '' })                    // 2: pruneWorktrees
+      .mockResolvedValueOnce({ stdout: '' })                    // 3: removeLingeringWorktrees: list
+      .mockResolvedValueOnce({ stdout: '' })                    // 4: ensureBranchAvailable
+      .mockResolvedValueOnce({ stdout: '' })                    // 5: deleteRemoteBranch
+      .mockResolvedValueOnce({ stdout: '' })                    // 6: repoHasRemote (no remote → skip fetch)
+      .mockResolvedValueOnce({ stdout: 'abc123\n' })            // 7: refExists refs/heads/main → exists!
+      // dispatchBranchValid = true → uses 'main' directly
+      .mockRejectedValueOnce(new Error('no remote ref'))        // 8: refExists origin/main (line 156)
+      .mockRejectedValueOnce(new Error('no sha'))               // 9: commitBeforeSha (caught)
+      .mockResolvedValueOnce({ stdout: '' });                   // 10: git worktree add
+
+    mockMkdir.mockResolvedValue(undefined);
+
+    const result = await createWorktree({
+      workingDirectory: '/project',
+      taskId: 'test-task-valid-dispatch',
+      baseBranch: 'main', // 'main' exists locally
+    });
+
+    expect(result).not.toBeNull();
+    // The worktree add should use 'main' as the start point
+    const worktreeAddCall = mockExecFileAsync.mock.calls.find(
+      (call: unknown[]) => Array.isArray(call[1]) && (call[1] as string[]).includes('worktree')
+        && (call[1] as string[]).includes('add')
+    );
+    expect(worktreeAddCall).toBeDefined();
+    expect((worktreeAddCall![1] as string[])).toContain('main');
+  });
+
+  it('should use dispatchBaseBranch when it exists only as a remote ref', async () => {
+    mockExecFileAsync
+      .mockResolvedValueOnce({ stdout: '/project\n' })         // 0: getGitRoot
+      .mockResolvedValueOnce({ stdout: '' })                    // 1: hasCommits
+      .mockResolvedValueOnce({ stdout: '' })                    // 2: pruneWorktrees
+      .mockResolvedValueOnce({ stdout: '' })                    // 3: removeLingeringWorktrees: list
+      .mockResolvedValueOnce({ stdout: '' })                    // 4: ensureBranchAvailable
+      .mockResolvedValueOnce({ stdout: '' })                    // 5: deleteRemoteBranch
+      .mockResolvedValueOnce({ stdout: '' })                    // 6: repoHasRemote (no remote → skip fetch)
+      .mockRejectedValueOnce(new Error('not a ref'))            // 7: refExists refs/heads/main → does not exist locally
+      .mockResolvedValueOnce({ stdout: 'abc123\n' })            // 8: refExists refs/remotes/origin/main → exists on remote!
+      // dispatchBranchValid = true → uses 'main' directly
+      .mockResolvedValueOnce({ stdout: 'abc123\n' })            // 9: refExists origin/main (line 156 — has remote ref)
+      .mockResolvedValueOnce({ stdout: 'abc123\n' })            // 10: commitBeforeSha
+      .mockResolvedValueOnce({ stdout: '' });                   // 11: git worktree add
+
+    mockMkdir.mockResolvedValue(undefined);
+
+    const result = await createWorktree({
+      workingDirectory: '/project',
+      taskId: 'test-task-remote-dispatch',
+      baseBranch: 'main', // 'main' exists on remote only
+    });
+
+    expect(result).not.toBeNull();
+    // The worktree add should use 'origin/main' as start point (since remote ref exists)
+    const worktreeAddCall = mockExecFileAsync.mock.calls.find(
+      (call: unknown[]) => Array.isArray(call[1]) && (call[1] as string[]).includes('worktree')
+        && (call[1] as string[]).includes('add')
+    );
+    expect(worktreeAddCall).toBeDefined();
+    expect((worktreeAddCall![1] as string[])).toContain('origin/main');
+  });
+
+  it('should return non-standard branch from getDefaultBranch when no standard branches exist', async () => {
+    // This tests Fix 2: getDefaultBranch step 6 — enumerate any local branch
+    mockExecFileAsync
+      .mockResolvedValueOnce({ stdout: '/project\n' })         // 0: getGitRoot
+      .mockResolvedValueOnce({ stdout: '' })                    // 1: hasCommits
+      .mockResolvedValueOnce({ stdout: '' })                    // 2: pruneWorktrees
+      .mockResolvedValueOnce({ stdout: '' })                    // 3: removeLingeringWorktrees: list
+      .mockResolvedValueOnce({ stdout: '' })                    // 4: ensureBranchAvailable
+      .mockResolvedValueOnce({ stdout: '' })                    // 5: deleteRemoteBranch
+      .mockResolvedValueOnce({ stdout: '' })                    // 6: repoHasRemote (no remote)
+      // No baseBranch passed → dispatchBaseBranch is undefined → skip refExists
+      // readBaseBranch: mockReadFile returns '' → fails → null
+      // getDefaultBranch fallback chain:
+      .mockRejectedValueOnce(new Error('no symbolic-ref'))      // 7: step 2: symbolic-ref
+      .mockRejectedValueOnce(new Error('no remote'))            // 8: step 3: branch -r
+      .mockRejectedValueOnce(new Error('no match'))             // 9: step 4: branch --list main/master
+      .mockResolvedValueOnce({ stdout: 'HEAD\n' })              // 10: step 5: rev-parse --abbrev-ref HEAD → detached HEAD
+      .mockResolvedValueOnce({ stdout: 'astro/c6fdf6-063f39\n' }) // 11: step 6: branch --format (new!) → non-standard branch
+      .mockRejectedValueOnce(new Error('no remote'))            // 12: refExists origin/astro/c6fdf6-063f39 (line 156)
+      .mockRejectedValueOnce(new Error('no sha'))               // 13: commitBeforeSha (caught)
+      .mockResolvedValueOnce({ stdout: '' });                   // 14: git worktree add
+
+    mockMkdir.mockResolvedValue(undefined);
+
+    const result = await createWorktree({
+      workingDirectory: '/project',
+      taskId: 'test-task-nonstandard',
+      // No baseBranch — force auto-detection via getDefaultBranch
+    });
+
+    expect(result).not.toBeNull();
+    // The worktree add should use 'astro/c6fdf6-063f39' (the only local branch)
+    const worktreeAddCall = mockExecFileAsync.mock.calls.find(
+      (call: unknown[]) => Array.isArray(call[1]) && (call[1] as string[]).includes('worktree')
+        && (call[1] as string[]).includes('add')
+    );
+    expect(worktreeAddCall).toBeDefined();
+    expect((worktreeAddCall![1] as string[])).toContain('astro/c6fdf6-063f39');
+  });
 });
