@@ -323,14 +323,16 @@ describe('processQueue catch sends sendTaskResult on executeTask failure', () =>
 });
 
 // ============================================================================
-// 4. WebSocketClient.sendTaskResult removes from activeTasks
+// 4. WebSocketClient.sendTaskResult does NOT remove from activeTasks
 // ============================================================================
 
-describe('sendTaskResult removes task from activeTasks (heartbeat)', () => {
-  it('activeTasks.delete is called inside sendTaskResult', () => {
-    // This verifies the contract: calling sendTaskResult automatically
-    // removes the task from the heartbeat's activeTasks Set.
-    // We read the source to confirm the pattern.
+describe('sendTaskResult keeps task in activeTasks (heartbeat)', () => {
+  it('sendTaskResult does NOT call activeTasks.delete — task stays in heartbeat', () => {
+    // After the dead-job detection fix, sendTaskResult no longer removes
+    // the task from activeTasks. The task stays in the heartbeat so the
+    // server's dead job checker doesn't flag it as dead before the result
+    // message is delivered. The task-executor's finally block calls
+    // removeActiveTask() after cleanup, which is the authoritative removal.
     const { readFileSync } = require('node:fs');
     const wsClientSource = readFileSync(
       join(process.cwd(), 'src/lib/websocket-client.ts'),
@@ -341,14 +343,62 @@ describe('sendTaskResult removes task from activeTasks (heartbeat)', () => {
     const methodStart = wsClientSource.indexOf('sendTaskResult(result: TaskResult)');
     expect(methodStart).toBeGreaterThan(-1);
 
-    // The method body should contain activeTasks.delete
-    const methodBody = wsClientSource.slice(methodStart, methodStart + 300);
-    expect(methodBody).toContain('this.activeTasks.delete(result.taskId)');
+    // The method body should NOT contain activeTasks.delete
+    const methodBody = wsClientSource.slice(methodStart, methodStart + 500);
+    expect(methodBody).not.toContain('this.activeTasks.delete');
+    // Should contain the explanatory comment about why we don't delete
+    expect(methodBody).toContain('Do NOT remove from activeTasks');
   });
 
-  it('sendTaskResult is the single point of cleanup for activeTasks', () => {
-    // Verify that onTaskDispatch catch does NOT call removeActiveTask separately —
-    // sendTaskResult handles it. This prevents double-removal confusion.
+  it('task-executor finally block calls removeActiveTask (authoritative removal)', () => {
+    // The finally block in executeTask (line ~1566) is the single point where
+    // tasks are removed from the heartbeat's activeTasks after normal execution.
+    const { readFileSync } = require('node:fs');
+    const executorSource = readFileSync(
+      join(process.cwd(), 'src/lib/task-executor.ts'),
+      'utf-8',
+    );
+
+    // Find removeActiveTask in executeTask. The prepareTaskWorkspace catch does
+    // NOT call removeActiveTask (it lets the caller handle it after sendTaskResult).
+    // The authoritative call site is in the executeTask finally block (~1574).
+    const callSites = [...executorSource.matchAll(/this\.wsClient\.removeActiveTask\(/g)];
+    expect(callSites.length).toBeGreaterThanOrEqual(1);
+
+    // The executeTask finally block should have removeActiveTask after cleanup
+    // Verify by checking the surrounding context of the second occurrence (line ~1566)
+    const lastCallIndex = callSites[callSites.length - 1].index!;
+    const surroundingBefore = executorSource.slice(Math.max(0, lastCallIndex - 200), lastCallIndex);
+    // Should be preceded by runningTasks.delete (both cleanup in the finally block)
+    expect(surroundingBefore).toContain('this.runningTasks.delete(task.id)');
+  });
+
+  it('prepareTaskWorkspace catch does NOT call removeActiveTask (caller handles it)', () => {
+    // The prepareTaskWorkspace catch re-throws — the caller's catch sends
+    // sendTaskResult then removeActiveTask. If prepareTaskWorkspace called
+    // removeActiveTask itself, the task would vanish from heartbeats before
+    // the server receives the failure result (the race this PR fixes).
+    const { readFileSync } = require('node:fs');
+    const executorSource = readFileSync(
+      join(process.cwd(), 'src/lib/task-executor.ts'),
+      'utf-8',
+    );
+
+    // Find the prepareTaskWorkspace catch block
+    const catchIdx = executorSource.indexOf('} catch (prepErr)');
+    expect(catchIdx).toBeGreaterThan(-1);
+    const catchBlock = executorSource.slice(catchIdx, catchIdx + 400);
+
+    // Must contain runningTasks.delete (free the slot immediately)
+    expect(catchBlock).toContain('this.runningTasks.delete(normalizedTask.id)');
+    // Must NOT call removeActiveTask (let caller handle after sendTaskResult).
+    // Check for the actual method invocation, not just comments mentioning it.
+    expect(catchBlock).not.toMatch(/this\.wsClient\.removeActiveTask\(/);
+    // Must re-throw
+    expect(catchBlock).toContain('throw prepErr');
+  });
+
+  it('onTaskDispatch catch calls removeActiveTask after sendTaskResult', () => {
     const { readFileSync } = require('node:fs');
     const startSource = readFileSync(
       join(process.cwd(), 'src/commands/start.ts'),
@@ -364,8 +414,8 @@ describe('sendTaskResult removes task from activeTasks (heartbeat)', () => {
     expect(dispatchBlock).toContain('wsClient.sendTaskResult({');
     expect(dispatchBlock).toContain("status: 'failed'");
 
-    // Should NOT call removeActiveTask separately (sendTaskResult handles it)
-    expect(dispatchBlock).not.toContain('removeActiveTask');
+    // Must also call removeActiveTask since sendTaskResult no longer does it
+    expect(dispatchBlock).toContain('removeActiveTask');
   });
 });
 
@@ -392,6 +442,7 @@ describe('processQueue catch performs complete cleanup', () => {
     expect(methodBody).toContain('this.wsClient.sendTaskResult({');
     expect(methodBody).toContain("status: 'failed'");
     expect(methodBody).toContain('this.runningTasks.delete(task.id)');
+    expect(methodBody).toContain('this.wsClient.removeActiveTask(task.id)');
     expect(methodBody).toContain('this.untrackTaskDirectory(task)');
     expect(methodBody).toContain('this.processQueue()');
   });
@@ -455,30 +506,28 @@ describe('cleanup operations are idempotent', () => {
     expect(() => map.delete('task-1')).not.toThrow(); // second delete — no-op
   });
 
-  it('sendTaskResult can be called even if executeTask already cleaned up', () => {
-    // This simulates the case where executeTask's prepareTaskWorkspace catch
-    // already did runningTasks.delete + removeActiveTask, and then the
-    // processQueue catch also calls sendTaskResult (which calls activeTasks.delete).
-    // All operations should be safe.
+  it('caller catch handles both sendTaskResult and removeActiveTask after prepareTaskWorkspace failure', () => {
+    // prepareTaskWorkspace catch only does runningTasks.delete + throw.
+    // The caller (processQueue catch, onTaskDispatch catch, etc.) is responsible
+    // for sendTaskResult then removeActiveTask — in that order.
     const wsClient = createMockWsClient();
 
-    // Simulate executeTask internal cleanup
-    (wsClient.removeActiveTask as ReturnType<typeof vi.fn>)('task-1');
-
-    // Then processQueue catch calls sendTaskResult
+    // Caller sends result first
     (wsClient.sendTaskResult as ReturnType<typeof vi.fn>)({
       taskId: 'task-1',
       status: 'failed',
       error: 'test',
       completedAt: new Date().toISOString(),
     });
+    // Then removes from heartbeat
+    (wsClient.removeActiveTask as ReturnType<typeof vi.fn>)('task-1');
 
-    // Both should have been called without error
-    expect(wsClient.removeActiveTask).toHaveBeenCalledWith('task-1');
+    // Both should have been called, in the correct order (result before removal)
     expect(wsClient.sendTaskResult).toHaveBeenCalledWith(expect.objectContaining({
       taskId: 'task-1',
       status: 'failed',
     }));
+    expect(wsClient.removeActiveTask).toHaveBeenCalledWith('task-1');
   });
 });
 
