@@ -359,9 +359,9 @@ describe('sendTaskResult keeps task in activeTasks (heartbeat)', () => {
       'utf-8',
     );
 
-    // Find removeActiveTask in the executeTask finally block (the one at ~line 1566).
-    // There are two call sites: one in prepareTaskWorkspace error path (~1093)
-    // and one in the executeTask finally block (~1566). Both are correct.
+    // Find removeActiveTask in executeTask. The prepareTaskWorkspace catch does
+    // NOT call removeActiveTask (it lets the caller handle it after sendTaskResult).
+    // The authoritative call site is in the executeTask finally block (~1574).
     const callSites = [...executorSource.matchAll(/this\.wsClient\.removeActiveTask\(/g)];
     expect(callSites.length).toBeGreaterThanOrEqual(1);
 
@@ -371,6 +371,31 @@ describe('sendTaskResult keeps task in activeTasks (heartbeat)', () => {
     const surroundingBefore = executorSource.slice(Math.max(0, lastCallIndex - 200), lastCallIndex);
     // Should be preceded by runningTasks.delete (both cleanup in the finally block)
     expect(surroundingBefore).toContain('this.runningTasks.delete(task.id)');
+  });
+
+  it('prepareTaskWorkspace catch does NOT call removeActiveTask (caller handles it)', () => {
+    // The prepareTaskWorkspace catch re-throws — the caller's catch sends
+    // sendTaskResult then removeActiveTask. If prepareTaskWorkspace called
+    // removeActiveTask itself, the task would vanish from heartbeats before
+    // the server receives the failure result (the race this PR fixes).
+    const { readFileSync } = require('node:fs');
+    const executorSource = readFileSync(
+      join(process.cwd(), 'src/lib/task-executor.ts'),
+      'utf-8',
+    );
+
+    // Find the prepareTaskWorkspace catch block
+    const catchIdx = executorSource.indexOf('} catch (prepErr)');
+    expect(catchIdx).toBeGreaterThan(-1);
+    const catchBlock = executorSource.slice(catchIdx, catchIdx + 400);
+
+    // Must contain runningTasks.delete (free the slot immediately)
+    expect(catchBlock).toContain('this.runningTasks.delete(normalizedTask.id)');
+    // Must NOT call removeActiveTask (let caller handle after sendTaskResult).
+    // Check for the actual method invocation, not just comments mentioning it.
+    expect(catchBlock).not.toMatch(/this\.wsClient\.removeActiveTask\(/);
+    // Must re-throw
+    expect(catchBlock).toContain('throw prepErr');
   });
 
   it('onTaskDispatch catch calls removeActiveTask after sendTaskResult', () => {
@@ -481,30 +506,28 @@ describe('cleanup operations are idempotent', () => {
     expect(() => map.delete('task-1')).not.toThrow(); // second delete — no-op
   });
 
-  it('sendTaskResult can be called even if executeTask already cleaned up', () => {
-    // This simulates the case where executeTask's prepareTaskWorkspace catch
-    // already did runningTasks.delete + removeActiveTask, and then the
-    // processQueue catch also calls sendTaskResult (which calls activeTasks.delete).
-    // All operations should be safe.
+  it('caller catch handles both sendTaskResult and removeActiveTask after prepareTaskWorkspace failure', () => {
+    // prepareTaskWorkspace catch only does runningTasks.delete + throw.
+    // The caller (processQueue catch, onTaskDispatch catch, etc.) is responsible
+    // for sendTaskResult then removeActiveTask — in that order.
     const wsClient = createMockWsClient();
 
-    // Simulate executeTask internal cleanup
-    (wsClient.removeActiveTask as ReturnType<typeof vi.fn>)('task-1');
-
-    // Then processQueue catch calls sendTaskResult
+    // Caller sends result first
     (wsClient.sendTaskResult as ReturnType<typeof vi.fn>)({
       taskId: 'task-1',
       status: 'failed',
       error: 'test',
       completedAt: new Date().toISOString(),
     });
+    // Then removes from heartbeat
+    (wsClient.removeActiveTask as ReturnType<typeof vi.fn>)('task-1');
 
-    // Both should have been called without error
-    expect(wsClient.removeActiveTask).toHaveBeenCalledWith('task-1');
+    // Both should have been called, in the correct order (result before removal)
     expect(wsClient.sendTaskResult).toHaveBeenCalledWith(expect.objectContaining({
       taskId: 'task-1',
       status: 'failed',
     }));
+    expect(wsClient.removeActiveTask).toHaveBeenCalledWith('task-1');
   });
 });
 

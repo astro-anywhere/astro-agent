@@ -1098,8 +1098,10 @@ export class TaskExecutor {
         : await this.prepareTaskWorkspace(normalizedTask, stream);
     } catch (prepErr) {
       this.runningTasks.delete(normalizedTask.id);
-      this.wsClient.removeActiveTask(normalizedTask.id);
       this.untrackTaskDirectory(task);
+      // Do NOT removeActiveTask here — the caller's catch will send
+      // sendTaskResult first, then removeActiveTask. Removing from heartbeat
+      // before the result is sent is the exact race this PR fixes.
       throw prepErr;
     }
     const taskWithWorkspace = { ...normalizedTask, workingDirectory: prepared.workingDirectory };
