@@ -84,7 +84,11 @@ async function repoHasCommits(workdir: string): Promise<boolean> {
 
 /** Remove stale .git/*.lock files left by interrupted git operations. */
 async function removeStaleGitLocks(workdir: string): Promise<void> {
-  const STALE_THRESHOLD_MS = 30_000; // Only remove locks older than 30 seconds
+  // 30 seconds is conservative: typical git init/add/commit finishes in <1s.
+  // A lock older than 30s almost certainly belongs to a crashed process. Trade-off:
+  // too short risks interfering with slow operations (e.g., large repo git add);
+  // too long delays recovery after a crash.
+  const STALE_THRESHOLD_MS = 30_000;
   const lockFiles = [
     join(workdir, '.git', 'config.lock'),
     join(workdir, '.git', 'index.lock'),
