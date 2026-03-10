@@ -1586,7 +1586,7 @@ export class TaskExecutor {
       if (deferredJobs.length === 0) {
         this.wsClient.removeActiveTask(task.id);
       } else {
-        console.log(`[executor] Task ${task.id}: keeping in heartbeat for ${deferredJobs.length} deferred Slurm job(s)`);
+        console.log(`[executor] Task ${task.id}: ${deferredJobs.length} Slurm job(s) still running — keeping in heartbeat until completion`);
       }
 
       this.processQueue();
