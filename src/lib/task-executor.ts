@@ -1007,6 +1007,8 @@ export class TaskExecutor {
           error: `Sandbox creation failed: ${errorMsg}`,
           completedAt: new Date().toISOString(),
         });
+        this.runningTasks.delete(task.id);
+        this.wsClient.removeActiveTask(task.id);
         this.untrackTaskDirectory(task);
         this.processQueue();
         return;
@@ -1026,6 +1028,8 @@ export class TaskExecutor {
         completedAt: new Date().toISOString(),
       });
       if (sandbox) await sandbox.cleanup();
+      this.runningTasks.delete(task.id);
+      this.wsClient.removeActiveTask(task.id);
       this.untrackTaskDirectory(task);
       this.processQueue();
       return;
@@ -1835,6 +1839,7 @@ export class TaskExecutor {
             completedAt: new Date().toISOString(),
           });
           this.runningTasks.delete(task.id);
+          this.wsClient.removeActiveTask(task.id);
           this.untrackTaskDirectory(task);
           this.processQueue();
         });

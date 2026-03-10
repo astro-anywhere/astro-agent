@@ -421,13 +421,15 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       taskExecutor.submitTask(task).catch((error) => {
         log('error', `Failed to submit task ${task.id} (project=${task.projectId}): ${error instanceof Error ? error.message : String(error)}`, logLevel);
         // Report failure to server so the task doesn't stay stuck forever.
-        // sendTaskResult also removes the task from activeTasks (heartbeat).
         wsClient.sendTaskResult({
           taskId: task.id,
           status: 'failed',
           error: `Task submission failed: ${error instanceof Error ? error.message : String(error)}`,
           completedAt: new Date().toISOString(),
         });
+        // Remove from heartbeat — sendTaskResult no longer does this automatically.
+        // The task was added in handleTaskDispatch before submitTask was called.
+        wsClient.removeActiveTask(task.id);
       });
     },
     onTaskCancel: (taskId: string) => {

@@ -373,7 +373,7 @@ describe('sendTaskResult keeps task in activeTasks (heartbeat)', () => {
     expect(surroundingBefore).toContain('this.runningTasks.delete(task.id)');
   });
 
-  it('onTaskDispatch catch does NOT call removeActiveTask separately', () => {
+  it('onTaskDispatch catch calls removeActiveTask after sendTaskResult', () => {
     const { readFileSync } = require('node:fs');
     const startSource = readFileSync(
       join(process.cwd(), 'src/commands/start.ts'),
@@ -389,8 +389,8 @@ describe('sendTaskResult keeps task in activeTasks (heartbeat)', () => {
     expect(dispatchBlock).toContain('wsClient.sendTaskResult({');
     expect(dispatchBlock).toContain("status: 'failed'");
 
-    // Should NOT call removeActiveTask separately
-    expect(dispatchBlock).not.toContain('removeActiveTask');
+    // Must also call removeActiveTask since sendTaskResult no longer does it
+    expect(dispatchBlock).toContain('removeActiveTask');
   });
 });
 
@@ -417,6 +417,7 @@ describe('processQueue catch performs complete cleanup', () => {
     expect(methodBody).toContain('this.wsClient.sendTaskResult({');
     expect(methodBody).toContain("status: 'failed'");
     expect(methodBody).toContain('this.runningTasks.delete(task.id)');
+    expect(methodBody).toContain('this.wsClient.removeActiveTask(task.id)');
     expect(methodBody).toContain('this.untrackTaskDirectory(task)');
     expect(methodBody).toContain('this.processQueue()');
   });
