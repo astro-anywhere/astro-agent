@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 360" font-family="Palatino, Palatino Linotype, Georgia, serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="10" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="#7a706a"/>
+    </marker>
+  </defs>
+
+  <!-- ── Title ── -->
+  <text x="430" y="25" text-anchor="middle" font-size="14" fill="#8a7e74" font-weight="bold" letter-spacing="1">CUSTOM PROJECT: DAILY RESEARCH DIGEST</text>
+
+  <!-- ── Independent tasks (parallel) ── -->
+  <rect x="42" y="55" width="240" height="120" rx="8" fill="#f7f4f0" stroke="none"/>
+  <text x="162" y="50" text-anchor="middle" font-size="12" fill="#a89e94" font-weight="bold" letter-spacing="0.5">INDEPENDENT (PARALLEL)</text>
+
+  <rect x="52" y="65" width="220" height="40" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="162" y="90" text-anchor="middle" font-size="13" fill="#2c4a6e">Scrape trending from X/Twitter</text>
+
+  <rect x="52" y="115" width="220" height="40" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="162" y="140" text-anchor="middle" font-size="13" fill="#2c4a6e">Get top papers from HuggingFace</text>
+
+  <!-- ── Dependent task ── -->
+  <rect x="370" y="82" width="220" height="52" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="480" y="103" text-anchor="middle" font-size="13" fill="#2c4a6e" font-weight="bold">Summarize &amp; Write Report</text>
+  <text x="480" y="121" text-anchor="middle" font-size="11" fill="#5a7a9a">Depends on both sources</text>
+
+  <!-- ── Output ── -->
+  <rect x="670" y="82" width="150" height="52" rx="6" fill="#dde5d9" stroke="#a3b89a" stroke-width="1.5"/>
+  <text x="745" y="103" text-anchor="middle" font-size="13" fill="#3d6b3a" font-weight="bold">Daily Digest</text>
+  <text x="745" y="121" text-anchor="middle" font-size="11" fill="#5a8a55">Markdown report</text>
+
+  <!-- Arrows: parallel → dependent -->
+  <line x1="272" y1="85" x2="367" y2="100" stroke="#7a706a" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="272" y1="135" x2="367" y2="115" stroke="#7a706a" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- Arrow: dependent → output -->
+  <line x1="590" y1="108" x2="667" y2="108" stroke="#7a706a" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- Second example: Pipeline -->
+  <!-- ═══════════════════════════════════════════ -->
+
+  <line x1="40" y1="195" x2="820" y2="195" stroke="#e0dbd5" stroke-width="1"/>
+
+  <text x="430" y="225" text-anchor="middle" font-size="14" fill="#8a7e74" font-weight="bold" letter-spacing="1">CUSTOM PROJECT: SEQUENTIAL PIPELINE</text>
+
+  <rect x="40" y="248" width="170" height="52" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="125" y="269" text-anchor="middle" font-size="13" fill="#2c4a6e" font-weight="bold">Collect Data</text>
+  <text x="125" y="287" text-anchor="middle" font-size="11" fill="#5a7a9a">API calls, scraping</text>
+
+  <rect x="260" y="248" width="170" height="52" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="345" y="269" text-anchor="middle" font-size="13" fill="#2c4a6e" font-weight="bold">Process &amp; Analyze</text>
+  <text x="345" y="287" text-anchor="middle" font-size="11" fill="#5a7a9a">Transform, compute</text>
+
+  <rect x="480" y="248" width="170" height="52" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="565" y="269" text-anchor="middle" font-size="13" fill="#2c4a6e" font-weight="bold">Generate Report</text>
+  <text x="565" y="287" text-anchor="middle" font-size="11" fill="#5a7a9a">Charts, PDF, email</text>
+
+  <rect x="700" y="248" width="130" height="52" rx="6" fill="#dde5d9" stroke="#a3b89a" stroke-width="1.5"/>
+  <text x="765" y="279" text-anchor="middle" font-size="13" fill="#3d6b3a" font-weight="bold">Done</text>
+
+  <!-- Pipeline arrows -->
+  <line x1="210" y1="274" x2="257" y2="274" stroke="#7a706a" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="430" y1="274" x2="477" y2="274" stroke="#7a706a" stroke-width="2.5" marker-end="url(#arr)"/>
+  <line x1="650" y1="274" x2="697" y2="274" stroke="#7a706a" stroke-width="2.5" marker-end="url(#arr)"/>
+
+  <!-- Annotation -->
+  <text x="430" y="340" text-anchor="middle" font-size="14" fill="#8a7e74" font-style="italic">Create any task graph &#x2014; independent, dependent, or sequential pipelines</text>
+</svg>

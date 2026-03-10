@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 340" font-family="Palatino, Palatino Linotype, Georgia, serif">
+  <defs>
+    <marker id="arr" viewBox="0 0 10 7" refX="9" refY="3.5" markerWidth="10" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 3.5 L 0 7 z" fill="#7a706a"/>
+    </marker>
+  </defs>
+
+  <!-- ── Left: Inputs ── -->
+  <text x="95" y="25" text-anchor="middle" font-size="14" fill="#8a7e74" font-weight="bold" letter-spacing="1">INPUTS</text>
+
+  <rect x="20" y="42" width="150" height="44" rx="6" fill="#f0ebe4" stroke="#c4b9ab" stroke-width="1.5"/>
+  <text x="95" y="69" text-anchor="middle" font-size="15" fill="#5c4a3a">Ticker: AAPL, GOOG</text>
+
+  <rect x="20" y="102" width="150" height="44" rx="6" fill="#f0ebe4" stroke="#c4b9ab" stroke-width="1.5"/>
+  <text x="95" y="129" text-anchor="middle" font-size="15" fill="#5c4a3a">Paper (PDF)</text>
+
+  <rect x="20" y="162" width="150" height="44" rx="6" fill="#f0ebe4" stroke="#c4b9ab" stroke-width="1.5"/>
+  <text x="95" y="189" text-anchor="middle" font-size="15" fill="#5c4a3a">Working Directory</text>
+
+  <!-- ── Center: Astro Examples ── -->
+  <text x="430" y="25" text-anchor="middle" font-size="14" fill="#8a7e74" font-weight="bold" letter-spacing="1">ASTRO TEMPLATES</text>
+
+  <rect x="290" y="42" width="280" height="52" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="430" y="63" text-anchor="middle" font-size="14" fill="#2c4a6e" font-weight="bold">Moat &amp; Fragility Analysis</text>
+  <text x="430" y="82" text-anchor="middle" font-size="12" fill="#5a7a9a">Stock competitive advantage scoring</text>
+
+  <rect x="290" y="112" width="280" height="52" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="430" y="133" text-anchor="middle" font-size="14" fill="#2c4a6e" font-weight="bold">Academic Paper Review</text>
+  <text x="430" y="152" text-anchor="middle" font-size="12" fill="#5a7a9a">Structured critique with scoring rubric</text>
+
+  <rect x="290" y="182" width="280" height="52" rx="6" fill="#dce4ec" stroke="#9ab0c4" stroke-width="1.5"/>
+  <text x="430" y="203" text-anchor="middle" font-size="14" fill="#2c4a6e" font-weight="bold">Academic Presentation</text>
+  <text x="430" y="222" text-anchor="middle" font-size="12" fill="#5a7a9a">Conference slides from a paper</text>
+
+  <!-- ── Right: Outputs ── -->
+  <text x="750" y="25" text-anchor="middle" font-size="14" fill="#8a7e74" font-weight="bold" letter-spacing="1">DELIVERABLES</text>
+
+  <rect x="670" y="42" width="165" height="44" rx="6" fill="#dde5d9" stroke="#a3b89a" stroke-width="1.5"/>
+  <text x="752" y="69" text-anchor="middle" font-size="14" fill="#3d6b3a">PDF Report + Charts</text>
+
+  <rect x="670" y="112" width="165" height="44" rx="6" fill="#dde5d9" stroke="#a3b89a" stroke-width="1.5"/>
+  <text x="752" y="139" text-anchor="middle" font-size="14" fill="#3d6b3a">Review Document</text>
+
+  <rect x="670" y="182" width="165" height="44" rx="6" fill="#dde5d9" stroke="#a3b89a" stroke-width="1.5"/>
+  <text x="752" y="209" text-anchor="middle" font-size="14" fill="#3d6b3a">Slide Deck</text>
+
+  <!-- ── Arrows: Inputs → Templates ── -->
+  <line x1="170" y1="64" x2="287" y2="64" stroke="#7a706a" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="170" y1="124" x2="287" y2="138" stroke="#7a706a" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="170" y1="184" x2="287" y2="208" stroke="#7a706a" stroke-width="2" marker-end="url(#arr)"/>
+  <!-- Workdir → all templates -->
+  <line x1="170" y1="184" x2="287" y2="68" stroke="#7a706a" stroke-width="1.2" stroke-dasharray="6,4" marker-end="url(#arr)"/>
+  <line x1="170" y1="184" x2="287" y2="138" stroke="#7a706a" stroke-width="1.2" stroke-dasharray="6,4" marker-end="url(#arr)"/>
+
+  <!-- ── Arrows: Templates → Outputs ── -->
+  <line x1="570" y1="68" x2="667" y2="64" stroke="#7a706a" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="570" y1="138" x2="667" y2="134" stroke="#7a706a" stroke-width="2" marker-end="url(#arr)"/>
+  <line x1="570" y1="208" x2="667" y2="204" stroke="#7a706a" stroke-width="2" marker-end="url(#arr)"/>
+
+  <!-- ── Annotation ── -->
+  <text x="430" y="274" text-anchor="middle" font-size="14" fill="#8a7e74" font-style="italic">Provide inputs &#x2192; select template &#x2192; Astro generates plan + executes &#x2192; get deliverables</text>
+  <text x="430" y="298" text-anchor="middle" font-size="13" fill="#a89e94" font-style="italic">All templates run as parallel task graphs &#x2014; each subtask is an isolated agent session</text>
+</svg>
