@@ -212,7 +212,7 @@ Four ways to use Astro, from simplest to most flexible.
 The fastest way to see Astro in action. Each template is a pre-built workflow that generates a complete deliverable &mdash; just provide your inputs.
 
 <p align="center">
-  <img src="docs/usage-examples.svg" alt="Built-in templates workflow" width="800"/>
+  <img src="docs/usage-examples.svg?v=2" alt="Built-in templates workflow" width="800"/>
 </p>
 
 ### Moat &amp; Fragility Analysis
@@ -259,7 +259,7 @@ Generate conference-ready presentation slides from a research paper.
 For tasks that don't fit a template &mdash; building features, refactoring codebases, writing research pipelines. Describe your goal in natural language and let Astro decompose it into a dependency graph of tasks.
 
 <p align="center">
-  <img src="docs/usage-plan-execute.svg" alt="Plan and execute workflow" width="800"/>
+  <img src="docs/usage-plan-execute.svg?v=2" alt="Plan and execute workflow" width="800"/>
 </p>
 
 ### The Workflow
@@ -294,7 +294,7 @@ Each completed task produces a pull request (or commits, depending on your deliv
 For recurring workflows or custom pipelines, create your own projects with hand-crafted task graphs. Mix independent and dependent tasks to model any workflow.
 
 <p align="center">
-  <img src="docs/usage-custom-tasks.svg" alt="Custom task graphs" width="800"/>
+  <img src="docs/usage-custom-tasks.svg?v=2" alt="Custom task graphs" width="800"/>
 </p>
 
 ### Example: Daily Research Digest
