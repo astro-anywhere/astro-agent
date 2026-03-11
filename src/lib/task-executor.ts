@@ -169,7 +169,8 @@ interface PendingSafetyCheck {
 export interface TaskExecutorOptions {
   wsClient: WebSocketClient;
   maxConcurrentTasks?: number;
-  defaultTimeout?: number;
+  defaultTimeout?: number; // Hard cap timeout in ms (default 8h)
+  defaultIdleTimeout?: number; // Idle timeout in ms, resets on activity (default 15min)
   useWorktree?: boolean;
   worktreeRoot?: string;
   preserveWorktrees?: boolean; // Don't cleanup worktrees for debugging
@@ -193,12 +194,20 @@ function canonicalDirLockKey(workdir: string): string {
   return `dir::${canonicalDirPath(workdir)}`;
 }
 
+/** Format a duration in ms to a human-readable string (e.g., "2h 30m", "15m"). */
+function formatDuration(ms: number): string {
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor((ms % 3600000) / 60000);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
 export class TaskExecutor {
   private wsClient: WebSocketClient;
   private runningTasks: Map<string, RunningTask> = new Map();
   private taskQueue: Task[] = [];
   private maxConcurrentTasks: number;
-  private defaultTimeout: number;
+  private defaultTimeout: number; // Hard cap
+  private defaultIdleTimeout: number; // Resets on activity
   private adapters: Map<ProviderType, ProviderAdapter> = new Map();
   private useWorktree: boolean;
   private worktreeRoot?: string;
@@ -221,7 +230,8 @@ export class TaskExecutor {
   constructor(options: TaskExecutorOptions) {
     this.wsClient = options.wsClient;
     this.maxConcurrentTasks = options.maxConcurrentTasks ?? 40;
-    this.defaultTimeout = options.defaultTimeout ?? 3600000; // 1 hour
+    this.defaultTimeout = options.defaultTimeout ?? 8 * 60 * 60 * 1000; // 8 hours hard cap
+    this.defaultIdleTimeout = options.defaultIdleTimeout ?? 15 * 60 * 1000; // 15 min idle
     this.useWorktree = options.useWorktree ?? true;
     this.worktreeRoot = options.worktreeRoot;
     this.preserveWorktrees = options.preserveWorktrees ?? false;
@@ -1059,36 +1069,63 @@ export class TaskExecutor {
 
     // Create stream handlers before workspace prep so setup output is captured
     let textSequence = 0;
+
+    // Idle timeout: resets every time the agent emits activity.
+    // If no activity for defaultIdleTimeout ms, the task is aborted.
+    const idleTimeoutMs = this.defaultIdleTimeout;
+    let idleTimerId: ReturnType<typeof setTimeout> | undefined;
+    const resetIdleTimeout = () => {
+      if (idleTimerId !== undefined) clearTimeout(idleTimerId);
+      idleTimerId = setTimeout(() => {
+        console.log(`[executor] Task ${task.id}: idle timeout -- no activity for ${formatDuration(idleTimeoutMs)}, aborting`);
+        abortController.abort();
+      }, idleTimeoutMs);
+    };
+
     const stream = {
       stdout: (data: string) => {
+        resetIdleTimeout();
         this.wsClient.sendTaskOutput(normalizedTask.id, 'stdout', data, outputSequence.stdout++);
       },
       stderr: (data: string) => {
+        resetIdleTimeout();
         this.wsClient.sendTaskOutput(normalizedTask.id, 'stderr', data, outputSequence.stderr++);
       },
       status: (status: TaskStatus, progress?: number, message?: string) => {
+        resetIdleTimeout();
         this.wsClient.sendTaskStatus(normalizedTask.id, status, progress, message);
       },
       toolTrace: (toolName: string, toolInput?: unknown, toolResult?: unknown, success?: boolean) => {
+        resetIdleTimeout();
         this.wsClient.sendToolTrace(normalizedTask.id, toolName, toolInput, toolResult, success);
       },
       text: (data: string) => {
+        resetIdleTimeout();
         this.wsClient.sendTaskText(normalizedTask.id, data, textSequence++);
       },
       toolUse: (toolName: string, toolInput: unknown) => {
+        resetIdleTimeout();
         this.wsClient.sendTaskToolUse(normalizedTask.id, toolName, toolInput);
       },
       toolResult: (toolName: string, result: unknown, success: boolean) => {
+        resetIdleTimeout();
         this.wsClient.sendTaskToolResult(normalizedTask.id, toolName, result, success);
       },
       fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number, diff?: string) => {
+        resetIdleTimeout();
         this.wsClient.sendTaskFileChange(normalizedTask.id, path, action, linesAdded, linesRemoved, diff);
       },
       sessionInit: (sessionId: string, model?: string) => {
+        resetIdleTimeout();
         this.wsClient.sendTaskSessionInit(normalizedTask.id, sessionId, model);
       },
       approvalRequest: async (question: string, options: string[]) => {
-        return this.wsClient.sendApprovalRequest(normalizedTask.id, question, options);
+        // Pause idle timeout while waiting for user response — they may take a while.
+        // The hard cap still protects against infinite waits.
+        if (idleTimerId !== undefined) clearTimeout(idleTimerId);
+        const response = await this.wsClient.sendApprovalRequest(normalizedTask.id, question, options);
+        resetIdleTimeout();
+        return response;
       },
     };
 
@@ -1122,11 +1159,16 @@ export class TaskExecutor {
     runningTask.task = taskWithWorkspace;
     console.log(`[executor] Task ${task.id}: workspace prepared, cwd=${prepared.workingDirectory}`);
 
-    // Execute with timeout
-    const timeout = task.timeout ?? this.defaultTimeout;
-    const timeoutId = setTimeout(() => {
+    // Execute with idle timeout + hard cap.
+    // Idle timeout resets on every stream activity (text, tool, file, etc.).
+    // Hard cap is a non-resettable safety limit.
+    const hardCapMs = task.timeout ?? this.defaultTimeout;
+    const hardCapTimeoutId = setTimeout(() => {
+      console.log(`[executor] Task ${task.id}: hard cap timeout (${formatDuration(hardCapMs)}), aborting`);
       abortController.abort();
-    }, timeout);
+    }, hardCapMs);
+    // Start the idle timer
+    resetIdleTimeout();
 
     let keepBranch = false;
     try {
@@ -1550,7 +1592,8 @@ export class TaskExecutor {
         completedAt: new Date().toISOString(),
       });
     } finally {
-      clearTimeout(timeoutId);
+      clearTimeout(hardCapTimeoutId);
+      if (idleTimerId !== undefined) clearTimeout(idleTimerId);
 
       // Always cleanup the local worktree directory to reclaim disk space
       // (node_modules alone is ~680MB per worktree). When keepBranch is true
