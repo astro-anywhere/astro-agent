@@ -6,7 +6,7 @@
  */
 
 import { homedir } from 'node:os';
-import { realpathSync } from 'node:fs';
+import { statSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -274,11 +274,29 @@ export class TaskExecutor {
     // Skip workingDirectory resolution for lightweight text-only tasks (no file system access)
     const isTextOnlyTask = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan';
 
+    let resolvedWorkDir: string;
+    try {
+      resolvedWorkDir = isTextOnlyTask && !task.workingDirectory
+        ? undefined!  // Text-only tasks can run without a working directory
+        : resolveWorkingDirectory(task.workingDirectory);
+    } catch (err) {
+      // Fail fast with a clear error instead of entering the execution pipeline.
+      // Without this, tasks with non-existent directories become dead jobs.
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      console.error(`[executor] Task ${task.id}: ${errorMsg}`);
+      this.wsClient.sendTaskResult({
+        taskId: task.id,
+        status: 'failed',
+        error: errorMsg,
+        completedAt: new Date().toISOString(),
+      });
+      this.wsClient.removeActiveTask(task.id);
+      return;
+    }
+
     const normalizedTask = {
       ...task,
-      workingDirectory: isTextOnlyTask && !task.workingDirectory
-        ? undefined!  // Text-only tasks can run without a working directory
-        : resolveWorkingDirectory(task.workingDirectory),
+      workingDirectory: resolvedWorkDir,
     };
 
     // Determine if worktree isolation will be used for this task.
@@ -1944,12 +1962,38 @@ function resolveWorkingDirectory(value: string | undefined): string {
   // Node.js path APIs (resolve, join, etc.) don't expand ~ — that's a shell feature.
   // Without this, paths like "~/Documents/code" are treated as relative, causing
   // worktree creation to produce broken paths like ".astro/worktrees/.../~/Documents/code".
-  if (value === '~') {
-    return homedir();
-  }
-  if (value.startsWith('~/')) {
-    return homedir() + value.slice(1);
+  let resolved = value;
+  if (resolved === '~') {
+    resolved = homedir();
+  } else if (resolved.startsWith('~/')) {
+    resolved = homedir() + resolved.slice(1);
   }
 
-  return value;
+  // Validate that the path exists and is a directory.
+  // Without this, tasks silently enter the execution pipeline and only fail
+  // deep in the adapter (or worse, become dead jobs when the adapter crashes).
+  try {
+    const stat = statSync(resolved);
+    if (!stat.isDirectory()) {
+      throw new Error(
+        `Working directory path is not a directory: ${resolved}. ` +
+        'Check that the project directory path is correct.'
+      );
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        `Working directory does not exist: ${resolved}. ` +
+        'Check that the project directory path is correct and accessible.'
+      );
+    }
+    if ((err as NodeJS.ErrnoException).code === 'EACCES') {
+      throw new Error(
+        `Working directory is not accessible (permission denied): ${resolved}.`
+      );
+    }
+    throw err; // re-throw "not a directory" or other unexpected errors
+  }
+
+  return resolved;
 }

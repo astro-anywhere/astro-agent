@@ -270,7 +270,8 @@ describe('processQueue catch sends sendTaskResult on executeTask failure', () =>
   it('sends failed result when executeTask throws (provider unavailable)', async () => {
     // createProviderAdapter returns null → executeTask returns early with sendTaskResult
     // But if getAdapter() itself threw, the processQueue catch would fire.
-    // We test via submitTask with an empty workingDirectory which throws in resolveWorkingDirectory.
+    // We test via submitTask with an empty workingDirectory which is caught by
+    // the resolveWorkingDirectory try-catch and reported via sendTaskResult.
 
     const executor = new TaskExecutor({
       wsClient,
@@ -284,13 +285,17 @@ describe('processQueue catch sends sendTaskResult on executeTask failure', () =>
       skipSafetyCheck: true,
     });
 
-    // submitTask should throw, but the onTaskDispatch catch in start.ts handles it.
-    // We call submitTask directly to simulate what happens.
-    await expect(executor.submitTask(task)).rejects.toThrow();
+    // submitTask now catches resolveWorkingDirectory errors internally
+    // and sends a failed result via wsClient, instead of re-throwing.
+    await executor.submitTask(task);
 
-    // The error propagates to the caller (start.ts onTaskDispatch catch),
-    // which now sends sendTaskResult. The executor itself may not have sent it
-    // because the error happens before executeTask is called.
+    expect(wsClient.sendTaskResult).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: task.id,
+        status: 'failed',
+        error: expect.stringContaining('workingDirectory is required'),
+      }),
+    );
   });
 
   it('sends failed result for provider-unavailable tasks (direct executeTask path)', async () => {
@@ -585,10 +590,10 @@ describe('error messages include useful context', () => {
 });
 
 // ============================================================================
-// 9. End-to-end: submitTask with empty workingDirectory throws
+// 9. End-to-end: submitTask with empty workingDirectory reports failure
 // ============================================================================
 
-describe('submitTask rejects on empty workingDirectory', () => {
+describe('submitTask reports failure on empty workingDirectory', () => {
   let wsClient: ReturnType<typeof createMockWsClient>;
 
   beforeEach(() => {
@@ -596,7 +601,7 @@ describe('submitTask rejects on empty workingDirectory', () => {
     vi.clearAllMocks();
   });
 
-  it('throws when workingDirectory is empty string', async () => {
+  it('sends failed result when workingDirectory is empty string', async () => {
     const executor = new TaskExecutor({
       wsClient,
       useWorktree: false,
@@ -605,10 +610,17 @@ describe('submitTask rejects on empty workingDirectory', () => {
 
     const task = createTask({ workingDirectory: '' });
 
-    await expect(executor.submitTask(task)).rejects.toThrow();
+    // submitTask now handles the error internally and sends a failed result
+    await executor.submitTask(task);
+
+    expect(wsClient.sendTaskResult).toHaveBeenCalledWith(expect.objectContaining({
+      taskId: task.id,
+      status: 'failed',
+      error: expect.stringContaining('workingDirectory is required'),
+    }));
   });
 
-  it('the caller (onTaskDispatch) catches and reports the failure', async () => {
+  it('reports failure directly without requiring caller catch', async () => {
     const executor = new TaskExecutor({
       wsClient,
       useWorktree: false,
@@ -617,15 +629,8 @@ describe('submitTask rejects on empty workingDirectory', () => {
 
     const task = createTask({ workingDirectory: '' });
 
-    // Simulate the onTaskDispatch pattern from start.ts
-    await executor.submitTask(task).catch((error) => {
-      wsClient.sendTaskResult({
-        taskId: task.id,
-        status: 'failed',
-        error: `Task submission failed: ${error instanceof Error ? error.message : String(error)}`,
-        completedAt: new Date().toISOString(),
-      });
-    });
+    // submitTask resolves normally (no throw) — failure is sent via wsClient
+    await executor.submitTask(task);
 
     expect(wsClient.sendTaskResult).toHaveBeenCalledTimes(1);
     expect(wsClient.sendTaskResult).toHaveBeenCalledWith(expect.objectContaining({
