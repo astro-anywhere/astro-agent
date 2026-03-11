@@ -1113,8 +1113,12 @@ export class TaskExecutor {
         this.wsClient.sendTaskSessionInit(normalizedTask.id, sessionId, model);
       },
       approvalRequest: async (question: string, options: string[]) => {
+        // Pause idle timeout while waiting for user response — they may take a while.
+        // The hard cap still protects against infinite waits.
+        if (idleTimerId !== undefined) clearTimeout(idleTimerId);
+        const response = await this.wsClient.sendApprovalRequest(normalizedTask.id, question, options);
         resetIdleTimeout();
-        return this.wsClient.sendApprovalRequest(normalizedTask.id, question, options);
+        return response;
       },
     };
 
