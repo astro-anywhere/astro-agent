@@ -194,6 +194,13 @@ function canonicalDirLockKey(workdir: string): string {
   return `dir::${canonicalDirPath(workdir)}`;
 }
 
+/** Format a duration in ms to a human-readable string (e.g., "2h 30m", "15m"). */
+function formatDuration(ms: number): string {
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor((ms % 3600000) / 60000);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
 export class TaskExecutor {
   private wsClient: WebSocketClient;
   private runningTasks: Map<string, RunningTask> = new Map();
@@ -1070,7 +1077,7 @@ export class TaskExecutor {
     const resetIdleTimeout = () => {
       if (idleTimerId !== undefined) clearTimeout(idleTimerId);
       idleTimerId = setTimeout(() => {
-        console.log(`[executor] Task ${task.id}: idle timeout — no activity for ${idleTimeoutMs / 60000}min, aborting`);
+        console.log(`[executor] Task ${task.id}: idle timeout -- no activity for ${formatDuration(idleTimeoutMs)}, aborting`);
         abortController.abort();
       }, idleTimeoutMs);
     };
@@ -1157,7 +1164,7 @@ export class TaskExecutor {
     // Hard cap is a non-resettable safety limit.
     const hardCapMs = task.timeout ?? this.defaultTimeout;
     const hardCapTimeoutId = setTimeout(() => {
-      console.log(`[executor] Task ${task.id}: hard cap timeout (${hardCapMs / 3600000}h), aborting`);
+      console.log(`[executor] Task ${task.id}: hard cap timeout (${formatDuration(hardCapMs)}), aborting`);
       abortController.abort();
     }, hardCapMs);
     // Start the idle timer
