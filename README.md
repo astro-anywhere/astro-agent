@@ -12,6 +12,8 @@
   <a href="https://astroanywhere.com/landing/">Website</a>
   &nbsp;&middot;&nbsp;
   <a href="#quick-start">Get Started</a>
+  &nbsp;&middot;&nbsp;
+  <a href="https://github.com/astro-anywhere/astro-examples">Examples</a>
   <br />
   <br />
 </p>
@@ -250,7 +252,7 @@ Generate conference-ready presentation slides from a research paper.
 
 **What you get:** Slide deck with figures, key results, and speaker notes.
 
-> **All templates run as parallel task graphs.** Astro decomposes the work into independent subtasks (data collection, analysis, writing) and executes them across your machines simultaneously.
+> **All templates run as parallel task graphs.** Astro decomposes the work into independent subtasks (data collection, analysis, writing) and executes them across your machines simultaneously. See the [astro-examples](https://github.com/astro-anywhere/astro-examples) repo for concrete examples of planning DAGs and deliverables from the three built-in templates.
 
 ---
 
