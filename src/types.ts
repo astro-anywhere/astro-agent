@@ -292,6 +292,7 @@ export type WSMessageType =
   | 'task_file_change'
   | 'task_session_init'
   | 'task_steer_ack'
+  | 'task_dispatch_ack'
   | 'task_approval_request'
   | 'task_safety_prompt'
   | 'task_safety_response'

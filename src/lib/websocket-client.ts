@@ -1086,12 +1086,6 @@ export class WebSocketClient {
   private async handleTaskDispatch(message: TaskDispatchMessage): Promise<void> {
     const task = message.payload;
 
-    // Check if we can accept more tasks
-    if (this.activeTasks.size >= this.config.maxConcurrentTasks) {
-      this.sendTaskStatus(task.id, 'queued', 0, 'Waiting for available slot');
-      return;
-    }
-
     // Verify dispatch signature if present
     const publicKeys = configManager.getDispatchPublicKeys();
     const requireSigned = configManager.getRequireSignedDispatches();
@@ -1128,6 +1122,13 @@ export class WebSocketClient {
     }
 
     this.activeTasks.add(task.id);
+    // ACK the dispatch so the relay server knows we received it.
+    // Without this, lost WS messages only surface after 5+ min dead job detection.
+    this.send({
+      type: 'task_dispatch_ack',
+      timestamp: new Date().toISOString(),
+      payload: { taskId: task.id },
+    });
     this.emitEvent({ type: 'task_received', task });
     this.onTaskDispatch?.(task);
   }
