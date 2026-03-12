@@ -252,7 +252,18 @@ Generate conference-ready presentation slides from a research paper.
 
 **What you get:** Slide deck with figures, key results, and speaker notes.
 
-> **All templates run as parallel task graphs.** Astro decomposes the work into independent subtasks (data collection, analysis, writing) and executes them across your machines simultaneously. See the [astro-examples](https://github.com/astro-anywhere/astro-examples) repo for concrete examples of planning DAGs and deliverables from the three built-in templates.
+### Daily Paper Analysis
+
+Generate a comprehensive digest of all HuggingFace Daily Papers for any date, plus in-depth analyses of the top-ranked papers with architecture figures and key equations.
+
+**What you provide:**
+- A date (YYYY-MM-DD) &mdash; weekdays typically have 24-49 papers
+- Number of papers for deep analysis (default: top 10 by upvotes)
+- A working directory for output files
+
+**What you get:** All-papers digest (HTML + Markdown + PDF), individual deep-dive analyses with SVG architecture diagrams, and a compiled document assembling everything. All outputs are dual-format: styled HTML for direct reading and Obsidian-compatible Markdown with YAML frontmatter.
+
+> **All templates run as parallel task graphs.** Astro decomposes the work into independent subtasks (data collection, analysis, writing) and executes them across your machines simultaneously. See the [astro-examples](https://github.com/astro-anywhere/astro-examples) repo for concrete examples of planning DAGs and deliverables from the built-in templates.
 
 ---
 
