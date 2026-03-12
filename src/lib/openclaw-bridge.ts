@@ -627,7 +627,8 @@ export class OpenClawBridge extends EventEmitter {
     const to = notification.to || this.defaultRecipient;
 
     if (!to) {
-      throw new Error('No recipient configured for OpenClaw notifications (set "to" or defaultRecipient)');
+      console.debug('[openclaw] Skipping notification — no recipient configured (set "to" or defaultRecipient)');
+      return;
     }
 
     await this.sendRequest('send', {
