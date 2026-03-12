@@ -311,13 +311,9 @@ describe('Claude SDK adapter field consumption', () => {
    * This mirrors the logic in claude-sdk-adapter.ts execute().
    */
   function buildQueryParams(task: Task) {
-    // Default maxTurns based on task type (text-only gets 10, execution gets unlimited)
-    const isTextOnly = task.type === 'chat' || task.type === 'summarize'
-    const defaultMaxTurns = isTextOnly ? 10 : undefined
-    const maxTurns = task.maxTurns ?? defaultMaxTurns
-
+    // maxTurns only set when explicitly provided — omitting gives unlimited turns (SDK default)
     const options: Record<string, unknown> = {
-      ...(maxTurns != null ? { maxTurns } : {}),
+      ...(task.maxTurns != null ? { maxTurns: task.maxTurns } : {}),
     }
 
     if (task.outputFormat) {
@@ -372,7 +368,7 @@ describe('Claude SDK adapter field consumption', () => {
     expect(options.model).toBe('claude-opus-4-20250514')
   })
 
-  it('uses maxTurns=10 for chat tasks when not explicitly set', () => {
+  it('omits maxTurns for chat tasks when not explicitly set', () => {
     const { options } = buildQueryParams({
       id: 'task-1',
       projectId: 'proj-1',
@@ -383,10 +379,10 @@ describe('Claude SDK adapter field consumption', () => {
       createdAt: new Date().toISOString(),
       type: 'chat',
     })
-    expect(options.maxTurns).toBe(10)
+    expect(options.maxTurns).toBeUndefined()
   })
 
-  it('uses maxTurns=10 for summarize tasks when not explicitly set', () => {
+  it('omits maxTurns for summarize tasks when not explicitly set', () => {
     const { options } = buildQueryParams({
       id: 'task-1',
       projectId: 'proj-1',
@@ -397,7 +393,7 @@ describe('Claude SDK adapter field consumption', () => {
       createdAt: new Date().toISOString(),
       type: 'summarize',
     })
-    expect(options.maxTurns).toBe(10)
+    expect(options.maxTurns).toBeUndefined()
   })
 
   it('uses unlimited maxTurns for execution tasks when not explicitly set', () => {
