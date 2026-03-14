@@ -127,7 +127,7 @@ export interface Task {
   planNodeId: string;
   provider: ProviderType;
   prompt: string;
-  workingDirectory: string;
+  workingDirectory?: string;
   environment?: Record<string, string>;
   timeout?: number; // ms
   maxTurns?: number; // Override default maxTurns for the agent SDK
@@ -336,6 +336,7 @@ export type WSMessageType =
   | 'channel_notification'
   | 'channel_response'
   | 'channel_approval_request'
+  | 'project_cleanup'
   | 'error';
 
 export interface WSMessage {

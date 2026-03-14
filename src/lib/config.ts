@@ -94,6 +94,7 @@ interface ConfigSchema {
   dispatchPublicKey?: JsonWebKey;
   dispatchPublicKeys?: JsonWebKey[];
   requireSignedDispatches?: boolean;
+  workspaceRoot?: string;
 }
 
 class ConfigManager {
@@ -547,6 +548,21 @@ class ConfigManager {
    */
   setRequireSignedDispatches(value: boolean): void {
     this.conf.set('requireSignedDispatches', value);
+  }
+
+  /**
+   * Get workspace root directory override.
+   * When set, auto-provisioned project workspaces are created under this path.
+   */
+  getWorkspaceRoot(): string | undefined {
+    return this.conf.get('workspaceRoot');
+  }
+
+  /**
+   * Set workspace root directory override.
+   */
+  setWorkspaceRoot(path: string): void {
+    this.conf.set('workspaceRoot', path);
   }
 
   /**

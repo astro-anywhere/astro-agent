@@ -11,7 +11,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary } from '../types.js';
-import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream } from './base-adapter.js';
+import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream } from './base-adapter.js';
 import type { OpenClawBridge, TaskSessionResult } from '../lib/openclaw-bridge.js';
 import {
   type GatewayConfig,
@@ -41,6 +41,8 @@ interface PreservedSession {
   sessionKey: string;
   taskId: string;
   workingDirectory?: string;
+  /** Original project directory (before worktree), for fallback when worktree is cleaned up */
+  originalWorkingDirectory?: string;
   createdAt: number;
 }
 
@@ -95,7 +97,7 @@ export class OpenClawAdapter implements ProviderAdapter {
 
   // ─── Task Execution ─────────────────────────────────────────────
 
-  async execute(task: Task, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
+  async execute(task: NormalizedTask, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
     // Ensure we have config or bridge
     if (!this.bridge?.isConnected && !this.gatewayConfig) {
       const available = await this.isAvailable();
@@ -316,7 +318,7 @@ export class OpenClawAdapter implements ProviderAdapter {
   /**
    * Get preserved session context for a task (used by task executor for resume routing).
    */
-  getTaskContext(taskId: string): { sessionId: string; workingDirectory: string } | null {
+  getTaskContext(taskId: string): { sessionId: string; workingDirectory: string; originalWorkingDirectory?: string } | null {
     this.cleanupExpiredSessions();
     const session = this.preservedSessions.get(taskId);
     if (!session || Date.now() - session.createdAt > SESSION_TTL_MS) {
@@ -326,7 +328,20 @@ export class OpenClawAdapter implements ProviderAdapter {
     return {
       sessionId: session.sessionKey,
       workingDirectory: session.workingDirectory || '',
+      originalWorkingDirectory: session.originalWorkingDirectory,
     };
+  }
+
+  /**
+   * Set the original (pre-worktree) working directory on a session.
+   * Called by the task executor after workspace preparation so the adapter
+   * can fall back to it when the worktree is cleaned up.
+   */
+  setOriginalWorkingDirectory(taskId: string, originalDir: string): void {
+    const session = this.preservedSessions.get(taskId);
+    if (session) {
+      session.originalWorkingDirectory = originalDir;
+    }
   }
 
   private cleanupExpiredSessions(): void {

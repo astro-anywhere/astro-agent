@@ -6,20 +6,19 @@
  */
 
 import { homedir } from 'node:os';
-import { statSync, realpathSync } from 'node:fs';
+import { statSync, realpathSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Task, TaskStatus, ProviderType, HpcCapability } from '../types.js';
 import type { WebSocketClient } from './websocket-client.js';
-import { createProviderAdapter, type ProviderAdapter } from '../providers/index.js';
+import { createProviderAdapter, type ProviderAdapter, type TaskOutputStream } from '../providers/index.js';
 import { ClaudeSdkAdapter } from '../providers/claude-sdk-adapter.js';
-import { CodexAdapter } from '../providers/codex-adapter.js';
 import { OpenClawAdapter } from '../providers/openclaw-adapter.js';
-import { OpenCodeAdapter } from '../providers/opencode-adapter.js';
 import type { OpenClawBridge } from './openclaw-bridge.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree, syncProjectWorktree } from './worktree.js';
+import { ensureProjectWorkspace } from './workspace-root.js';
 import { BranchLockManager } from './branch-lock.js';
 import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha, isGhAvailable } from './git-pr.js';
 import { localMergeIntoProjectBranch } from './local-merge.js';
@@ -153,7 +152,7 @@ async function tryPreMergeRebase(
 }
 
 interface RunningTask {
-  task: Task;
+  task: Task & { workingDirectory: string };
   abortController: AbortController;
   adapter: ProviderAdapter;
   outputSequence: { stdout: number; stderr: number };
@@ -161,7 +160,7 @@ interface RunningTask {
 }
 
 interface PendingSafetyCheck {
-  task: Task;
+  task: Task & { workingDirectory: string };
   safetyResult: SafetyCheckResult;
   resolveDecision: (decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
 }
@@ -204,7 +203,7 @@ function formatDuration(ms: number): string {
 export class TaskExecutor {
   private wsClient: WebSocketClient;
   private runningTasks: Map<string, RunningTask> = new Map();
-  private taskQueue: Task[] = [];
+  private taskQueue: (Task & { workingDirectory: string })[] = [];
   private maxConcurrentTasks: number;
   private defaultTimeout: number; // Hard cap
   private defaultIdleTimeout: number; // Resets on activity
@@ -226,6 +225,21 @@ export class TaskExecutor {
   // Safety tracking
   private tasksByDirectory: Map<string, Set<string>> = new Map(); // workdir -> taskIds
   private pendingSafetyChecks: Map<string, PendingSafetyCheck> = new Map(); // taskId -> pending check
+
+  /** Preserved task metadata for worktree recreation on post-completion resume */
+  private completedTaskMeta: Map<string, {
+    originalWorkingDirectory: string;
+    projectBranch?: string;
+    baseBranch?: string;
+    agentDir?: string;
+    shortProjectId?: string;
+    shortNodeId?: string;
+    projectId?: string;
+    storedAt: number;
+  }> = new Map();
+
+  /** TTL for completed task metadata (10 minutes, matches adapter session TTL) */
+  private static readonly COMPLETED_TASK_META_TTL_MS = 10 * 60 * 1000;
 
   constructor(options: TaskExecutorOptions) {
     this.wsClient = options.wsClient;
@@ -274,30 +288,34 @@ export class TaskExecutor {
     // Skip workingDirectory resolution for lightweight text-only tasks (no file system access)
     const isTextOnlyTask = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan';
 
-    let resolvedWorkDir: string;
-    try {
-      resolvedWorkDir = isTextOnlyTask && !task.workingDirectory
-        ? undefined!  // Text-only tasks can run without a working directory
-        : resolveWorkingDirectory(task.workingDirectory);
-    } catch (err) {
-      // Fail fast with a clear error instead of entering the execution pipeline.
-      // Without this, tasks with non-existent directories become dead jobs.
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[executor] Task ${task.id}: ${errorMsg}`);
-      this.wsClient.sendTaskResult({
-        taskId: task.id,
-        status: 'failed',
-        error: errorMsg,
-        completedAt: new Date().toISOString(),
-      });
-      this.wsClient.removeActiveTask(task.id);
-      return;
+    // Text-only tasks (plan/chat/summarize) can run without a working directory.
+    // For all others, resolve the directory or auto-provision one.
+    let resolvedWorkDir: string | undefined;
+    if (isTextOnlyTask && !task.workingDirectory) {
+      resolvedWorkDir = undefined;
+    } else {
+      try {
+        resolvedWorkDir = resolveWorkingDirectory(task.workingDirectory, task.projectId);
+      } catch (err) {
+        // Fail fast with a clear error instead of entering the execution pipeline.
+        // Without this, tasks with non-existent directories become dead jobs.
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[executor] Task ${task.id}: ${errorMsg}`);
+        this.wsClient.sendTaskResult({
+          taskId: task.id,
+          status: 'failed',
+          error: errorMsg,
+          completedAt: new Date().toISOString(),
+        });
+        this.wsClient.removeActiveTask(task.id);
+        return;
+      }
     }
 
     const normalizedTask = {
       ...task,
-      workingDirectory: resolvedWorkDir,
-    };
+      workingDirectory: resolvedWorkDir ?? '',
+    } as Task & { workingDirectory: string };
 
     // Determine if worktree isolation will be used for this task.
     // Check git availability early: non-git directories cannot use git worktrees,
@@ -574,8 +592,7 @@ export class TaskExecutor {
 
     if (running) {
       // Task is still running — inject message into the live session
-      // Only ClaudeSdkAdapter supports mid-execution steering; Codex does not.
-      if (running.adapter instanceof ClaudeSdkAdapter && typeof running.adapter.injectMessage === 'function') {
+      if (running.adapter.injectMessage) {
         const injected = await running.adapter.injectMessage(taskId, message, interrupt);
         if (injected) {
           return { accepted: true };
@@ -589,46 +606,41 @@ export class TaskExecutor {
     // sessionId hint from frontend can be used for validation; primary lookup is by taskId
     const resumeAdapter = this.findAdapterWithSession(taskId);
     if (resumeAdapter) {
-      const context = resumeAdapter.getTaskContext(taskId);
+      const context = resumeAdapter.getTaskContext!(taskId);
       if (context) {
         if (sessionId && context.sessionId !== sessionId) {
           console.warn(`[task-executor] Session hint mismatch for task ${taskId}: hint=${sessionId}, actual=${context.sessionId}`);
         }
-        if (resumeAdapter instanceof ClaudeSdkAdapter) {
-          this.resumeCompletedTask(taskId, message, resumeAdapter, context);
-          return { accepted: true };
-        }
-        if (resumeAdapter instanceof CodexAdapter) {
-          this.resumeCompletedCodexTask(taskId, message, resumeAdapter, context);
-          return { accepted: true };
-        }
-        if (resumeAdapter instanceof OpenClawAdapter || resumeAdapter instanceof OpenCodeAdapter) {
-          this.resumeCompletedCliTask(taskId, message, resumeAdapter, context);
-          return { accepted: true };
-        }
-        console.warn(`[task-executor] Adapter has session for task ${taskId} but no resume implementation`);
+        this.resumeCompletedSession(taskId, message, resumeAdapter, context);
+        return { accepted: true };
       }
     }
 
     return { accepted: false, reason: 'Task not found or session expired' };
   }
 
-  /** Adapter types that support session preservation and resume */
-  private isResumableAdapter(adapter: ProviderAdapter): adapter is ClaudeSdkAdapter | CodexAdapter | OpenClawAdapter | OpenCodeAdapter {
-    return adapter instanceof ClaudeSdkAdapter
-      || adapter instanceof CodexAdapter
-      || adapter instanceof OpenClawAdapter
-      || adapter instanceof OpenCodeAdapter;
+  /** Check if an adapter supports session persistence and resume */
+  private isResumableAdapter(adapter: ProviderAdapter): adapter is ProviderAdapter & Required<Pick<ProviderAdapter, 'getTaskContext' | 'resumeTask'>> {
+    return typeof adapter.getTaskContext === 'function' && typeof adapter.resumeTask === 'function';
+  }
+
+  /** Remove completedTaskMeta entries older than TTL */
+  private cleanupExpiredTaskMeta(): void {
+    const now = Date.now();
+    for (const [key, meta] of this.completedTaskMeta) {
+      if (now - meta.storedAt > TaskExecutor.COMPLETED_TASK_META_TTL_MS) {
+        this.completedTaskMeta.delete(key);
+      }
+    }
   }
 
   /**
    * Find the adapter that has a preserved session for the given task.
-   * Supports ClaudeSdkAdapter, CodexAdapter, OpenClawAdapter, and OpenCodeAdapter.
    */
-  private findAdapterWithSession(taskId: string): ClaudeSdkAdapter | CodexAdapter | OpenClawAdapter | OpenCodeAdapter | null {
+  private findAdapterWithSession(taskId: string): ProviderAdapter | null {
     for (const adapter of this.adapters.values()) {
       if (this.isResumableAdapter(adapter)) {
-        const context = adapter.getTaskContext(taskId);
+        const context = adapter.getTaskContext!(taskId);
         if (context) return adapter;
       }
     }
@@ -637,18 +649,19 @@ export class TaskExecutor {
 
   /**
    * Resume a completed task session for post-completion steering.
-   * Runs in the background, streaming output back through the WebSocket.
+   * Provider-agnostic — works with any adapter that implements resumeTask().
+   * Handles worktree cleanup by falling back to the original project directory.
    */
-  private async resumeCompletedTask(
+  private async resumeCompletedSession(
     taskId: string,
     message: string,
-    adapter: ClaudeSdkAdapter,
-    context: { sessionId: string; workingDirectory?: string },
+    adapter: ProviderAdapter,
+    context: { sessionId: string; workingDirectory?: string; originalWorkingDirectory?: string },
   ): Promise<void> {
     const abortController = new AbortController();
     let textSequence = 0;
 
-    const stream = {
+    const stream: TaskOutputStream = {
       stdout: (data: string) => {
         this.wsClient.sendTaskOutput(taskId, 'stdout', data, 0);
       },
@@ -681,12 +694,52 @@ export class TaskExecutor {
       },
     };
 
+    // Resolve working directory: existing worktree → recreate worktree → project dir → cwd
+    let resumeDir = context.workingDirectory;
+    let resumeWorktreeCleanup: (() => Promise<void>) | undefined;
+
+    if (resumeDir && !existsSync(resumeDir)) {
+      const meta = this.completedTaskMeta.get(taskId);
+      if (meta?.originalWorkingDirectory && existsSync(meta.originalWorkingDirectory)) {
+        // Try to recreate a worktree from the project branch (like a new task)
+        try {
+          console.log(`[executor] Task ${taskId}: worktree gone, recreating from project branch at ${meta.originalWorkingDirectory}`);
+          const worktree = await createWorktree({
+            workingDirectory: meta.originalWorkingDirectory,
+            taskId: `resume-${taskId.slice(0, 12)}-${Date.now()}`,
+            projectId: meta.projectId,
+            shortProjectId: meta.shortProjectId,
+            shortNodeId: meta.shortNodeId,
+            agentDir: meta.agentDir,
+            baseBranch: meta.baseBranch,
+            projectBranch: meta.projectBranch,
+            stdout: stream.stdout,
+            stderr: stream.stderr,
+          });
+          if (worktree) {
+            resumeDir = worktree.workingDirectory;
+            resumeWorktreeCleanup = () => worktree.cleanup();
+            console.log(`[executor] Task ${taskId}: resume worktree created at ${resumeDir}`);
+          }
+        } catch (err) {
+          console.warn(`[executor] Task ${taskId}: worktree recreation failed (${err instanceof Error ? err.message : err}), using project dir`);
+        }
+        // If worktree creation failed, fall back to project dir
+        if (!resumeWorktreeCleanup) {
+          resumeDir = meta.originalWorkingDirectory;
+        }
+      } else {
+        console.warn(`[executor] Task ${taskId}: worktree gone and no project dir available, using process.cwd()`);
+        resumeDir = process.cwd();
+      }
+    }
+
     try {
-      this.wsClient.sendTaskStatus(taskId, 'running', 0, 'Resuming session...');
-      const result = await adapter.resumeTask(
+      this.wsClient.sendTaskStatus(taskId, 'running', 0, `Resuming ${adapter.name} session...`);
+      const result = await adapter.resumeTask!(
         taskId,
         message,
-        context.workingDirectory ?? process.cwd(),
+        resumeDir ?? process.cwd(),
         context.sessionId,
         stream,
         abortController.signal,
@@ -707,156 +760,16 @@ export class TaskExecutor {
         error: `Resume failed: ${errorMsg}`,
         completedAt: new Date().toISOString(),
       });
-    }
-  }
-
-  /**
-   * Resume a completed Codex task session for post-completion steering.
-   * Uses `codex exec resume <threadId>` for multi-turn conversations.
-   */
-  private async resumeCompletedCodexTask(
-    taskId: string,
-    message: string,
-    adapter: CodexAdapter,
-    context: { sessionId: string; workingDirectory?: string },
-  ): Promise<void> {
-    const abortController = new AbortController();
-    let textSequence = 0;
-
-    const stream = {
-      stdout: (data: string) => {
-        this.wsClient.sendTaskOutput(taskId, 'stdout', data, 0);
-      },
-      stderr: (data: string) => {
-        this.wsClient.sendTaskOutput(taskId, 'stderr', data, 0);
-      },
-      status: (status: TaskStatus, progress?: number, statusMessage?: string) => {
-        this.wsClient.sendTaskStatus(taskId, status, progress, statusMessage);
-      },
-      toolTrace: (toolName: string, toolInput?: unknown, toolResult?: unknown, success?: boolean) => {
-        this.wsClient.sendToolTrace(taskId, toolName, toolInput, toolResult, success);
-      },
-      text: (data: string) => {
-        this.wsClient.sendTaskText(taskId, data, textSequence++);
-      },
-      toolUse: (toolName: string, toolInput: unknown) => {
-        this.wsClient.sendTaskToolUse(taskId, toolName, toolInput);
-      },
-      toolResult: (toolName: string, result: unknown, success: boolean) => {
-        this.wsClient.sendTaskToolResult(taskId, toolName, result, success);
-      },
-      fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number, diff?: string) => {
-        this.wsClient.sendTaskFileChange(taskId, path, action, linesAdded, linesRemoved, diff);
-      },
-      sessionInit: (sessionId: string, model?: string) => {
-        this.wsClient.sendTaskSessionInit(taskId, sessionId, model);
-      },
-      approvalRequest: async (question: string, options: string[]) => {
-        return this.wsClient.sendApprovalRequest(taskId, question, options);
-      },
-    };
-
-    try {
-      this.wsClient.sendTaskStatus(taskId, 'running', 0, 'Resuming Codex session...');
-      const result = await adapter.resumeTask(
-        taskId,
-        message,
-        context.workingDirectory ?? process.cwd(),
-        context.sessionId,
-        stream,
-        abortController.signal,
-      );
-
-      this.wsClient.sendTaskResult({
-        taskId,
-        status: result.success ? 'completed' : 'failed',
-        output: result.output,
-        error: result.error,
-        completedAt: new Date().toISOString(),
-      });
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      this.wsClient.sendTaskResult({
-        taskId,
-        status: 'failed',
-        error: `Codex resume failed: ${errorMsg}`,
-        completedAt: new Date().toISOString(),
-      });
-    }
-  }
-
-  /**
-   * Resume a completed OpenClaw or OpenCode session.
-   * Generic handler that works for any adapter with resumeTask().
-   */
-  private async resumeCompletedCliTask(
-    taskId: string,
-    message: string,
-    adapter: OpenClawAdapter | OpenCodeAdapter,
-    context: { sessionId: string; workingDirectory?: string },
-  ): Promise<void> {
-    const abortController = new AbortController();
-    let textSequence = 0;
-
-    const stream = {
-      stdout: (data: string) => {
-        this.wsClient.sendTaskOutput(taskId, 'stdout', data, 0);
-      },
-      stderr: (data: string) => {
-        this.wsClient.sendTaskOutput(taskId, 'stderr', data, 0);
-      },
-      status: (status: TaskStatus, progress?: number, statusMessage?: string) => {
-        this.wsClient.sendTaskStatus(taskId, status, progress, statusMessage);
-      },
-      toolTrace: (toolName: string, toolInput?: unknown, toolResult?: unknown, success?: boolean) => {
-        this.wsClient.sendToolTrace(taskId, toolName, toolInput, toolResult, success);
-      },
-      text: (data: string) => {
-        this.wsClient.sendTaskText(taskId, data, textSequence++);
-      },
-      toolUse: (toolName: string, toolInput: unknown) => {
-        this.wsClient.sendTaskToolUse(taskId, toolName, toolInput);
-      },
-      toolResult: (toolName: string, result: unknown, success: boolean) => {
-        this.wsClient.sendTaskToolResult(taskId, toolName, result, success);
-      },
-      fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number, diff?: string) => {
-        this.wsClient.sendTaskFileChange(taskId, path, action, linesAdded, linesRemoved, diff);
-      },
-      sessionInit: (sessionId: string, model?: string) => {
-        this.wsClient.sendTaskSessionInit(taskId, sessionId, model);
-      },
-      approvalRequest: async (question: string, options: string[]) => {
-        return this.wsClient.sendApprovalRequest(taskId, question, options);
-      },
-    };
-
-    try {
-      this.wsClient.sendTaskStatus(taskId, 'running', 0, `Resuming ${adapter.name} session...`);
-      const result = await adapter.resumeTask(
-        taskId,
-        message,
-        context.workingDirectory ?? process.cwd(),
-        context.sessionId,
-        stream,
-        abortController.signal,
-      );
-
-      this.wsClient.sendTaskResult({
-        taskId,
-        status: result.success ? 'completed' : 'failed',
-        output: result.output,
-        error: result.error,
-        completedAt: new Date().toISOString(),
-      });
-    } catch (error) {
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      this.wsClient.sendTaskResult({
-        taskId,
-        status: 'failed',
-        error: `${adapter.name} resume failed: ${errorMsg}`,
-        completedAt: new Date().toISOString(),
-      });
+    } finally {
+      // Clean up the resume worktree (if one was created)
+      if (resumeWorktreeCleanup) {
+        try {
+          await resumeWorktreeCleanup();
+          console.log(`[executor] Task ${taskId}: resume worktree cleaned up`);
+        } catch (err) {
+          console.warn(`[executor] Task ${taskId}: resume worktree cleanup failed:`, err);
+        }
+      }
     }
   }
 
@@ -867,7 +780,7 @@ export class TaskExecutor {
   /**
    * Perform safety check on working directory
    */
-  private async performSafetyCheck(task: Task, willUseWorktree: boolean): Promise<SafetyCheckResult> {
+  private async performSafetyCheck(task: Task & { workingDirectory: string }, willUseWorktree: boolean): Promise<SafetyCheckResult> {
     const activeTasksInDir = this.getActiveTasksInDirectory(task.workingDirectory);
     return await checkWorkdirSafety(task.workingDirectory, activeTasksInDir, this.gitAvailable, willUseWorktree);
   }
@@ -876,7 +789,7 @@ export class TaskExecutor {
    * Request safety decision from user
    */
   private async requestSafetyDecision(
-    task: Task,
+    task: Task & { workingDirectory: string },
     safetyCheck: SafetyCheckResult,
   ): Promise<void> {
     // Send safety prompt to server (which forwards to UI)
@@ -996,7 +909,7 @@ export class TaskExecutor {
   /**
    * Track task by directory for parallel execution safety
    */
-  private trackTaskDirectory(task: Task): void {
+  private trackTaskDirectory(task: Pick<Task & { workingDirectory: string }, 'id' | 'workingDirectory'>): void {
     const key = this.canonicalDirKey(task.workingDirectory);
     const tasks = this.tasksByDirectory.get(key) || new Set();
     tasks.add(task.id);
@@ -1027,7 +940,7 @@ export class TaskExecutor {
     return tasks ? tasks.size : 0;
   }
 
-  private async executeTask(task: Task, useSandbox = false): Promise<void> {
+  private async executeTask(task: Task & { workingDirectory: string }, useSandbox = false): Promise<void> {
     console.log(`[executor] Task ${task.id}: workingDirectory=${task.workingDirectory} sandbox=${useSandbox}`);
 
     // Setup sandbox if requested
@@ -1080,7 +993,7 @@ export class TaskExecutor {
       this.processQueue();
       return;
     }
-    console.log(`[executor] Task ${task.id}: adapter ${adapter.name} (${adapter.type}) ready`);
+    console.log(`[executor] Task ${task.id}: adapter ${adapter.name} (${adapter.type}) ready, taskType=${normalizedTask.type ?? 'undefined'}, provider=${normalizedTask.provider}, resumeSessionId=${normalizedTask.resumeSessionId ?? 'none'}`);
 
     const abortController = new AbortController();
     const outputSequence = { stdout: 0, stderr: 0 };
@@ -1200,7 +1113,7 @@ export class TaskExecutor {
 
       let result: Awaited<ReturnType<typeof adapter.execute>>;
       if (canResume) {
-        console.log(`[executor] Task ${task.id}: resuming session ${taskWithWorkspace.resumeSessionId} with ${adapter.name}...`);
+        console.log(`[executor] Task ${task.id}: resuming session ${taskWithWorkspace.resumeSessionId} with ${adapter.name} (type=${adapter.type}, hasMessages=${!!taskWithWorkspace.messages?.length})...`);
         const resumeStartedAt = new Date().toISOString();
         try {
           const resumeResult = await adapter.resumeTask(
@@ -1211,23 +1124,48 @@ export class TaskExecutor {
             stream,
             abortController.signal,
           );
-          result = {
-            taskId: taskWithWorkspace.id,
-            status: resumeResult.success ? 'completed' : 'failed',
-            output: resumeResult.output,
-            error: resumeResult.error,
-            startedAt: resumeStartedAt,
-            completedAt: new Date().toISOString(),
-          };
+          if (resumeResult.success) {
+            result = {
+              taskId: taskWithWorkspace.id,
+              status: 'completed',
+              output: resumeResult.output,
+              startedAt: resumeStartedAt,
+              completedAt: new Date().toISOString(),
+            };
+          } else {
+            // Resume resolved but failed (e.g. Codex session expired, CLI error) —
+            // fall back to fresh execution. Codex/OpenCode adapters resolve with
+            // { success: false } instead of throwing, so the catch block won't fire.
+            console.warn(`[executor] Task ${task.id}: resume returned failure (${resumeResult.error}), falling back to fresh execution`);
+            result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
+          }
         } catch (resumeErr) {
-          // Resume failed (session expired, different machine, SDK error) —
+          // Resume threw (Claude SDK throws on session errors) —
           // fall back to fresh execution with conversation history in messages
-          console.warn(`[executor] Task ${task.id}: resume failed (${resumeErr instanceof Error ? resumeErr.message : resumeErr}), falling back to fresh execution`);
+          console.warn(`[executor] Task ${task.id}: resume threw (${resumeErr instanceof Error ? resumeErr.message : resumeErr}), falling back to fresh execution`);
           result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
         }
       } else {
         console.log(`[executor] Task ${task.id}: executing with ${adapter.name}...`);
         result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
+      }
+
+      // Store original working directory on the adapter's session so post-completion
+      // resume can fall back to it when the worktree has been cleaned up.
+      if (normalizedTask.workingDirectory && prepared.workingDirectory !== normalizedTask.workingDirectory) {
+        adapter.setOriginalWorkingDirectory?.(task.id, normalizedTask.workingDirectory);
+        // Preserve task metadata for worktree recreation on resume
+        this.cleanupExpiredTaskMeta();
+        this.completedTaskMeta.set(task.id, {
+          originalWorkingDirectory: normalizedTask.workingDirectory,
+          projectBranch: normalizedTask.projectBranch,
+          baseBranch: normalizedTask.baseBranch,
+          agentDir: normalizedTask.agentDir,
+          shortProjectId: normalizedTask.shortProjectId,
+          shortNodeId: normalizedTask.shortNodeId,
+          projectId: normalizedTask.projectId,
+          storedAt: Date.now(),
+        });
       }
 
       // Emit accurate file change events via git diff (covers all change methods)
@@ -1249,7 +1187,7 @@ export class TaskExecutor {
       const summary = result.summary;
       if (summary) {
         console.log(`[executor] Task ${task.id}: summary available — status=${summary.status}, workCompleted=${!!summary.workCompleted}, executiveSummary=${!!summary.executiveSummary}, keyFindings=${summary.keyFindings?.length ?? 0}, filesChanged=${summary.filesChanged?.length ?? 0}`);
-      } else {
+      } else if (!isTextOnly) {
         console.warn(`[executor] Task ${task.id}: no summary available for PR body`);
       }
       const rawTitle = summary?.workCompleted || task.title || task.prompt.slice(0, 100);
@@ -1664,7 +1602,7 @@ export class TaskExecutor {
   }
 
   private async prepareTaskWorkspace(
-    task: Task,
+    task: Task & { workingDirectory: string },
     stream: { stdout: (data: string) => void; stderr: (data: string) => void },
   ): Promise<{
     workingDirectory: string;
@@ -1941,12 +1879,19 @@ export class TaskExecutor {
 
 /**
  * Resolve a working directory value.
- * - Empty/missing → error (must be explicitly set to prevent operating on the agent runner's own repo)
+ * - Empty/missing + projectId → auto-provision workspace under workspace root
+ * - Empty/missing + no projectId → error
  * - Git URL → error (repo setup should have resolved this to a local path)
  * - Otherwise → return as-is
  */
-function resolveWorkingDirectory(value: string | undefined): string {
+function resolveWorkingDirectory(value: string | undefined, projectId?: string): string {
   if (!value) {
+    if (projectId) {
+      // Auto-provision a temporary workspace for this project (no git init)
+      const dir = ensureProjectWorkspace(projectId);
+      console.log(`[executor] Auto-provisioned workspace for project ${projectId}: ${dir}`);
+      return dir;
+    }
     throw new Error(
       'workingDirectory is required but was not provided. ' +
       'Configure a project directory or repository before dispatching tasks.'

@@ -6,6 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type { Task, TaskResult, TaskStatus, ExecutionSummary } from '../types.js';
 
+/**
+ * A task that has been normalized by the executor — workingDirectory is always
+ * resolved (auto-provisioned if needed) before being passed to adapters.
+ */
+export type NormalizedTask = Task & { workingDirectory: string };
+
 export interface TaskOutputStream {
   stdout: (data: string) => void;
   stderr: (data: string) => void;
@@ -44,7 +50,7 @@ export interface ProviderAdapter {
   /**
    * Execute a task using this provider
    */
-  execute(task: Task, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult>;
+  execute(task: NormalizedTask, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult>;
 
   /**
    * Get provider status/health
@@ -59,6 +65,39 @@ export interface ProviderAdapter {
    * Optional — adapters that don't support session resume can omit this.
    */
   generateSummary?(taskId: string, workingDirectory?: string): Promise<ExecutionSummary | undefined>;
+
+  /**
+   * Get session context for a completed/active task (for resume support).
+   * Optional — only adapters that support session persistence implement this.
+   */
+  getTaskContext?(taskId: string): { sessionId: string; workingDirectory?: string; originalWorkingDirectory?: string } | null;
+
+  /**
+   * Set the original (pre-worktree) working directory on a session.
+   * Called by the task executor after workspace preparation so the adapter
+   * can fall back to the project directory when the worktree is cleaned up.
+   * Optional — only adapters that support session persistence implement this.
+   */
+  setOriginalWorkingDirectory?(taskId: string, originalDir: string): void;
+
+  /**
+   * Resume a completed session for post-completion follow-up.
+   * Optional — only adapters that support session persistence implement this.
+   */
+  resumeTask?(
+    taskId: string,
+    message: string,
+    workingDirectory: string,
+    sessionId: string,
+    stream: TaskOutputStream,
+    signal: AbortSignal,
+  ): Promise<{ success: boolean; output: string; error?: string }>;
+
+  /**
+   * Inject a message into a running session (mid-execution steering).
+   * Optional — only adapters that support live steering implement this.
+   */
+  injectMessage?(taskId: string, content: string, interrupt?: boolean): Promise<boolean>;
 }
 
 /**

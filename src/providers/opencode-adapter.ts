@@ -15,7 +15,7 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary } from '../types.js';
-import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream, getApprovalServerPath } from './base-adapter.js';
+import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream, getApprovalServerPath } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
 import { config } from '../lib/config.js';
 
@@ -24,6 +24,8 @@ interface PreservedSession {
   sessionId: string;
   taskId: string;
   workingDirectory?: string;
+  /** Original project directory (before worktree), for fallback when worktree is cleaned up */
+  originalWorkingDirectory?: string;
   createdAt: number;
 }
 
@@ -72,7 +74,7 @@ export class OpenCodeAdapter implements ProviderAdapter {
     }
   }
 
-  async execute(task: Task, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
+  async execute(task: NormalizedTask, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
     if (!this.opencodePath) {
       const available = await this.isAvailable();
       if (!available) {
@@ -262,7 +264,7 @@ export class OpenCodeAdapter implements ProviderAdapter {
   /**
    * Get preserved session context for a task.
    */
-  getTaskContext(taskId: string): { sessionId: string; workingDirectory: string } | null {
+  getTaskContext(taskId: string): { sessionId: string; workingDirectory: string; originalWorkingDirectory?: string } | null {
     const session = this.preservedSessions.get(taskId);
     if (!session || Date.now() - session.createdAt > SESSION_TTL_MS) {
       this.preservedSessions.delete(taskId);
@@ -271,7 +273,20 @@ export class OpenCodeAdapter implements ProviderAdapter {
     return {
       sessionId: session.sessionId,
       workingDirectory: session.workingDirectory || '',
+      originalWorkingDirectory: session.originalWorkingDirectory,
     };
+  }
+
+  /**
+   * Set the original (pre-worktree) working directory on a session.
+   * Called by the task executor after workspace preparation so the adapter
+   * can fall back to it when the worktree is cleaned up.
+   */
+  setOriginalWorkingDirectory(taskId: string, originalDir: string): void {
+    const session = this.preservedSessions.get(taskId);
+    if (session) {
+      session.originalWorkingDirectory = originalDir;
+    }
   }
 
   private cleanupExpiredSessions(): void {

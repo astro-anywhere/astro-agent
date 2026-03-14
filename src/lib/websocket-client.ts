@@ -88,6 +88,7 @@ export interface WebSocketClientOptions {
   onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string, branchName?: string) => void;
   onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
   onTaskCleanup?: (taskId: string, branchName?: string) => void;
+  onProjectCleanup?: (projectId: string) => void;
   onFileList?: (path: string, correlationId: string) => void;
   onFileContent?: (path: string, correlationId: string) => void;
   onFileUpload?: (destinationPath: string, fileName: string, size: number, totalChunks: number, overwrite: boolean, correlationId: string) => void;
@@ -112,12 +113,20 @@ interface TaskCleanupMessage {
   payload: { taskId: string; branchName?: string };
 }
 
+/** Cleanup message: remove auto-provisioned workspace for a deleted project */
+interface ProjectCleanupMessage {
+  type: 'project_cleanup';
+  timestamp: string;
+  payload: { projectId: string };
+}
+
 type IncomingMessage =
   | RegisteredMessage
   | HeartbeatAckMessage
   | TaskDispatchMessage
   | TaskCancelMessage
   | TaskCleanupMessage
+  | ProjectCleanupMessage
   | TaskSteerIncomingMessage
   | TaskApprovalResponseMessage
   | TaskSafetyDecisionMessage
@@ -167,6 +176,7 @@ export class WebSocketClient {
   private onTaskSteer?: (taskId: string, message: string, action?: string, interrupt?: boolean, sessionId?: string, branchName?: string) => void;
   private onTaskSafetyDecision?: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
   private onTaskCleanup?: (taskId: string, branchName?: string) => void;
+  private onProjectCleanup?: (projectId: string) => void;
   private onFileList?: (path: string, correlationId: string) => void;
   private onFileContent?: (path: string, correlationId: string) => void;
   private onFileUpload?: (destinationPath: string, fileName: string, size: number, totalChunks: number, overwrite: boolean, correlationId: string) => void;
@@ -195,6 +205,7 @@ export class WebSocketClient {
     this.onTaskSteer = options.onTaskSteer;
     this.onTaskSafetyDecision = options.onTaskSafetyDecision;
     this.onTaskCleanup = options.onTaskCleanup;
+    this.onProjectCleanup = options.onProjectCleanup;
     this.onFileList = options.onFileList;
     this.onFileContent = options.onFileContent;
     this.onFileUpload = options.onFileUpload;
@@ -863,6 +874,9 @@ export class WebSocketClient {
       case 'task_cleanup':
         this.handleTaskCleanup(message);
         break;
+      case 'project_cleanup':
+        this.handleProjectCleanup(message as ProjectCleanupMessage);
+        break;
       case 'task_steer':
         this.handleTaskSteer(message as unknown as TaskSteerIncomingMessage);
         break;
@@ -1144,6 +1158,12 @@ export class WebSocketClient {
     const { taskId, branchName } = message.payload;
     console.log(`[ws-client] Received cleanup request for task ${taskId}${branchName ? ` branch=${branchName}` : ''}`);
     this.onTaskCleanup?.(taskId, branchName);
+  }
+
+  private handleProjectCleanup(message: ProjectCleanupMessage): void {
+    const { projectId } = message.payload;
+    console.log(`[ws-client] Received project cleanup request for project ${projectId}`);
+    this.onProjectCleanup?.(projectId);
   }
 
   private handleTaskSteer(message: TaskSteerIncomingMessage): void {
