@@ -10,7 +10,7 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary } from '../types.js';
-import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream, getApprovalServerPath } from './base-adapter.js';
+import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream, getApprovalServerPath } from './base-adapter.js';
 import { getProvider } from '../lib/providers.js';
 import { config } from '../lib/config.js';
 
@@ -125,7 +125,7 @@ export class CodexAdapter implements ProviderAdapter {
     }
   }
 
-  async execute(task: Task, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
+  async execute(task: NormalizedTask, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
     if (!this.codexPath) {
       const available = await this.isAvailable();
       if (!available) {

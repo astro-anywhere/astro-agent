@@ -18,6 +18,7 @@ import { OpenClawAdapter } from '../providers/openclaw-adapter.js';
 import type { OpenClawBridge } from './openclaw-bridge.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree, syncProjectWorktree } from './worktree.js';
+import { ensureProjectWorkspace } from './workspace-root.js';
 import { BranchLockManager } from './branch-lock.js';
 import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha, isGhAvailable } from './git-pr.js';
 import { localMergeIntoProjectBranch } from './local-merge.js';
@@ -151,7 +152,7 @@ async function tryPreMergeRebase(
 }
 
 interface RunningTask {
-  task: Task;
+  task: Task & { workingDirectory: string };
   abortController: AbortController;
   adapter: ProviderAdapter;
   outputSequence: { stdout: number; stderr: number };
@@ -159,7 +160,7 @@ interface RunningTask {
 }
 
 interface PendingSafetyCheck {
-  task: Task;
+  task: Task & { workingDirectory: string };
   safetyResult: SafetyCheckResult;
   resolveDecision: (decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => void;
 }
@@ -202,7 +203,7 @@ function formatDuration(ms: number): string {
 export class TaskExecutor {
   private wsClient: WebSocketClient;
   private runningTasks: Map<string, RunningTask> = new Map();
-  private taskQueue: Task[] = [];
+  private taskQueue: (Task & { workingDirectory: string })[] = [];
   private maxConcurrentTasks: number;
   private defaultTimeout: number; // Hard cap
   private defaultIdleTimeout: number; // Resets on activity
@@ -287,30 +288,34 @@ export class TaskExecutor {
     // Skip workingDirectory resolution for lightweight text-only tasks (no file system access)
     const isTextOnlyTask = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan';
 
-    let resolvedWorkDir: string;
-    try {
-      resolvedWorkDir = isTextOnlyTask && !task.workingDirectory
-        ? undefined!  // Text-only tasks can run without a working directory
-        : resolveWorkingDirectory(task.workingDirectory);
-    } catch (err) {
-      // Fail fast with a clear error instead of entering the execution pipeline.
-      // Without this, tasks with non-existent directories become dead jobs.
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[executor] Task ${task.id}: ${errorMsg}`);
-      this.wsClient.sendTaskResult({
-        taskId: task.id,
-        status: 'failed',
-        error: errorMsg,
-        completedAt: new Date().toISOString(),
-      });
-      this.wsClient.removeActiveTask(task.id);
-      return;
+    // Text-only tasks (plan/chat/summarize) can run without a working directory.
+    // For all others, resolve the directory or auto-provision one.
+    let resolvedWorkDir: string | undefined;
+    if (isTextOnlyTask && !task.workingDirectory) {
+      resolvedWorkDir = undefined;
+    } else {
+      try {
+        resolvedWorkDir = resolveWorkingDirectory(task.workingDirectory, task.projectId);
+      } catch (err) {
+        // Fail fast with a clear error instead of entering the execution pipeline.
+        // Without this, tasks with non-existent directories become dead jobs.
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[executor] Task ${task.id}: ${errorMsg}`);
+        this.wsClient.sendTaskResult({
+          taskId: task.id,
+          status: 'failed',
+          error: errorMsg,
+          completedAt: new Date().toISOString(),
+        });
+        this.wsClient.removeActiveTask(task.id);
+        return;
+      }
     }
 
     const normalizedTask = {
       ...task,
-      workingDirectory: resolvedWorkDir,
-    };
+      workingDirectory: resolvedWorkDir ?? '',
+    } as Task & { workingDirectory: string };
 
     // Determine if worktree isolation will be used for this task.
     // Check git availability early: non-git directories cannot use git worktrees,
@@ -775,7 +780,7 @@ export class TaskExecutor {
   /**
    * Perform safety check on working directory
    */
-  private async performSafetyCheck(task: Task, willUseWorktree: boolean): Promise<SafetyCheckResult> {
+  private async performSafetyCheck(task: Task & { workingDirectory: string }, willUseWorktree: boolean): Promise<SafetyCheckResult> {
     const activeTasksInDir = this.getActiveTasksInDirectory(task.workingDirectory);
     return await checkWorkdirSafety(task.workingDirectory, activeTasksInDir, this.gitAvailable, willUseWorktree);
   }
@@ -784,7 +789,7 @@ export class TaskExecutor {
    * Request safety decision from user
    */
   private async requestSafetyDecision(
-    task: Task,
+    task: Task & { workingDirectory: string },
     safetyCheck: SafetyCheckResult,
   ): Promise<void> {
     // Send safety prompt to server (which forwards to UI)
@@ -904,7 +909,7 @@ export class TaskExecutor {
   /**
    * Track task by directory for parallel execution safety
    */
-  private trackTaskDirectory(task: Task): void {
+  private trackTaskDirectory(task: Pick<Task & { workingDirectory: string }, 'id' | 'workingDirectory'>): void {
     const key = this.canonicalDirKey(task.workingDirectory);
     const tasks = this.tasksByDirectory.get(key) || new Set();
     tasks.add(task.id);
@@ -935,7 +940,7 @@ export class TaskExecutor {
     return tasks ? tasks.size : 0;
   }
 
-  private async executeTask(task: Task, useSandbox = false): Promise<void> {
+  private async executeTask(task: Task & { workingDirectory: string }, useSandbox = false): Promise<void> {
     console.log(`[executor] Task ${task.id}: workingDirectory=${task.workingDirectory} sandbox=${useSandbox}`);
 
     // Setup sandbox if requested
@@ -1597,7 +1602,7 @@ export class TaskExecutor {
   }
 
   private async prepareTaskWorkspace(
-    task: Task,
+    task: Task & { workingDirectory: string },
     stream: { stdout: (data: string) => void; stderr: (data: string) => void },
   ): Promise<{
     workingDirectory: string;
@@ -1874,12 +1879,19 @@ export class TaskExecutor {
 
 /**
  * Resolve a working directory value.
- * - Empty/missing → error (must be explicitly set to prevent operating on the agent runner's own repo)
+ * - Empty/missing + projectId → auto-provision workspace under workspace root
+ * - Empty/missing + no projectId → error
  * - Git URL → error (repo setup should have resolved this to a local path)
  * - Otherwise → return as-is
  */
-function resolveWorkingDirectory(value: string | undefined): string {
+function resolveWorkingDirectory(value: string | undefined, projectId?: string): string {
   if (!value) {
+    if (projectId) {
+      // Auto-provision a temporary workspace for this project (no git init)
+      const dir = ensureProjectWorkspace(projectId);
+      console.log(`[executor] Auto-provisioned workspace for project ${projectId}: ${dir}`);
+      return dir;
+    }
     throw new Error(
       'workingDirectory is required but was not provided. ' +
       'Configure a project directory or repository before dispatching tasks.'

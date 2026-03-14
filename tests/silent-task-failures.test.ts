@@ -267,12 +267,8 @@ describe('processQueue catch sends sendTaskResult on executeTask failure', () =>
     vi.clearAllMocks();
   });
 
-  it('sends failed result when executeTask throws (provider unavailable)', async () => {
-    // createProviderAdapter returns null → executeTask returns early with sendTaskResult
-    // But if getAdapter() itself threw, the processQueue catch would fire.
-    // We test via submitTask with an empty workingDirectory which is caught by
-    // the resolveWorkingDirectory try-catch and reported via sendTaskResult.
-
+  it('sends failed result when workingDirectory is empty and no projectId', async () => {
+    // resolveWorkingDirectory throws when both workingDirectory and projectId are empty
     const executor = new TaskExecutor({
       wsClient,
       useWorktree: false,
@@ -281,7 +277,8 @@ describe('processQueue catch sends sendTaskResult on executeTask failure', () =>
     await new Promise((r) => setTimeout(r, 100));
 
     const task = createTask({
-      workingDirectory: '', // empty path → resolveWorkingDirectory throws
+      workingDirectory: '', // empty path
+      projectId: '',        // no projectId → can't auto-provision
       skipSafetyCheck: true,
     });
 
@@ -601,41 +598,22 @@ describe('submitTask reports failure on empty workingDirectory', () => {
     vi.clearAllMocks();
   });
 
-  it('sends failed result when workingDirectory is empty string', async () => {
+  it('sends failed result when workingDirectory is empty and no projectId', async () => {
     const executor = new TaskExecutor({
       wsClient,
       useWorktree: false,
     });
     await new Promise((r) => setTimeout(r, 100));
 
-    const task = createTask({ workingDirectory: '' });
+    const task = createTask({ workingDirectory: '', projectId: '' });
 
-    // submitTask now handles the error internally and sends a failed result
+    // submitTask should fail because there's no projectId to auto-provision
     await executor.submitTask(task);
 
     expect(wsClient.sendTaskResult).toHaveBeenCalledWith(expect.objectContaining({
       taskId: task.id,
       status: 'failed',
       error: expect.stringContaining('workingDirectory is required'),
-    }));
-  });
-
-  it('reports failure directly without requiring caller catch', async () => {
-    const executor = new TaskExecutor({
-      wsClient,
-      useWorktree: false,
-    });
-    await new Promise((r) => setTimeout(r, 100));
-
-    const task = createTask({ workingDirectory: '' });
-
-    // submitTask resolves normally (no throw) — failure is sent via wsClient
-    await executor.submitTask(task);
-
-    expect(wsClient.sendTaskResult).toHaveBeenCalledTimes(1);
-    expect(wsClient.sendTaskResult).toHaveBeenCalledWith(expect.objectContaining({
-      taskId: task.id,
-      status: 'failed',
     }));
   });
 });

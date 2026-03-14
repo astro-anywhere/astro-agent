@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path';
 import os from 'node:os';
 import { homedir } from 'node:os';
 import { config } from '../lib/config.js';
+import { cleanupProjectWorkspace, pruneStaleWorkspaces } from '../lib/workspace-root.js';
 import { detectProviders } from '../lib/providers.js';
 import { getMachineResources } from '../lib/resources.js';
 import { WebSocketClient } from '../lib/websocket-client.js';
@@ -439,6 +440,9 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       taskExecutor.cleanupTask(taskId, branchName).catch((error) => {
         log('error', `Failed to cleanup task ${taskId}: ${error instanceof Error ? error.message : String(error)}`, logLevel);
       });
+    },
+    onProjectCleanup: (projectId: string) => {
+      cleanupProjectWorkspace(projectId);
     },
     onTaskSafetyDecision: (taskId: string, decision: 'proceed' | 'init-git' | 'sandbox' | 'cancel') => {
       log('info', `Safety decision for task ${taskId}: ${decision}`, logLevel);
@@ -1266,6 +1270,13 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     wsClient.connect().catch(() => {
       // Reconnection handled internally
     });
+  }
+
+  // Prune stale auto-provisioned workspaces (fire-and-forget)
+  try {
+    pruneStaleWorkspaces(30);
+  } catch {
+    // Workspace pruning is best-effort
   }
 
   console.log();
