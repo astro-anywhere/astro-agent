@@ -234,7 +234,11 @@ export class TaskExecutor {
     shortProjectId?: string;
     shortNodeId?: string;
     projectId?: string;
+    storedAt: number;
   }> = new Map();
+
+  /** TTL for completed task metadata (10 minutes, matches adapter session TTL) */
+  private static readonly COMPLETED_TASK_META_TTL_MS = 10 * 60 * 1000;
 
   constructor(options: TaskExecutorOptions) {
     this.wsClient = options.wsClient;
@@ -602,11 +606,8 @@ export class TaskExecutor {
         if (sessionId && context.sessionId !== sessionId) {
           console.warn(`[task-executor] Session hint mismatch for task ${taskId}: hint=${sessionId}, actual=${context.sessionId}`);
         }
-        if (resumeAdapter.resumeTask) {
-          this.resumeCompletedSession(taskId, message, resumeAdapter, context);
-          return { accepted: true };
-        }
-        console.warn(`[task-executor] Adapter has session for task ${taskId} but no resumeTask implementation`);
+        this.resumeCompletedSession(taskId, message, resumeAdapter, context);
+        return { accepted: true };
       }
     }
 
@@ -616,6 +617,16 @@ export class TaskExecutor {
   /** Check if an adapter supports session persistence and resume */
   private isResumableAdapter(adapter: ProviderAdapter): adapter is ProviderAdapter & Required<Pick<ProviderAdapter, 'getTaskContext' | 'resumeTask'>> {
     return typeof adapter.getTaskContext === 'function' && typeof adapter.resumeTask === 'function';
+  }
+
+  /** Remove completedTaskMeta entries older than TTL */
+  private cleanupExpiredTaskMeta(): void {
+    const now = Date.now();
+    for (const [key, meta] of this.completedTaskMeta) {
+      if (now - meta.storedAt > TaskExecutor.COMPLETED_TASK_META_TTL_MS) {
+        this.completedTaskMeta.delete(key);
+      }
+    }
   }
 
   /**
@@ -687,7 +698,6 @@ export class TaskExecutor {
       if (meta?.originalWorkingDirectory && existsSync(meta.originalWorkingDirectory)) {
         // Try to recreate a worktree from the project branch (like a new task)
         try {
-          const { createWorktree } = await import('./worktree.js');
           console.log(`[executor] Task ${taskId}: worktree gone, recreating from project branch at ${meta.originalWorkingDirectory}`);
           const worktree = await createWorktree({
             workingDirectory: meta.originalWorkingDirectory,
@@ -1140,6 +1150,7 @@ export class TaskExecutor {
       if (normalizedTask.workingDirectory && prepared.workingDirectory !== normalizedTask.workingDirectory) {
         adapter.setOriginalWorkingDirectory?.(task.id, normalizedTask.workingDirectory);
         // Preserve task metadata for worktree recreation on resume
+        this.cleanupExpiredTaskMeta();
         this.completedTaskMeta.set(task.id, {
           originalWorkingDirectory: normalizedTask.workingDirectory,
           projectBranch: normalizedTask.projectBranch,
@@ -1148,6 +1159,7 @@ export class TaskExecutor {
           shortProjectId: normalizedTask.shortProjectId,
           shortNodeId: normalizedTask.shortNodeId,
           projectId: normalizedTask.projectId,
+          storedAt: Date.now(),
         });
       }
 
