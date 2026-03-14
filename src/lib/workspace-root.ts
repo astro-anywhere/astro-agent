@@ -59,6 +59,9 @@ export function resolveWorkspaceRoot(): string {
  * Does NOT initialize git — the workspace is a plain directory.
  */
 export function ensureProjectWorkspace(projectId: string): string {
+  if (!projectId || projectId.includes('..') || path.isAbsolute(projectId)) {
+    throw new Error(`Invalid projectId for workspace provisioning: ${projectId}`);
+  }
   const dir = path.join(resolveWorkspaceRoot(), projectId);
   fs.mkdirSync(dir, { recursive: true });
   return dir;
@@ -69,6 +72,10 @@ export function ensureProjectWorkspace(projectId: string): string {
  * Called when a project is deleted.
  */
 export function cleanupProjectWorkspace(projectId: string): void {
+  if (!projectId || projectId.includes('..') || path.isAbsolute(projectId)) {
+    console.warn(`[workspace] Refusing to clean up invalid projectId: ${projectId}`);
+    return;
+  }
   const dir = path.join(resolveWorkspaceRoot(), projectId);
   try {
     fs.rmSync(dir, { recursive: true, force: true });
@@ -81,6 +88,7 @@ export function cleanupProjectWorkspace(projectId: string): void {
 /**
  * Prune workspace directories older than maxAgeDays.
  * Runs on agent startup to clean up orphaned temp workspaces.
+ * Best-effort and safe under concurrent startups (rmSync with force:true).
  */
 export function pruneStaleWorkspaces(maxAgeDays: number = 30): void {
   const root = resolveWorkspaceRoot();

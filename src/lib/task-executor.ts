@@ -288,29 +288,33 @@ export class TaskExecutor {
     // Skip workingDirectory resolution for lightweight text-only tasks (no file system access)
     const isTextOnlyTask = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan';
 
-    let resolvedWorkDir: string;
-    try {
-      resolvedWorkDir = isTextOnlyTask && !task.workingDirectory
-        ? undefined!  // Text-only tasks can run without a working directory
-        : resolveWorkingDirectory(task.workingDirectory, task.projectId);
-    } catch (err) {
-      // Fail fast with a clear error instead of entering the execution pipeline.
-      // Without this, tasks with non-existent directories become dead jobs.
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      console.error(`[executor] Task ${task.id}: ${errorMsg}`);
-      this.wsClient.sendTaskResult({
-        taskId: task.id,
-        status: 'failed',
-        error: errorMsg,
-        completedAt: new Date().toISOString(),
-      });
-      this.wsClient.removeActiveTask(task.id);
-      return;
+    // Text-only tasks (plan/chat/summarize) can run without a working directory.
+    // For all others, resolve the directory or auto-provision one.
+    let resolvedWorkDir: string | undefined;
+    if (isTextOnlyTask && !task.workingDirectory) {
+      resolvedWorkDir = undefined;
+    } else {
+      try {
+        resolvedWorkDir = resolveWorkingDirectory(task.workingDirectory, task.projectId);
+      } catch (err) {
+        // Fail fast with a clear error instead of entering the execution pipeline.
+        // Without this, tasks with non-existent directories become dead jobs.
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        console.error(`[executor] Task ${task.id}: ${errorMsg}`);
+        this.wsClient.sendTaskResult({
+          taskId: task.id,
+          status: 'failed',
+          error: errorMsg,
+          completedAt: new Date().toISOString(),
+        });
+        this.wsClient.removeActiveTask(task.id);
+        return;
+      }
     }
 
     const normalizedTask = {
       ...task,
-      workingDirectory: resolvedWorkDir,
+      workingDirectory: resolvedWorkDir ?? '',
     } as Task & { workingDirectory: string };
 
     // Determine if worktree isolation will be used for this task.
@@ -905,8 +909,8 @@ export class TaskExecutor {
   /**
    * Track task by directory for parallel execution safety
    */
-  private trackTaskDirectory(task: Pick<Task, 'id' | 'workingDirectory'>): void {
-    const key = this.canonicalDirKey(task.workingDirectory || '');
+  private trackTaskDirectory(task: Pick<Task & { workingDirectory: string }, 'id' | 'workingDirectory'>): void {
+    const key = this.canonicalDirKey(task.workingDirectory);
     const tasks = this.tasksByDirectory.get(key) || new Set();
     tasks.add(task.id);
     this.tasksByDirectory.set(key, tasks);

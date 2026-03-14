@@ -607,7 +607,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
    * Summarize tasks skip settingSources (no skills needed for structured extraction).
    */
   private async runTextOnlyQuery(
-    task: Task,
+    task: NormalizedTask,
     stream: TaskOutputStream,
     abortController: AbortController,
     hasWorkdir: boolean,
@@ -733,7 +733,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
   }
 
   private async runQuery(
-    task: Task,
+    task: NormalizedTask,
     stream: TaskOutputStream,
     abortController: AbortController
   ): Promise<{
@@ -771,7 +771,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     const isTextOnlyTask = task.type === 'chat' || task.type === 'summarize';
 
     // Plan/chat/summarize tasks without a working directory run without cwd context
-    const hasWorkdir = !!task.workingDirectory;
+    const workdir: string | undefined = task.workingDirectory || undefined;
+    const hasWorkdir = !!workdir;
 
     // ── Fast path for text-only tasks (chat, summarize) ──
     // These tasks use structured text blocks (not tools/MCP) for plan mutations.
@@ -782,6 +783,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     }
 
     // ── Standard path for execution tasks ──
+    // After the text-only fast path, workdir is always defined for execution tasks.
 
     // Build options for the query
     const options: Parameters<typeof query>[0]['options'] = {
@@ -792,7 +794,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       ...getSandboxOption(task.model),
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
       persistSession: true, // Keep session on disk so generateSummary() can resume it
-      ...(hasWorkdir ? { cwd: task.workingDirectory, additionalDirectories: [task.workingDirectory].filter((d): d is string => !!d) } : {}),
+      ...(workdir ? { cwd: workdir, additionalDirectories: [workdir] } : {}),
       // Use globally installed claude binary if available (avoids missing cli.js on remote machines)
       ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
       // Capture subprocess stderr for debugging exit code 1 crashes
@@ -906,8 +908,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // The image paths are referenced in the prompt so the agent can view them
     // (Claude Code's Read tool supports images natively as it is multimodal).
     // Cleanup is handled by the caller (execute()) via try/finally.
-    if (task.images && task.images.length > 0) {
-      const imageDir = join(task.workingDirectory!, '.astro', 'images');
+    if (task.images && task.images.length > 0 && workdir) {
+      const imageDir = join(workdir, '.astro', 'images');
       try {
         const imagePaths = await writeImagesToDir(task.images, imageDir);
         if (imagePaths.length > 0) {
