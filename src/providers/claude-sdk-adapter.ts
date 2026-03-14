@@ -86,6 +86,8 @@ interface ActiveQuery {
   query: Query | null;  // null after completion (session preserved for resume)
   sessionId: string;
   workingDirectory?: string;
+  /** Original project directory (before worktree), for fallback when worktree is cleaned up */
+  originalWorkingDirectory?: string;
 }
 
 /** How long to preserve completed session state for potential steering (ms) */
@@ -494,10 +496,21 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
    * Get session context for a task (active or recently completed).
    * Returns sessionId and workingDirectory if available.
    */
-  getTaskContext(taskId: string): { sessionId: string; workingDirectory?: string } | null {
+  getTaskContext(taskId: string): { sessionId: string; workingDirectory?: string; originalWorkingDirectory?: string } | null {
     const active = this.activeQueries.get(taskId);
     if (!active) return null;
-    return { sessionId: active.sessionId, workingDirectory: active.workingDirectory };
+    return { sessionId: active.sessionId, workingDirectory: active.workingDirectory, originalWorkingDirectory: active.originalWorkingDirectory };
+  }
+
+  /**
+   * Set the original (pre-worktree) working directory on a session.
+   * Called by the task executor after workspace preparation.
+   */
+  setOriginalWorkingDirectory(taskId: string, originalDir: string): void {
+    const active = this.activeQueries.get(taskId);
+    if (active) {
+      active.originalWorkingDirectory = originalDir;
+    }
   }
 
   async getStatus(): Promise<ProviderStatus> {

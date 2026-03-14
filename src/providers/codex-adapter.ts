@@ -29,6 +29,8 @@ interface ActiveSession {
   threadId: string;
   taskId: string;
   workingDirectory?: string;
+  /** Original project directory (before worktree), for fallback when worktree is cleaned up */
+  originalWorkingDirectory?: string;
   model?: string;
   storedAt: number;
 }
@@ -194,6 +196,7 @@ export class CodexAdapter implements ProviderAdapter {
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.lastError = errorMsg;
+      console.error(`[codex] Task ${task.id}: execute() caught error: ${errorMsg}`);
 
       if (signal.aborted) {
         return {
@@ -245,7 +248,7 @@ export class CodexAdapter implements ProviderAdapter {
    * Get session context for a task (for resume support).
    * Returns threadId as sessionId and workingDirectory if available.
    */
-  getTaskContext(taskId: string): { sessionId: string; workingDirectory?: string } | null {
+  getTaskContext(taskId: string): { sessionId: string; workingDirectory?: string; originalWorkingDirectory?: string } | null {
     const session = this.activeSessions.get(taskId);
     if (!session) return null;
     // Check TTL
@@ -253,7 +256,23 @@ export class CodexAdapter implements ProviderAdapter {
       this.activeSessions.delete(taskId);
       return null;
     }
-    return { sessionId: session.threadId, workingDirectory: session.workingDirectory };
+    return {
+      sessionId: session.threadId,
+      workingDirectory: session.workingDirectory,
+      originalWorkingDirectory: session.originalWorkingDirectory,
+    };
+  }
+
+  /**
+   * Set the original (pre-worktree) working directory on a session.
+   * Called by the task executor after workspace preparation so the adapter
+   * can fall back to it when the worktree is cleaned up.
+   */
+  setOriginalWorkingDirectory(taskId: string, originalDir: string): void {
+    const session = this.activeSessions.get(taskId);
+    if (session) {
+      session.originalWorkingDirectory = originalDir;
+    }
   }
 
   /**
@@ -283,24 +302,37 @@ export class CodexAdapter implements ProviderAdapter {
     const isGitRepo = workingDirectory && existsSync(join(workingDirectory, '.git'));
     const model = this.activeSessions.get(taskId)?.model || this.configModel;
 
+    // Use stdin for large prompts to avoid CLI argument length limits
+    const useStdin = message.length > 4096;
+
     const args = [
       'exec', 'resume',
       threadId,
-      message,
+      ...(useStdin ? ['-'] : [message]),
       '--json',
       '--dangerously-bypass-approvals-and-sandbox',
       ...(model ? ['-m', model] : []),
       ...(!isGitRepo ? ['--skip-git-repo-check'] : []),
     ];
 
+    console.log(`[codex] Task ${taskId}: resuming session threadId=${threadId}, promptLen=${message.length}, useStdin=${useStdin}, cwd=${workingDirectory || '(none)'}, model=${model || '(default)'}`);
+
     const execState: ExecutionState = { turnCount: 0 };
+
+    // Validate working directory exists (worktrees may be cleaned up after execution)
+    const effectiveCwd = workingDirectory && existsSync(workingDirectory)
+      ? workingDirectory
+      : undefined;
+    if (workingDirectory && !effectiveCwd) {
+      console.warn(`[codex] Task ${taskId}: resume cwd does not exist (${workingDirectory}), falling back to no cwd`);
+    }
 
     return new Promise((resolve) => {
       let proc: ChildProcess;
 
       try {
         proc = spawn(this.codexPath!, args, {
-          cwd: workingDirectory || undefined,
+          cwd: effectiveCwd,
           env: {
             ...process.env,
             ASTRO_EXECUTION_ID: taskId,
@@ -315,6 +347,12 @@ export class CodexAdapter implements ProviderAdapter {
           error: error instanceof Error ? error.message : String(error),
         });
         return;
+      }
+
+      // Write prompt via stdin for large prompts
+      if (useStdin && proc.stdin) {
+        proc.stdin.write(message);
+        proc.stdin.end();
       }
 
       let stdout = '';
@@ -369,6 +407,12 @@ export class CodexAdapter implements ProviderAdapter {
         }
         if (killTimer) clearTimeout(killTimer);
         signal.removeEventListener('abort', abortHandler);
+
+        if (code !== 0) {
+          console.error(`[codex] Task ${taskId}: resume exited with code ${code}, threadId=${threadId}, stderr=${stderr.slice(0, 500)}`);
+        } else {
+          console.log(`[codex] Task ${taskId}: resume completed successfully`);
+        }
 
         // Update session — use new threadId if emitted, otherwise preserve input sessionId
         this.activeSessions.set(taskId, {
@@ -504,6 +548,10 @@ export class CodexAdapter implements ProviderAdapter {
         effectivePrompt += `\n\n---\n\n## Attached Images\n\nThe following ${imagePaths.length} image(s) from the task description have been saved to disk for your analysis:\n${imageList}`;
       }
 
+      // Use stdin for prompts to avoid CLI argument length limits and
+      // special character escaping issues with large plan/chat prompts.
+      const useStdin = effectivePrompt.length > 4096;
+
       const args = [
         'exec',
         '-s', 'danger-full-access',       // Full filesystem + network access
@@ -512,7 +560,7 @@ export class CodexAdapter implements ProviderAdapter {
         '--json',                         // JSONL output for structured parsing
         // Pass images via --image flag if available (Codex CLI feature)
         ...(imagePaths.length > 0 ? ['--image', imagePaths.join(',')] : []),
-        effectivePrompt,
+        ...(useStdin ? ['-'] : [effectivePrompt]),
       ];
 
       const env = {
@@ -535,6 +583,8 @@ export class CodexAdapter implements ProviderAdapter {
         return;
       }
 
+      console.log(`[codex] Task ${task.id}: spawning codex exec, promptLen=${effectivePrompt.length}, useStdin=${useStdin}, cwd=${task.workingDirectory || '(none)'}, model=${model || '(default)'}`);
+
       try {
         proc = spawn(this.codexPath!, args, {
           cwd: task.workingDirectory || undefined,
@@ -542,8 +592,15 @@ export class CodexAdapter implements ProviderAdapter {
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (error) {
+        console.error(`[codex] Task ${task.id}: spawn failed:`, error);
         reject(error);
         return;
+      }
+
+      // Write prompt via stdin for large prompts (avoids CLI arg length limits)
+      if (useStdin && proc.stdin) {
+        proc.stdin.write(effectivePrompt);
+        proc.stdin.end();
       }
 
       let stdout = '';
@@ -614,6 +671,12 @@ export class CodexAdapter implements ProviderAdapter {
 
         if (killTimer) clearTimeout(killTimer);
         signal.removeEventListener('abort', abortHandler);
+
+        if (code !== 0) {
+          console.error(`[codex] Task ${task.id}: exited with code ${code}, stderr=${stderr.slice(0, 500) || '(empty)'}, stdout=${stdout.slice(0, 200) || '(empty)'}`);
+        } else {
+          console.log(`[codex] Task ${task.id}: completed successfully`);
+        }
 
         // Also extract artifacts from heuristic patterns in raw output
         this.extractArtifacts(stdout, artifacts);
