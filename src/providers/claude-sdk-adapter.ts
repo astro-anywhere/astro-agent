@@ -40,7 +40,7 @@ function resolveClaudeExecutable(): string | undefined {
 const claudeExecutablePath = resolveClaudeExecutable();
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
-import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse } from './base-adapter.js';
+import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse } from './base-adapter.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
 import { config } from '../lib/config.js';
@@ -178,7 +178,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     }
   }
 
-  async execute(task: Task, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
+  async execute(task: NormalizedTask, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
     this.activeTasks++;
     const startedAt = new Date().toISOString();
 
@@ -792,7 +792,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       ...getSandboxOption(task.model),
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
       persistSession: true, // Keep session on disk so generateSummary() can resume it
-      ...(hasWorkdir ? { cwd: task.workingDirectory, additionalDirectories: [task.workingDirectory] } : {}),
+      ...(hasWorkdir ? { cwd: task.workingDirectory, additionalDirectories: [task.workingDirectory].filter((d): d is string => !!d) } : {}),
       // Use globally installed claude binary if available (avoids missing cli.js on remote machines)
       ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
       // Capture subprocess stderr for debugging exit code 1 crashes
@@ -907,7 +907,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // (Claude Code's Read tool supports images natively as it is multimodal).
     // Cleanup is handled by the caller (execute()) via try/finally.
     if (task.images && task.images.length > 0) {
-      const imageDir = join(task.workingDirectory, '.astro', 'images');
+      const imageDir = join(task.workingDirectory!, '.astro', 'images');
       try {
         const imagePaths = await writeImagesToDir(task.images, imageDir);
         if (imagePaths.length > 0) {

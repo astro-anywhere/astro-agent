@@ -315,9 +315,13 @@ program
           config.setAutoStart(value === 'true');
           console.log(`Set auto-start to: ${value}`);
           break;
+        case 'workspaceRoot':
+          config.setWorkspaceRoot(value);
+          console.log(`Set workspace root to: ${value}`);
+          break;
         default:
           console.error(`Unknown configuration key: ${key}`);
-          console.log('Available keys: apiUrl, relayUrl, accessToken, refreshToken, wsToken, claudeOauthToken, machineId, logLevel, autoStart');
+          console.log('Available keys: apiUrl, relayUrl, accessToken, refreshToken, wsToken, claudeOauthToken, machineId, logLevel, autoStart, workspaceRoot');
           process.exit(1);
       }
       return;
@@ -335,6 +339,11 @@ program
     console.log(`  Providers:    ${currentConfig.providers.length > 0 ? currentConfig.providers.join(', ') : '(none)'}`);
     console.log(`  Access token: ${currentConfig.accessToken ? 'configured' : 'not configured'}`);
     console.log(`  WS token:     ${currentConfig.wsToken ? 'configured' : 'not configured'}`);
+    // Show effective workspace root with source
+    const { resolveWorkspaceRoot } = await import('./lib/workspace-root.js');
+    const wsRoot = resolveWorkspaceRoot();
+    const wsSource = process.env.ASTRO_WORKSPACE_DIR ? 'env' : config.getWorkspaceRoot() ? 'config' : 'default';
+    console.log(`  Workspace:    ${wsRoot} (${wsSource})`);
     // Detect Claude auth status
     const { execFile: execFileCbCli } = await import('node:child_process');
     const { promisify: promisifyCli } = await import('node:util');

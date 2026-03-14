@@ -6,6 +6,12 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import type { Task, TaskResult, TaskStatus, ExecutionSummary } from '../types.js';
 
+/**
+ * A task that has been normalized by the executor — workingDirectory is always
+ * resolved (auto-provisioned if needed) before being passed to adapters.
+ */
+export type NormalizedTask = Task & { workingDirectory: string };
+
 export interface TaskOutputStream {
   stdout: (data: string) => void;
   stderr: (data: string) => void;
@@ -44,7 +50,7 @@ export interface ProviderAdapter {
   /**
    * Execute a task using this provider
    */
-  execute(task: Task, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult>;
+  execute(task: NormalizedTask, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult>;
 
   /**
    * Get provider status/health

@@ -11,7 +11,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary } from '../types.js';
-import { type ProviderAdapter, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream } from './base-adapter.js';
+import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, createNoopStream } from './base-adapter.js';
 import type { OpenClawBridge, TaskSessionResult } from '../lib/openclaw-bridge.js';
 import {
   type GatewayConfig,
@@ -97,7 +97,7 @@ export class OpenClawAdapter implements ProviderAdapter {
 
   // ─── Task Execution ─────────────────────────────────────────────
 
-  async execute(task: Task, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
+  async execute(task: NormalizedTask, stream: TaskOutputStream, signal: AbortSignal): Promise<TaskResult> {
     // Ensure we have config or bridge
     if (!this.bridge?.isConnected && !this.gatewayConfig) {
       const available = await this.isAvailable();
