@@ -6,8 +6,8 @@
  */
 
 import { homedir } from 'node:os';
-import { statSync, realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { statSync, realpathSync, mkdirSync } from 'node:fs';
+import { resolve, join } from 'node:path';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import type { Task, TaskStatus, ProviderType, HpcCapability } from '../types.js';
@@ -278,7 +278,7 @@ export class TaskExecutor {
     try {
       resolvedWorkDir = isTextOnlyTask && !task.workingDirectory
         ? undefined!  // Text-only tasks can run without a working directory
-        : resolveWorkingDirectory(task.workingDirectory);
+        : resolveWorkingDirectory(task.workingDirectory, task.id);
     } catch (err) {
       // Fail fast with a clear error instead of entering the execution pipeline.
       // Without this, tasks with non-existent directories become dead jobs.
@@ -1941,16 +1941,18 @@ export class TaskExecutor {
 
 /**
  * Resolve a working directory value.
- * - Empty/missing → error (must be explicitly set to prevent operating on the agent runner's own repo)
+ * - Empty/missing → auto-provision a temp workspace under ~/.astro/workspaces/
  * - Git URL → error (repo setup should have resolved this to a local path)
  * - Otherwise → return as-is
  */
-function resolveWorkingDirectory(value: string | undefined): string {
+function resolveWorkingDirectory(value: string | undefined, taskId?: string): string {
   if (!value) {
-    throw new Error(
-      'workingDirectory is required but was not provided. ' +
-      'Configure a project directory or repository before dispatching tasks.'
-    );
+    // Auto-provision a temporary workspace directory
+    const suffix = taskId ? taskId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40) : `tmp-${Date.now()}`;
+    const tempDir = join(homedir(), '.astro', 'workspaces', suffix);
+    mkdirSync(tempDir, { recursive: true });
+    console.log(`[executor] Auto-provisioned workspace: ${tempDir}`);
+    return tempDir;
   }
 
   const isGitUrl = value.startsWith('http://') || value.startsWith('https://') || value.startsWith('git@');
