@@ -190,11 +190,42 @@ export async function createWorktree(
 
   checkAborted();
   text?.(`── [Astro] Creating worktree from ${startPoint}...\n`);
-  await execFileAsync(
-    'git',
-    ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
-    { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
-  );
+  try {
+    await execFileAsync(
+      'git',
+      ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
+      { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('already exists')) {
+      // Branch exists from a previous failed/retried execution — delete it and retry.
+      console.log(`[worktree] Branch ${taskBranchName} already exists, deleting stale branch and retrying`);
+      try {
+        await execFileAsync(
+          'git', ['-C', gitRoot, 'branch', '-D', taskBranchName],
+          { env: withGitEnv(), timeout: 5_000 }
+        );
+      } catch { /* branch might be checked out in a stale worktree — prune first */ }
+      try {
+        await execFileAsync(
+          'git', ['-C', gitRoot, 'worktree', 'prune'],
+          { env: withGitEnv(), timeout: 5_000 }
+        );
+        await execFileAsync(
+          'git', ['-C', gitRoot, 'branch', '-D', taskBranchName],
+          { env: withGitEnv(), timeout: 5_000 }
+        );
+      } catch { /* best effort — may already be deleted */ }
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
+        { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
+      );
+    } else {
+      throw err;
+    }
+  }
 
   // Initialize submodules if the repo uses them (non-fatal)
   checkAborted();
