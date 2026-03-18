@@ -4,7 +4,7 @@
  * Mocks createAgentSession so no real Pi process is spawned.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { TaskOutputStream } from '../src/providers/base-adapter.js';
 
 // ---------------------------------------------------------------------------
@@ -87,6 +87,7 @@ function baseTask(overrides = {}) {
 
 describe('PiAdapter', () => {
   let session: ReturnType<typeof createMockSession>;
+  let adapter: any;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -94,10 +95,14 @@ describe('PiAdapter', () => {
     mockCreateAgentSession.mockResolvedValue({ session });
   });
 
+  afterEach(() => {
+    adapter?.destroy();
+  });
+
   describe('isAvailable', () => {
     it('returns true when SDK is importable', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       expect(await adapter.isAvailable()).toBe(true);
     });
   });
@@ -105,7 +110,7 @@ describe('PiAdapter', () => {
   describe('execute', () => {
     it('calls createAgentSession with cwd and inMemory sessionManager', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       await adapter.execute(baseTask({ workingDirectory: '/my/dir' }), stream, new AbortController().signal);
@@ -117,7 +122,7 @@ describe('PiAdapter', () => {
 
     it('calls session.prompt with the task prompt', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
 
       await adapter.execute(baseTask({ prompt: 'hello world' }), createMockStream(), new AbortController().signal);
 
@@ -126,7 +131,7 @@ describe('PiAdapter', () => {
 
     it('prepends systemPrompt before task prompt', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
 
       await adapter.execute(
         baseTask({ prompt: 'task', systemPrompt: 'system' }),
@@ -140,7 +145,7 @@ describe('PiAdapter', () => {
 
     it('emits sessionInit on agent_start event', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -154,7 +159,7 @@ describe('PiAdapter', () => {
 
     it('streams text deltas from message_update events', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -171,7 +176,7 @@ describe('PiAdapter', () => {
 
     it('ignores non-text_delta message_update events', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -187,7 +192,7 @@ describe('PiAdapter', () => {
 
     it('emits toolUse on tool_execution_start', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -201,7 +206,7 @@ describe('PiAdapter', () => {
 
     it('emits toolResult on tool_execution_end', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -215,7 +220,7 @@ describe('PiAdapter', () => {
 
     it('emits toolResult with isError=true when tool fails', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -229,7 +234,7 @@ describe('PiAdapter', () => {
 
     it('emits fileChange for file-modifying tools', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -244,7 +249,7 @@ describe('PiAdapter', () => {
 
     it('emits fileChange with "created" for Create tool', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -259,7 +264,7 @@ describe('PiAdapter', () => {
 
     it('does not emit fileChange for non-file tools', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -274,7 +279,7 @@ describe('PiAdapter', () => {
 
     it('emits status "Compacting context" on auto_compaction_start', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -288,7 +293,7 @@ describe('PiAdapter', () => {
 
     it('returns completed status on success', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
 
       const result = await adapter.execute(baseTask(), createMockStream(), new AbortController().signal);
 
@@ -298,7 +303,7 @@ describe('PiAdapter', () => {
 
     it('returns metrics from session stats', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
 
       const result = await adapter.execute(baseTask(), createMockStream(), new AbortController().signal);
 
@@ -311,7 +316,7 @@ describe('PiAdapter', () => {
 
     it('returns cancelled status when aborted', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const ac = new AbortController();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -325,7 +330,7 @@ describe('PiAdapter', () => {
 
     it('calls session.abort() when signal fires', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const ac = new AbortController();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -340,7 +345,7 @@ describe('PiAdapter', () => {
 
     it('returns failed status when session.prompt throws', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
 
       session.prompt = vi.fn().mockRejectedValue(new Error('Pi crashed'));
 
@@ -352,7 +357,7 @@ describe('PiAdapter', () => {
 
     it('serializes non-string tool results to JSON', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
@@ -369,7 +374,7 @@ describe('PiAdapter', () => {
   describe('getStatus', () => {
     it('returns available=true when SDK is importable', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
 
       const status = await adapter.getStatus();
 
@@ -382,7 +387,7 @@ describe('PiAdapter', () => {
   describe('resumeTask', () => {
     it('returns error when no preserved session exists', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
 
       const result = await adapter.resumeTask('missing', 'hi', '/tmp', 'sid', createMockStream(), new AbortController().signal);
 
@@ -392,7 +397,7 @@ describe('PiAdapter', () => {
 
     it('calls session.prompt with followUp behavior on preserved session', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
 
       await adapter.execute(baseTask({ id: 'task-r' }), createMockStream(), new AbortController().signal);
 
@@ -404,7 +409,7 @@ describe('PiAdapter', () => {
 
     it('returns error when aborted before start', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
       const ac = new AbortController();
       ac.abort();
 
@@ -413,19 +418,38 @@ describe('PiAdapter', () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain('aborted');
     });
+
+    it('returns "No active Pi session" after SESSION_TTL_MS expires', async () => {
+      vi.useFakeTimers();
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+
+      // Execute a task to create a preserved session
+      await adapter.execute(baseTask({ id: 'ttl-task' }), createMockStream(), new AbortController().signal);
+
+      // Advance time past the 10-minute TTL
+      vi.advanceTimersByTime(10 * 60 * 1000 + 1);
+
+      const result = await adapter.resumeTask('ttl-task', 'hi', '/tmp', 'sid', createMockStream(), new AbortController().signal);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('No active Pi session');
+
+      vi.useRealTimers();
+    });
   });
 
   describe('getTaskContext', () => {
     it('returns null when no preserved session', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
 
       expect(adapter.getTaskContext('missing')).toBeNull();
     });
 
     it('returns context after successful execute', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
-      const adapter = new PiAdapter();
+      adapter = new PiAdapter();
 
       await adapter.execute(baseTask({ id: 'ctx-task', workingDirectory: '/my/dir' }), createMockStream(), new AbortController().signal);
 

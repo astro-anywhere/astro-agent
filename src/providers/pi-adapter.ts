@@ -366,7 +366,10 @@ export class PiAdapter implements ProviderAdapter {
     if (!preserved) return undefined;
 
     const summaryAbort = new AbortController();
-    const summaryTimeout = setTimeout(() => summaryAbort.abort(), SUMMARY_TIMEOUT_MS);
+    const summaryTimeout = setTimeout(() => {
+      console.warn(`[pi] Task ${taskId}: summary generation timed out after ${SUMMARY_TIMEOUT_MS}ms`);
+      summaryAbort.abort();
+    }, SUMMARY_TIMEOUT_MS);
 
     try {
       const result = await this.resumeTask(
