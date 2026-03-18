@@ -612,6 +612,7 @@ export class OpenCodeAdapter implements ProviderAdapter {
             toolName,
             block.content || '',
             !block.is_error,
+            block.tool_use_id,
           );
         }
       }
@@ -668,7 +669,7 @@ export class OpenCodeAdapter implements ProviderAdapter {
                 if (block.id && block.name) {
                   this.toolIdToName.set(block.id, block.name);
                 }
-                stream.toolUse(block.name ?? 'unknown', block.input);
+                stream.toolUse(block.name ?? 'unknown', block.input, block.id);
                 // Emit file change event (line counts computed post-execution via git diff)
                 if (block.name === 'Write' || block.name === 'Edit') {
                   const input = block.input as Record<string, unknown>;
@@ -689,7 +690,8 @@ export class OpenCodeAdapter implements ProviderAdapter {
             const toolName = event.tool_name as string || 'unknown';
             const resultContent = (event.content as string) || '';
             const isError = event.is_error as boolean || false;
-            stream.toolResult(toolName, resultContent, !isError);
+            const toolUseId = event.tool_use_id as string | undefined;
+            stream.toolResult(toolName, resultContent, !isError, toolUseId);
             break;
           }
           // Content is an array — handle via content blocks (same as 'user')

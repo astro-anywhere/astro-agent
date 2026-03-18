@@ -201,7 +201,7 @@ describe('PiAdapter', () => {
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
-      expect(stream.toolUse).toHaveBeenCalledWith('bash', { command: 'ls' });
+      expect(stream.toolUse).toHaveBeenCalledWith('bash', { command: 'ls' }, undefined);
     });
 
     it('emits toolResult on tool_execution_end', async () => {
@@ -215,7 +215,7 @@ describe('PiAdapter', () => {
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
-      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'output', true);
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'output', true, undefined);
     });
 
     it('emits toolResult with isError=true when tool fails', async () => {
@@ -229,7 +229,7 @@ describe('PiAdapter', () => {
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
-      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'error msg', false);
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'error msg', false, undefined);
     });
 
     it('emits fileChange for file-modifying tools', async () => {
@@ -367,7 +367,7 @@ describe('PiAdapter', () => {
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
-      expect(stream.toolResult).toHaveBeenCalledWith('bash', '{"lines":["a","b"]}', true);
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', '{"lines":["a","b"]}', true, undefined);
     });
   });
 
