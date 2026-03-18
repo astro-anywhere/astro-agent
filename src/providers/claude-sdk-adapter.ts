@@ -372,6 +372,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         env: {
           ...process.env,
           CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+          // Inject Astro auth so astro-cli works inside the session without
+          // a separate login step (works on local and remote machines).
+          ...(config.getAccessToken() ? { ASTRO_AUTH_TOKEN: config.getAccessToken()! } : {}),
+          ASTRO_SERVER_URL: config.getConfig().apiUrl,
         },
       };
 
@@ -808,6 +812,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         ...process.env,
         ...task.environment,
         CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1', // Enable additional directories for CLAUDE.md loading
+        // Inject Astro auth so astro-cli works inside the session without
+        // a separate login step (works on local and remote machines).
+        ...(config.getAccessToken() ? { ASTRO_AUTH_TOKEN: config.getAccessToken()! } : {}),
+        ASTRO_SERVER_URL: config.getConfig().apiUrl,
       },
       // Intercept built-in AskUserQuestion to handle approvals (following Cyrus pattern)
       canUseTool: async (toolName: string, input: Record<string, unknown>, options: { toolUseID: string; signal: AbortSignal }) => {
