@@ -114,11 +114,13 @@ export async function createWorktree(
 
   // Clean up lingering worktrees and branches for the TASK branch only.
   // Never delete the project branch — it accumulates work across tasks.
+  checkAborted();
   await removeLingeringWorktrees(gitRoot, taskBranchName);
   await ensureBranchAvailable(gitRoot, taskBranchName);
 
   // Delete remote task branch if it exists — prevents non-fast-forward push
   // failures when re-executing a task whose previous branch was already pushed
+  checkAborted();
   await deleteRemoteBranch(gitRoot, taskBranchName);
 
   // Fetch latest so we branch from up-to-date origin (skip for local-only repos)
@@ -150,6 +152,7 @@ export async function createWorktree(
 
   // Ensure the project branch exists on origin. If this is the first task,
   // create it from origin/{defaultBranch}. Idempotent.
+  checkAborted();
   if (projectBranchName) {
     await ensureProjectBranch(gitRoot, projectBranchName, defaultBranch);
   }
@@ -194,6 +197,7 @@ export async function createWorktree(
   );
 
   // Initialize submodules if the repo uses them (non-fatal)
+  checkAborted();
   try {
     await initSubmodules(worktreePath, stderr);
   } catch (err) {

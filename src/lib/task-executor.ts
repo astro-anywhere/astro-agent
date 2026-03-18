@@ -1088,8 +1088,17 @@ export class TaskExecutor {
     // worktree creation, PR delivery) leave the server blind.
     const TASK_HEARTBEAT_INTERVAL_MS = 30_000;
     let taskHeartbeatPhase = 'preparing';
+    let heartbeatSeq = 0;
     const taskHeartbeatTimer = setInterval(() => {
-      stream.text?.(`[Astro] Heartbeat — ${taskHeartbeatPhase}...\n`);
+      // Send directly via wsClient to keep the server's activity timer alive
+      // WITHOUT resetting the agent-side idle timeout. stream.text() calls
+      // resetIdleTimeout(), which would make a hung agent run until hard cap
+      // instead of idle-timing out after 15 minutes of no real activity.
+      this.wsClient.sendTaskText(
+        normalizedTask.id,
+        `[Astro] Heartbeat — ${taskHeartbeatPhase}...\n`,
+        -(++heartbeatSeq),  // negative sequence to avoid colliding with real text
+      );
     }, TASK_HEARTBEAT_INTERVAL_MS);
 
     // Text-only tasks (plan/chat/summarize) without a working directory skip workspace prep
