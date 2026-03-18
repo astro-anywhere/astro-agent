@@ -1086,6 +1086,8 @@ export class TaskExecutor {
     // hasReceivedEvent from execution events (text, tool_use, etc.) — without
     // this heartbeat, phases that don't produce those events (git operations,
     // worktree creation, PR delivery) leave the server blind.
+    // 30s aligns with the server's heartbeat check interval and is well under
+    // the 3-minute startup timeout (STARTUP_TIMEOUT_MS in dispatch.ts).
     const TASK_HEARTBEAT_INTERVAL_MS = 30_000;
     let taskHeartbeatPhase = 'preparing';
     let heartbeatSeq = 0;

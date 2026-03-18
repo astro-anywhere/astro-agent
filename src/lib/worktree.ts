@@ -104,7 +104,7 @@ export async function createWorktree(
   // Abort-signal gate: check between every long git operation so cancellation
   // actually halts workspace prep instead of letting it run to completion.
   const checkAborted = () => {
-    if (signal?.aborted) throw new Error('Task cancelled during workspace preparation');
+    if (signal?.aborted) throw new Error(`Task ${taskId} cancelled during workspace preparation`);
   };
 
   text?.(`\n[Astro] Preparing worktree: branch ${taskBranchName}\n`);
@@ -206,6 +206,7 @@ export async function createWorktree(
   }
 
   // Orchestration: include files + setup script (both non-fatal)
+  checkAborted();
   const log = stdout;
   try {
     await applyWorktreeInclude({ gitRoot, worktreePath, log });
@@ -214,6 +215,7 @@ export async function createWorktree(
     stderr?.(`worktree-include failed: ${msg}`);
   }
 
+  checkAborted();
   try {
     await runSetupScript({
       gitRoot,
