@@ -1106,9 +1106,11 @@ export class TaskExecutor {
       // WITHOUT resetting the agent-side idle timeout. stream.text() calls
       // resetIdleTimeout(), which would make a hung agent run until hard cap
       // instead of idle-timing out after 15 minutes of no real activity.
+      // Heartbeat text is intentionally empty — it exists only to keep the
+      // server's activity timer alive, not to display anything to the user.
       this.wsClient.sendTaskText(
         normalizedTask.id,
-        `── [Astro] Heartbeat — ${taskHeartbeatPhase}...\n`,
+        '',
         -(++heartbeatSeq),  // negative sequence to avoid colliding with real text
       );
     }, TASK_HEARTBEAT_INTERVAL_MS);
