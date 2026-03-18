@@ -41,6 +41,9 @@ const SESSION_TTL_MS = 10 * 60 * 1000;
 // Adapter
 // ---------------------------------------------------------------------------
 
+/** Interval for proactive session cleanup (5 minutes) */
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000;
+
 export class PiAdapter implements ProviderAdapter {
   readonly type = 'pi';
   readonly name = 'Pi';
@@ -52,6 +55,26 @@ export class PiAdapter implements ProviderAdapter {
 
   /** Preserved sessions for multi-turn resume, keyed by taskId */
   private preservedSessions = new Map<string, PreservedSession>();
+
+  /** Timer for proactive cleanup of expired sessions */
+  private cleanupTimer: ReturnType<typeof setInterval>;
+
+  constructor() {
+    // Proactively clean up expired bridge processes every 5 minutes so they
+    // don't accumulate if no new tasks arrive after a session expires.
+    this.cleanupTimer = setInterval(() => this.cleanupExpiredSessions(), CLEANUP_INTERVAL_MS);
+    // Allow the Node.js process to exit even if this timer is still active.
+    if (this.cleanupTimer.unref) this.cleanupTimer.unref();
+  }
+
+  /** Stop the background cleanup timer and all preserved bridge processes. */
+  destroy(): void {
+    clearInterval(this.cleanupTimer);
+    for (const session of this.preservedSessions.values()) {
+      session.bridge.stop();
+    }
+    this.preservedSessions.clear();
+  }
 
   async isAvailable(): Promise<boolean> {
     const provider = await getProvider('pi' as any);
@@ -222,7 +245,12 @@ export class PiAdapter implements ProviderAdapter {
     _signal: AbortSignal,
   ): Promise<{ success: boolean; output: string; error?: string }> {
     const session = this.preservedSessions.get(taskId);
-    if (!session || !session.bridge.isRunning) {
+    if (!session || !session.bridge.isRunning || Date.now() - session.createdAt > SESSION_TTL_MS) {
+      // Clean up an expired-but-still-running bridge to avoid resource leaks.
+      if (session) {
+        session.bridge.stop();
+        this.preservedSessions.delete(taskId);
+      }
       return { success: false, output: '', error: 'No active Pi session for this task' };
     }
 
@@ -265,7 +293,10 @@ export class PiAdapter implements ProviderAdapter {
 
   getTaskContext(taskId: string): { sessionId: string; workingDirectory: string; originalWorkingDirectory?: string } | null {
     const session = this.preservedSessions.get(taskId);
-    if (!session || Date.now() - session.createdAt > SESSION_TTL_MS) {
+    if (!session) return null;
+    if (Date.now() - session.createdAt > SESSION_TTL_MS) {
+      // Stop the bridge process before removing from the map to avoid orphaned processes.
+      session.bridge.stop();
       this.preservedSessions.delete(taskId);
       return null;
     }
