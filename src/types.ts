@@ -10,7 +10,7 @@ type JsonWebKey = webcrypto.JsonWebKey;
 // Provider Types
 // ============================================================================
 
-export type ProviderType = 'claude-sdk' | 'codex' | 'openclaw' | 'opencode' | 'slurm' | 'custom';
+export type ProviderType = 'claude-sdk' | 'codex' | 'openclaw' | 'opencode' | 'pi' | 'slurm' | 'custom';
 
 // Re-export from the canonical source
 export type { ExecutionStrategyType, ExecutionStrategyInfo } from './execution/types.js';
