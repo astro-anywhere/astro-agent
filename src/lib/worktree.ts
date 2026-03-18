@@ -27,6 +27,8 @@ export interface WorktreeOptions {
   projectBranch?: string;
   stdout?: (data: string) => void;
   stderr?: (data: string) => void;
+  /** Emit visible activity text to the Astro UI (shows in the task activity stream) */
+  text?: (data: string) => void;
 }
 
 export interface WorktreeSetup {
@@ -58,6 +60,7 @@ export async function createWorktree(
     shortNodeId,
     agentDir,
     baseBranch: dispatchBaseBranch,
+    text,
     projectBranch: dispatchProjectBranch,
     stdout,
     stderr,
@@ -95,6 +98,7 @@ export async function createWorktree(
     : sanitize(taskId);
   const taskBranchName = `${branchPrefix}${branchSuffix}`;
   const worktreePath = join(baseRoot, branchSuffix);
+  text?.(`\n[Astro] Preparing worktree: branch ${taskBranchName}\n`);
   await rm(worktreePath, { recursive: true, force: true });
   await pruneWorktrees(gitRoot);
 
@@ -110,6 +114,7 @@ export async function createWorktree(
   // Fetch latest so we branch from up-to-date origin (skip for local-only repos)
   const hasRemote = await repoHasRemote(gitRoot);
   if (hasRemote) {
+    text?.(`[Astro] Fetching latest from origin...\n`);
     try {
       await execFileAsync(
         'git',
@@ -169,6 +174,7 @@ export async function createWorktree(
     console.warn('[worktree] Failed to capture commitBeforeSha for audit trail');
   }
 
+  text?.(`[Astro] Creating worktree from ${startPoint}...\n`);
   await execFileAsync(
     'git',
     ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
@@ -237,6 +243,8 @@ export async function createWorktree(
       throw new Error(`Failed to copy untracked working directory "${relativePath}" into worktree: ${msg}`);
     }
   }
+
+  text?.(`[Astro] Worktree ready: ${worktreeWorkingDirectory}\n`);
 
   return {
     workingDirectory: worktreeWorkingDirectory,

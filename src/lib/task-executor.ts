@@ -10,7 +10,7 @@ import { statSync, realpathSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { Task, TaskStatus, ProviderType, HpcCapability } from '../types.js';
+import type { Task, TaskResult, TaskStatus, ProviderType, HpcCapability } from '../types.js';
 import type { WebSocketClient } from './websocket-client.js';
 import { createProviderAdapter, type ProviderAdapter, type TaskOutputStream } from '../providers/index.js';
 import { ClaudeSdkAdapter } from '../providers/claude-sdk-adapter.js';
@@ -285,6 +285,14 @@ export class TaskExecutor {
    * Submit a task for execution (with safety checks)
    */
   async submitTask(task: Task): Promise<void> {
+    // Dedup: if this task is already running, skip the duplicate dispatch.
+    // This prevents concurrent createWorktree() calls for the same branch when the
+    // server retries a dispatch (startup timeout) before the previous attempt finishes.
+    if (this.runningTasks.has(task.id)) {
+      console.warn(`[executor] Task ${task.id}: already running, skipping duplicate dispatch`);
+      return;
+    }
+
     // Skip workingDirectory resolution for lightweight text-only tasks (no file system access)
     const isTextOnlyTask = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan';
 
@@ -1102,6 +1110,11 @@ export class TaskExecutor {
     resetIdleTimeout();
 
     let keepBranch = false;
+    // Deferred result — sent AFTER cleanup to prevent auto-dispatch race.
+    // The server dispatches downstream tasks immediately on receiving the result,
+    // and the new task's createWorktree() would fight with this task's cleanupWorktree()
+    // over the same .git directory (concurrent git worktree prune, branch -D, etc.).
+    let pendingResult: TaskResult | undefined;
     try {
       // Notify task started
       this.wsClient.sendTaskStatus(task.id, 'running', 0, 'Starting');
@@ -1195,6 +1208,7 @@ export class TaskExecutor {
         ? `[${task.shortProjectId}/${task.shortNodeId}] ${rawTitle}`
         : rawTitle;
       if (prepared.branchName && result.status === 'completed') {
+        stream.text?.(`\n[Astro] Delivering changes (mode: ${deliveryMode})...\n`);
         this.wsClient.sendTaskStatus(task.id, 'running', 90, 'Delivering changes...');
         // Build PR body: enrich with summary data when available
         const prBodyParts: string[] = [];
@@ -1232,6 +1246,7 @@ export class TaskExecutor {
             // Copy mode: worktree preserved, no git operations
             console.log(`[executor] Task ${task.id}: copy mode, worktree preserved at ${prepared.workingDirectory}`);
           } else if (deliveryMode === 'branch') {
+            stream.text?.(`[Astro] Merging into project branch ${prepared.projectBranch ?? 'local'}...\n`);
             // Branch mode: commit locally, merge into project branch if available.
             // The merge lock is held only during the squash-merge (seconds, not minutes),
             // allowing tasks to execute in parallel. The squash merge naturally handles
@@ -1351,6 +1366,7 @@ export class TaskExecutor {
             }
           } else if (deliveryMode === 'push') {
             // Push branch to remote, but don't create a PR — user creates PR manually
+            stream.text?.(`[Astro] Pushing branch ${prepared.branchName} to origin...\n`);
             this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Pushing branch...');
             console.log(`[executor] Task ${task.id}: push mode, pushing branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
@@ -1376,6 +1392,7 @@ export class TaskExecutor {
             }
           } else {
             // 'pr' — push + create PR, auto-merge into project branch if applicable
+            stream.text?.(`[Astro] Creating pull request for branch ${prepared.branchName}...\n`);
             this.wsClient.sendTaskStatus(task.id, 'running', 94, 'Rebasing before push...');
             // Pre-push rebase: if the target branch moved forward, rebase our task
             // branch so the PR will be cleanly mergeable. The branch hasn't been
@@ -1533,20 +1550,19 @@ export class TaskExecutor {
         this.wsClient.sendTaskStatus(task.id, 'running', 80, `Waiting for ${pendingJobs.length} Slurm job(s): ${pendingJobs.join(', ')}`);
         // Don't send final result — the SlurmJobMonitor will send it when jobs finish
       } else {
-        // Send final status + result
-        this.wsClient.sendTaskStatus(task.id, 'completed', 100, 'Task complete');
-        this.wsClient.sendTaskResult(result);
+        // Defer result to after cleanup (sent in the finally block).
+        pendingResult = result;
       }
     } catch (error) {
       // Unexpected error during execution
       const errorMsg = error instanceof Error ? error.message : String(error);
       console.error(`[executor] Task ${task.id}: execution error: ${errorMsg}`);
-      this.wsClient.sendTaskResult({
+      pendingResult = {
         taskId: task.id,
         status: 'failed',
         error: errorMsg,
         completedAt: new Date().toISOString(),
-      });
+      };
     } finally {
       clearTimeout(hardCapTimeoutId);
       if (idleTimerId !== undefined) clearTimeout(idleTimerId);
@@ -1556,6 +1572,9 @@ export class TaskExecutor {
       // (PR created or branch pushed), we preserve the git branch but still
       // remove the working copy — the branch lives on remote/local refs,
       // and re-execution will create a fresh worktree if needed.
+      if (prepared.branchName) {
+        stream.text?.(`\n[Astro] Cleaning up worktree (branch: ${prepared.branchName})...\n`);
+      }
       if (this.preserveWorktrees) {
         console.log(`[executor] Task ${task.id}: worktree preserved (debug mode)`);
         // Still release directory locks even in debug mode to avoid deadlocks.
@@ -1582,6 +1601,18 @@ export class TaskExecutor {
         await sandbox.cleanup();
       }
 
+      // Send deferred result AFTER cleanup completes.
+      // This ensures the server's auto-dispatch doesn't start the next task
+      // while this task's worktree cleanup is still running on the same git repo.
+      // Without this, the new task's createWorktree() fights with cleanupWorktree()
+      // over the same .git directory (concurrent git worktree prune, branch -D, etc.).
+      if (pendingResult) {
+        const isSuccess = pendingResult.status !== 'failed';
+        this.wsClient.sendTaskStatus(task.id, isSuccess ? 'completed' : 'failed' as TaskStatus, 100,
+          isSuccess ? 'Task complete' : 'Task failed');
+        this.wsClient.sendTaskResult(pendingResult);
+      }
+
       // Untrack task from directory
       this.untrackTaskDirectory(task);
 
@@ -1603,7 +1634,7 @@ export class TaskExecutor {
 
   private async prepareTaskWorkspace(
     task: Task & { workingDirectory: string },
-    stream: { stdout: (data: string) => void; stderr: (data: string) => void },
+    stream: { stdout: (data: string) => void; stderr: (data: string) => void; text?: (data: string) => void },
   ): Promise<{
     workingDirectory: string;
     branchName?: string;
@@ -1721,6 +1752,7 @@ export class TaskExecutor {
         projectBranch: task.projectBranch,
         stdout: stream.stdout,
         stderr: stream.stderr,
+        text: stream.text,
       });
       if (!worktree) {
         throw new Error(`Worktree creation returned null for ${task.workingDirectory}. Cannot proceed without isolation.`);
