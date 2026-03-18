@@ -130,11 +130,8 @@ async function tryPreMergeRebase(
     branchName?: string;
     /** Git root directory — fallback when the worktree directory no longer exists */
     gitRoot?: string;
-    /** Optional logging callback for user-visible messages */
-    log?: (msg: string) => void;
   },
 ): Promise<{ rebased: boolean; skipped?: boolean }> {
-  const log = options?.log ?? (() => {});
   // Determine the working directory for git commands.
   // When the worktree is gone, fall back to gitRoot — the task branch ref
   // lives in the shared git object store and is accessible from any directory
@@ -148,11 +145,9 @@ async function tryPreMergeRebase(
     if (options?.gitRoot && options?.branchName) {
       gitDir = options.gitRoot;
       headRef = options.branchName;
-      log(`Worktree gone, using gitRoot for rebase (branch: ${headRef})`);
-      console.log(`[tryPreMergeRebase] Worktree at ${workdir} gone, using gitRoot: ${gitDir}, branch: ${headRef}`);
+      console.log(`[git] Worktree at ${workdir} gone, using gitRoot: ${gitDir}, branch: ${headRef}`);
     } else {
-      log('Worktree gone and no gitRoot/branchName — skipping rebase');
-      console.warn(`[tryPreMergeRebase] Worktree at ${workdir} gone, no gitRoot/branchName fallback — skipping`);
+      console.warn(`[git] Worktree at ${workdir} gone, no gitRoot/branchName fallback — skipping rebase`);
       return { rebased: false, skipped: true };
     }
   }
@@ -161,34 +156,28 @@ async function tryPreMergeRebase(
     const rebaseTarget = isRemote ? `origin/${targetBranch}` : targetBranch;
 
     if (isRemote) {
-      log(`Fetching origin/${targetBranch}...`);
-      console.log(`[tryPreMergeRebase] git fetch origin ${targetBranch} (cwd: ${gitDir})`);
+      console.log(`[git] fetch origin ${targetBranch} (cwd: ${gitDir})`);
       await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: gitDir, timeout: 30_000 });
     }
 
     // Check if rebase is needed (target branch moved since we branched)
-    console.log(`[tryPreMergeRebase] git merge-base ${headRef} ${rebaseTarget} (cwd: ${gitDir})`);
+    console.log(`[git] merge-base ${headRef} ${rebaseTarget} (cwd: ${gitDir})`);
     const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', headRef, rebaseTarget], { cwd: gitDir });
-    console.log(`[tryPreMergeRebase] git rev-parse ${rebaseTarget} (cwd: ${gitDir})`);
     const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: gitDir });
 
     if (mergeBase.trim() === targetTip.trim()) {
-      log(`Already up to date with ${targetBranch}`);
-      console.log(`[tryPreMergeRebase] Already up to date (merge-base = target tip: ${targetTip.trim().slice(0, 7)})`);
-      return { rebased: false, skipped: true }; // Already up to date
+      console.log(`[git] Already up to date (merge-base = target tip: ${targetTip.trim().slice(0, 7)})`);
+      return { rebased: false, skipped: true };
     }
 
     // Try automatic rebase — timeout after 60s (should be fast for non-conflicting changes)
-    log(`Rebasing onto ${rebaseTarget}...`);
-    console.log(`[tryPreMergeRebase] git rebase ${rebaseTarget} (cwd: ${gitDir})`);
+    console.log(`[git] rebase ${rebaseTarget} (cwd: ${gitDir})`);
     await execFileAsync('git', ['rebase', rebaseTarget], { cwd: gitDir, timeout: 60_000 });
-    log(`Rebase succeeded`);
-    console.log(`[tryPreMergeRebase] Rebase succeeded`);
+    console.log(`[git] Rebase onto ${rebaseTarget} succeeded`);
     return { rebased: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log(`Rebase failed: ${msg.slice(0, 100)}`);
-    console.warn(`[tryPreMergeRebase] Rebase failed: ${msg}`);
+    console.warn(`[git] Rebase onto ${targetBranch} failed: ${msg}`);
     // Abort on failure — existing retry loop will handle conflicts
     await execFileAsync('git', ['rebase', '--abort'], { cwd: gitDir }).catch(() => {});
     return { rebased: false };
@@ -1325,14 +1314,14 @@ export class TaskExecutor {
         try {
           if (deliveryMode === 'direct') {
             // No git delivery — files modified in-place
-            stream.text?.(`── [Astro] Direct mode — files modified in-place, no git delivery\n`);
+            stream.text?.(`── [Delivery] Changes applied in-place (direct mode)\n`);
             console.log(`[executor] Task ${task.id}: direct mode, skipping git delivery`);
           } else if (deliveryMode === 'copy') {
             // Copy mode: worktree preserved, no git operations
-            stream.text?.(`── [Astro] Copy mode — worktree preserved at ${prepared.workingDirectory}\n`);
+            stream.text?.(`── [Delivery] Worktree preserved (copy mode)\n`);
             console.log(`[executor] Task ${task.id}: copy mode, worktree preserved at ${prepared.workingDirectory}`);
           } else if (deliveryMode === 'branch') {
-            stream.text?.(`── [Astro] Merging into project branch ${prepared.projectBranch ?? 'local'}...\n`);
+            stream.text?.(`── [Git] Merging into project branch ${prepared.projectBranch ?? 'local'}...\n`);
             // Branch mode: commit locally, merge into project branch if available.
             // The merge lock is held only during the squash-merge (seconds, not minutes),
             // allowing tasks to execute in parallel. The squash merge naturally handles
@@ -1349,17 +1338,15 @@ export class TaskExecutor {
               // Pre-merge rebase: if the project branch moved forward (another task
               // merged), rebase our task branch first. Avoids conflicts when changes
               // don't overlap, and saves one retry cycle when they do.
-              stream.text?.(`── [Astro] Rebasing ${prepared.branchName} onto ${prepared.projectBranch}...\n`);
               const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.projectBranch, false, {
                 branchName: prepared.branchName,
                 gitRoot: prepared.gitRoot,
-                log: (msg) => stream.text?.(`── [Astro] ${msg}\n`),
               });
               if (preRebase.rebased) {
-                stream.text?.(`── [Astro] Rebase onto ${prepared.projectBranch} succeeded\n`);
+                stream.text?.(`── [Git] Rebased onto ${prepared.projectBranch}\n`);
                 console.log(`[executor] Task ${task.id}: pre-merge rebase onto ${prepared.projectBranch} succeeded`);
               } else if (!preRebase.skipped) {
-                stream.text?.(`── [Astro] Rebase had conflicts, falling back to merge retry loop\n`);
+                stream.text?.(`── [Git] Rebase skipped (conflicts), retrying via merge\n`);
                 console.log(`[executor] Task ${task.id}: pre-merge rebase had conflicts, falling back to merge retry loop`);
               }
 
@@ -1384,7 +1371,7 @@ export class TaskExecutor {
                     prepared.branchName,
                     prepared.projectBranch,
                     commitMessage,
-                    (msg) => stream.text?.(`── [Astro] ${msg}\n`),
+                    (msg) => stream.text?.(`── [Git] ${msg}\n`),
                   );
                 } finally {
                   mergeLock.release();
@@ -1394,7 +1381,7 @@ export class TaskExecutor {
                 if (mergeResult.merged) {
                   result.deliveryStatus = 'success';
                   result.commitAfterSha = mergeResult.commitSha;
-                  stream.text?.(`── [Astro] Merged into ${prepared.projectBranch} (${mergeResult.commitSha?.slice(0, 7)})\n`);
+                  stream.text?.(`── [Git] Merged into ${prepared.projectBranch} (${mergeResult.commitSha?.slice(0, 7)})\n`);
                   console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
                   // Sync project worktree to reflect the merged changes on disk
                   if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
@@ -1410,7 +1397,7 @@ export class TaskExecutor {
 
                   if (taskContext?.sessionId && this.isResumableAdapter(adapter) && attempt < MAX_MERGE_ATTEMPTS) {
                     const conflictFiles = mergeResult.conflictFiles?.join(', ') ?? 'unknown files';
-                    stream.text?.(`── [Astro] Merge conflict in: ${conflictFiles} — agent resolving (attempt ${attempt})...\n`);
+                    stream.text?.(`── [Git] Merge conflict: ${conflictFiles} — agent resolving (attempt ${attempt})...\n`);
                     console.log(`[executor] Task ${task.id}: merge conflict (attempt ${attempt}), resuming ${adapter.name} to resolve: ${conflictFiles}`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `Merge conflict — agent resolving (attempt ${attempt})...`);
 
@@ -1462,7 +1449,7 @@ export class TaskExecutor {
             }
           } else if (deliveryMode === 'push') {
             // Push branch to remote, but don't create a PR — user creates PR manually
-            stream.text?.(`── [Astro] Pushing branch ${prepared.branchName} to origin...\n`);
+            stream.text?.(`── [Git] Pushing ${prepared.branchName} to origin...\n`);
             this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Pushing branch...');
             console.log(`[executor] Task ${task.id}: push mode, pushing branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
@@ -1478,37 +1465,35 @@ export class TaskExecutor {
               // Delivery failure — don't override execution status
               result.deliveryStatus = 'failed';
               result.deliveryError = `Push delivery failed: ${prResult.error}`;
-              stream.text?.(`── [Astro] Push failed: ${prResult.error}\n`);
+              stream.text?.(`── [Git] Push failed: ${prResult.error}\n`);
               console.error(`[executor] Task ${task.id}: push delivery failed: ${prResult.error}`);
             } else if (prResult.pushed) {
               result.deliveryStatus = 'success';
               keepBranch = true;
-              stream.text?.(`── [Astro] Branch pushed to origin: ${prepared.branchName}\n`);
+              stream.text?.(`── [Git] Pushed to origin: ${prepared.branchName}\n`);
               console.log(`[executor] Task ${task.id}: branch pushed (${prepared.branchName})`);
             } else {
               result.deliveryStatus = 'skipped';
-              stream.text?.(`── [Astro] No changes to push\n`);
+              stream.text?.(`── [Git] No changes to push\n`);
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           } else {
             // 'pr' — push + create PR, auto-merge into project branch if applicable
-            stream.text?.(`── [Astro] Creating pull request for branch ${prepared.branchName}...\n`);
+            stream.text?.(`── [Git] Creating PR: ${prepared.branchName} → ${prepared.baseBranch ?? 'main'}...\n`);
             this.wsClient.sendTaskStatus(task.id, 'running', 94, 'Rebasing before push...');
             // Pre-push rebase: if the target branch moved forward, rebase our task
             // branch so the PR will be cleanly mergeable. The branch hasn't been
             // pushed yet, so no force-push is needed.
             if (prepared.baseBranch) {
-              stream.text?.(`── [Astro] Rebasing ${prepared.branchName} onto origin/${prepared.baseBranch}...\n`);
               const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.baseBranch, true, {
                 branchName: prepared.branchName,
                 gitRoot: prepared.gitRoot,
-                log: (msg) => stream.text?.(`── [Astro] ${msg}\n`),
               });
               if (preRebase.rebased) {
-                stream.text?.(`── [Astro] Rebase onto origin/${prepared.baseBranch} succeeded\n`);
+                stream.text?.(`── [Git] Rebased onto origin/${prepared.baseBranch}\n`);
                 console.log(`[executor] Task ${task.id}: pre-push rebase onto origin/${prepared.baseBranch} succeeded`);
               } else if (!preRebase.skipped) {
-                stream.text?.(`── [Astro] Rebase had conflicts, proceeding without rebase\n`);
+                stream.text?.(`── [Git] Rebase skipped (conflicts), proceeding without rebase\n`);
                 console.log(`[executor] Task ${task.id}: pre-push rebase had conflicts, proceeding without rebase`);
               }
             }
@@ -1533,7 +1518,7 @@ export class TaskExecutor {
               result.commitBeforeSha = prResult.commitBeforeSha;
               result.commitAfterSha = prResult.commitAfterSha;
               keepBranch = true;
-              stream.text?.(`── [Astro] Pull request created: ${prResult.prUrl}\n`);
+              stream.text?.(`── [Git] PR created: ${prResult.prUrl}\n`);
 
               if (prResult.autoMergeFailed) {
                 // PR was created but auto-merge failed (likely conflict).
@@ -1548,7 +1533,7 @@ export class TaskExecutor {
 
                 if (prTaskContext?.sessionId && this.isResumableAdapter(adapter) && hasProjectBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
                   for (let attempt = 1; attempt <= MAX_PR_MERGE_ATTEMPTS; attempt++) {
-                    stream.text?.(`── [Astro] PR auto-merge failed — agent resolving conflict (attempt ${attempt})...\n`);
+                    stream.text?.(`── [Git] Auto-merge failed — agent resolving conflict (attempt ${attempt})...\n`);
                     console.log(`[executor] Task ${task.id}: PR auto-merge failed (attempt ${attempt}), resuming ${adapter.name} to resolve`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `PR merge conflict — agent resolving (attempt ${attempt})...`);
 
@@ -1616,16 +1601,16 @@ export class TaskExecutor {
               result.deliveryStatus = 'failed';
               result.deliveryError = `PR delivery failed: ${prResult.error}`;
               keepBranch = prResult.pushed ?? false; // Keep branch if it was pushed
-              stream.text?.(`── [Astro] PR delivery failed: ${prResult.error}\n`);
+              stream.text?.(`── [Git] PR delivery failed: ${prResult.error}\n`);
               console.error(`[executor] Task ${task.id}: PR delivery failed: ${prResult.error}`);
             } else {
-              stream.text?.(`── [Astro] No changes to deliver\n`);
+              stream.text?.(`── [Git] No changes to deliver\n`);
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           }
         } catch (prError) {
           const prMsg = prError instanceof Error ? prError.message : String(prError);
-          stream.text?.(`── [Astro] Delivery failed: ${prMsg}\n`);
+          stream.text?.(`── [Delivery] Failed: ${prMsg}\n`);
           console.error(`[executor] Task ${task.id}: delivery (${deliveryMode}) failed: ${prMsg}`);
           // Delivery failure — don't override execution status
           result.deliveryStatus = 'failed';
