@@ -695,11 +695,11 @@ export class TaskExecutor {
       text: (data: string) => {
         this.wsClient.sendTaskText(taskId, data, textSequence++);
       },
-      toolUse: (toolName: string, toolInput: unknown) => {
-        this.wsClient.sendTaskToolUse(taskId, toolName, toolInput);
+      toolUse: (toolName: string, toolInput: unknown, toolUseId?: string) => {
+        this.wsClient.sendTaskToolUse(taskId, toolName, toolInput, toolUseId);
       },
-      toolResult: (toolName: string, result: unknown, success: boolean) => {
-        this.wsClient.sendTaskToolResult(taskId, toolName, result, success);
+      toolResult: (toolName: string, result: unknown, success: boolean, toolUseId?: string) => {
+        this.wsClient.sendTaskToolResult(taskId, toolName, result, success, toolUseId);
       },
       fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number, diff?: string) => {
         this.wsClient.sendTaskFileChange(taskId, path, action, linesAdded, linesRemoved, diff);
@@ -1052,13 +1052,13 @@ export class TaskExecutor {
         resetIdleTimeout();
         this.wsClient.sendTaskText(normalizedTask.id, data, textSequence++);
       },
-      toolUse: (toolName: string, toolInput: unknown) => {
+      toolUse: (toolName: string, toolInput: unknown, toolUseId?: string) => {
         resetIdleTimeout();
-        this.wsClient.sendTaskToolUse(normalizedTask.id, toolName, toolInput);
+        this.wsClient.sendTaskToolUse(normalizedTask.id, toolName, toolInput, toolUseId);
       },
-      toolResult: (toolName: string, result: unknown, success: boolean) => {
+      toolResult: (toolName: string, result: unknown, success: boolean, toolUseId?: string) => {
         resetIdleTimeout();
-        this.wsClient.sendTaskToolResult(normalizedTask.id, toolName, result, success);
+        this.wsClient.sendTaskToolResult(normalizedTask.id, toolName, result, success, toolUseId);
       },
       fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number, diff?: string) => {
         resetIdleTimeout();
@@ -1099,16 +1099,17 @@ export class TaskExecutor {
     // 30s aligns with the server's heartbeat check interval and is well under
     // the 3-minute startup timeout (STARTUP_TIMEOUT_MS in dispatch.ts).
     const TASK_HEARTBEAT_INTERVAL_MS = 30_000;
-    let taskHeartbeatPhase = 'preparing';
     let heartbeatSeq = 0;
     const taskHeartbeatTimer = setInterval(() => {
       // Send directly via wsClient to keep the server's activity timer alive
       // WITHOUT resetting the agent-side idle timeout. stream.text() calls
       // resetIdleTimeout(), which would make a hung agent run until hard cap
       // instead of idle-timing out after 15 minutes of no real activity.
+      // Heartbeat text is intentionally empty — it exists only to keep the
+      // server's activity timer alive, not to display anything to the user.
       this.wsClient.sendTaskText(
         normalizedTask.id,
-        `[Astro] Heartbeat — ${taskHeartbeatPhase}...\n`,
+        '',
         -(++heartbeatSeq),  // negative sequence to avoid colliding with real text
       );
     }, TASK_HEARTBEAT_INTERVAL_MS);
@@ -1131,7 +1132,6 @@ export class TaskExecutor {
     }
     const taskWithWorkspace = { ...normalizedTask, workingDirectory: prepared.workingDirectory };
     runningTask.task = taskWithWorkspace;
-    taskHeartbeatPhase = 'executing';
     console.log(`[executor] Task ${task.id}: workspace prepared, cwd=${prepared.workingDirectory}`);
 
     // Execute with idle timeout + hard cap.
@@ -1244,8 +1244,7 @@ export class TaskExecutor {
         ? `[${task.shortProjectId}/${task.shortNodeId}] ${rawTitle}`
         : rawTitle;
       if (prepared.branchName && result.status === 'completed') {
-        taskHeartbeatPhase = 'delivering';
-        stream.text?.(`\n[Astro] Delivering changes (mode: ${deliveryMode})...\n`);
+        stream.text?.(`\n── [Astro] Delivering changes (mode: ${deliveryMode})...\n`);
         this.wsClient.sendTaskStatus(task.id, 'running', 90, 'Delivering changes...');
         // Build PR body: enrich with summary data when available
         const prBodyParts: string[] = [];
@@ -1283,7 +1282,7 @@ export class TaskExecutor {
             // Copy mode: worktree preserved, no git operations
             console.log(`[executor] Task ${task.id}: copy mode, worktree preserved at ${prepared.workingDirectory}`);
           } else if (deliveryMode === 'branch') {
-            stream.text?.(`[Astro] Merging into project branch ${prepared.projectBranch ?? 'local'}...\n`);
+            stream.text?.(`── [Astro] Merging into project branch ${prepared.projectBranch ?? 'local'}...\n`);
             // Branch mode: commit locally, merge into project branch if available.
             // The merge lock is held only during the squash-merge (seconds, not minutes),
             // allowing tasks to execute in parallel. The squash merge naturally handles
@@ -1337,7 +1336,7 @@ export class TaskExecutor {
                 if (mergeResult.merged) {
                   result.deliveryStatus = 'success';
                   result.commitAfterSha = mergeResult.commitSha;
-                  stream.text?.(`[Astro] Merged into ${prepared.projectBranch} (${mergeResult.commitSha?.slice(0, 7)})\n`);
+                  stream.text?.(`── [Astro] Merged into ${prepared.projectBranch} (${mergeResult.commitSha?.slice(0, 7)})\n`);
                   console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
                   // Sync project worktree to reflect the merged changes on disk
                   if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
@@ -1353,7 +1352,7 @@ export class TaskExecutor {
 
                   if (taskContext?.sessionId && this.isResumableAdapter(adapter) && attempt < MAX_MERGE_ATTEMPTS) {
                     const conflictFiles = mergeResult.conflictFiles?.join(', ') ?? 'unknown files';
-                    stream.text?.(`[Astro] Merge conflict in: ${conflictFiles} — agent resolving (attempt ${attempt})...\n`);
+                    stream.text?.(`── [Astro] Merge conflict in: ${conflictFiles} — agent resolving (attempt ${attempt})...\n`);
                     console.log(`[executor] Task ${task.id}: merge conflict (attempt ${attempt}), resuming ${adapter.name} to resolve: ${conflictFiles}`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `Merge conflict — agent resolving (attempt ${attempt})...`);
 
@@ -1405,7 +1404,7 @@ export class TaskExecutor {
             }
           } else if (deliveryMode === 'push') {
             // Push branch to remote, but don't create a PR — user creates PR manually
-            stream.text?.(`[Astro] Pushing branch ${prepared.branchName} to origin...\n`);
+            stream.text?.(`── [Astro] Pushing branch ${prepared.branchName} to origin...\n`);
             this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Pushing branch...');
             console.log(`[executor] Task ${task.id}: push mode, pushing branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
@@ -1420,21 +1419,21 @@ export class TaskExecutor {
               // Delivery failure — don't override execution status
               result.deliveryStatus = 'failed';
               result.deliveryError = `Push delivery failed: ${prResult.error}`;
-              stream.text?.(`[Astro] Push failed: ${prResult.error}\n`);
+              stream.text?.(`── [Astro] Push failed: ${prResult.error}\n`);
               console.error(`[executor] Task ${task.id}: push delivery failed: ${prResult.error}`);
             } else if (prResult.pushed) {
               result.deliveryStatus = 'success';
               keepBranch = true;
-              stream.text?.(`[Astro] Branch pushed to origin: ${prepared.branchName}\n`);
+              stream.text?.(`── [Astro] Branch pushed to origin: ${prepared.branchName}\n`);
               console.log(`[executor] Task ${task.id}: branch pushed (${prepared.branchName})`);
             } else {
               result.deliveryStatus = 'skipped';
-              stream.text?.(`[Astro] No changes to push\n`);
+              stream.text?.(`── [Astro] No changes to push\n`);
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           } else {
             // 'pr' — push + create PR, auto-merge into project branch if applicable
-            stream.text?.(`[Astro] Creating pull request for branch ${prepared.branchName}...\n`);
+            stream.text?.(`── [Astro] Creating pull request for branch ${prepared.branchName}...\n`);
             this.wsClient.sendTaskStatus(task.id, 'running', 94, 'Rebasing before push...');
             // Pre-push rebase: if the target branch moved forward, rebase our task
             // branch so the PR will be cleanly mergeable. The branch hasn't been
@@ -1467,7 +1466,7 @@ export class TaskExecutor {
               result.commitBeforeSha = prResult.commitBeforeSha;
               result.commitAfterSha = prResult.commitAfterSha;
               keepBranch = true;
-              stream.text?.(`[Astro] Pull request created: ${prResult.prUrl}\n`);
+              stream.text?.(`── [Astro] Pull request created: ${prResult.prUrl}\n`);
 
               if (prResult.autoMergeFailed) {
                 // PR was created but auto-merge failed (likely conflict).
@@ -1482,7 +1481,7 @@ export class TaskExecutor {
 
                 if (prTaskContext?.sessionId && this.isResumableAdapter(adapter) && hasProjectBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
                   for (let attempt = 1; attempt <= MAX_PR_MERGE_ATTEMPTS; attempt++) {
-                    stream.text?.(`[Astro] PR auto-merge failed — agent resolving conflict (attempt ${attempt})...\n`);
+                    stream.text?.(`── [Astro] PR auto-merge failed — agent resolving conflict (attempt ${attempt})...\n`);
                     console.log(`[executor] Task ${task.id}: PR auto-merge failed (attempt ${attempt}), resuming ${adapter.name} to resolve`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `PR merge conflict — agent resolving (attempt ${attempt})...`);
 
@@ -1549,16 +1548,16 @@ export class TaskExecutor {
               result.deliveryStatus = 'failed';
               result.deliveryError = `PR delivery failed: ${prResult.error}`;
               keepBranch = prResult.pushed ?? false; // Keep branch if it was pushed
-              stream.text?.(`[Astro] PR delivery failed: ${prResult.error}\n`);
+              stream.text?.(`── [Astro] PR delivery failed: ${prResult.error}\n`);
               console.error(`[executor] Task ${task.id}: PR delivery failed: ${prResult.error}`);
             } else {
-              stream.text?.(`[Astro] No changes to deliver\n`);
+              stream.text?.(`── [Astro] No changes to deliver\n`);
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           }
         } catch (prError) {
           const prMsg = prError instanceof Error ? prError.message : String(prError);
-          stream.text?.(`[Astro] Delivery failed: ${prMsg}\n`);
+          stream.text?.(`── [Astro] Delivery failed: ${prMsg}\n`);
           console.error(`[executor] Task ${task.id}: delivery (${deliveryMode}) failed: ${prMsg}`);
           // Delivery failure — don't override execution status
           result.deliveryStatus = 'failed';
@@ -1613,7 +1612,6 @@ export class TaskExecutor {
     } finally {
       clearTimeout(hardCapTimeoutId);
       if (idleTimerId !== undefined) clearTimeout(idleTimerId);
-      taskHeartbeatPhase = 'cleaning up';
 
       // Always cleanup the local worktree directory to reclaim disk space
       // (node_modules alone is ~680MB per worktree). When keepBranch is true
@@ -1621,7 +1619,7 @@ export class TaskExecutor {
       // remove the working copy — the branch lives on remote/local refs,
       // and re-execution will create a fresh worktree if needed.
       if (prepared.branchName) {
-        stream.text?.(`\n[Astro] Cleaning up worktree (branch: ${prepared.branchName})...\n`);
+        stream.text?.(`\n── [Astro] Cleaning up worktree (branch: ${prepared.branchName})...\n`);
       }
       if (this.preserveWorktrees) {
         console.log(`[executor] Task ${task.id}: worktree preserved (debug mode)`);

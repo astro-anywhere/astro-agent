@@ -20,9 +20,9 @@ export interface TaskOutputStream {
   /** Structured text output (bypasses stdout throttle) */
   text: (data: string) => void;
   /** Structured tool use event */
-  toolUse: (toolName: string, toolInput: unknown) => void;
+  toolUse: (toolName: string, toolInput: unknown, toolUseId?: string) => void;
   /** Structured tool result event */
-  toolResult: (toolName: string, result: unknown, success: boolean) => void;
+  toolResult: (toolName: string, result: unknown, success: boolean, toolUseId?: string) => void;
   /** Structured file change event */
   fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number, diff?: string) => void;
   /** Structured session init event */

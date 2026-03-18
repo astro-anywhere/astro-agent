@@ -107,7 +107,7 @@ export async function createWorktree(
     if (signal?.aborted) throw new Error(`Task ${taskId} cancelled during workspace preparation`);
   };
 
-  text?.(`\n[Astro] Preparing worktree: branch ${taskBranchName}\n`);
+  text?.(`\n── [Astro] Preparing worktree: branch ${taskBranchName}\n`);
   checkAborted();
   await rm(worktreePath, { recursive: true, force: true });
   await pruneWorktrees(gitRoot);
@@ -127,7 +127,7 @@ export async function createWorktree(
   checkAborted();
   const hasRemote = await repoHasRemote(gitRoot);
   if (hasRemote) {
-    text?.(`[Astro] Fetching latest from origin...\n`);
+    text?.(`── [Astro] Fetching latest from origin...\n`);
     try {
       await execFileAsync(
         'git',
@@ -189,7 +189,7 @@ export async function createWorktree(
   }
 
   checkAborted();
-  text?.(`[Astro] Creating worktree from ${startPoint}...\n`);
+  text?.(`── [Astro] Creating worktree from ${startPoint}...\n`);
   await execFileAsync(
     'git',
     ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
@@ -262,7 +262,7 @@ export async function createWorktree(
     }
   }
 
-  text?.(`[Astro] Worktree ready: ${worktreeWorkingDirectory}\n`);
+  text?.(`── [Astro] Worktree ready: ${worktreeWorkingDirectory}\n`);
 
   return {
     workingDirectory: worktreeWorkingDirectory,

@@ -421,6 +421,8 @@ export interface TaskToolUseMessage extends WSMessage {
     taskId: string;
     toolName: string;
     toolInput: unknown;
+    /** Claude API tool_use_id — enables exact matching of tool_result to tool_use */
+    toolUseId?: string;
   };
 }
 
@@ -431,6 +433,8 @@ export interface TaskToolResultWSMessage extends WSMessage {
     toolName: string;
     result: unknown;
     success: boolean;
+    /** Claude API tool_use_id — enables exact matching back to tool_use */
+    toolUseId?: string;
   };
 }
 

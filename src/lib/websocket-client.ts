@@ -530,11 +530,11 @@ export class WebSocketClient {
   /**
    * Send structured tool use event
    */
-  sendTaskToolUse(taskId: string, toolName: string, toolInput: unknown): void {
+  sendTaskToolUse(taskId: string, toolName: string, toolInput: unknown, toolUseId?: string): void {
     const msg: TaskToolUseMessage = {
       type: 'task_tool_use',
       timestamp: new Date().toISOString(),
-      payload: { taskId, toolName, toolInput },
+      payload: { taskId, toolName, toolInput, ...(toolUseId ? { toolUseId } : {}) },
     };
     this.send(msg);
   }
@@ -542,11 +542,11 @@ export class WebSocketClient {
   /**
    * Send structured tool result event
    */
-  sendTaskToolResult(taskId: string, toolName: string, result: unknown, success: boolean): void {
+  sendTaskToolResult(taskId: string, toolName: string, result: unknown, success: boolean, toolUseId?: string): void {
     const msg: TaskToolResultWSMessage = {
       type: 'task_tool_result',
       timestamp: new Date().toISOString(),
-      payload: { taskId, toolName, result, success },
+      payload: { taskId, toolName, result, success, ...(toolUseId ? { toolUseId } : {}) },
     };
     this.send(msg);
   }

@@ -431,6 +431,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       let success = true;
       let errorMessage: string | undefined;
       let newSessionId = sessionId;
+      // Map tool_use_id → tool name for matching results back to uses
+      const resumeToolUseNames = new Map<string, string>();
 
       for await (const msg of gen) {
         if (msg.type === 'system' && msg.subtype === 'init') {
@@ -444,7 +446,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
               output += block.text;
               stream.text(block.text);
             } else if (block.type === 'tool_use') {
-              stream.toolUse(block.name, block.input);
+              if (block.id) resumeToolUseNames.set(block.id, block.name);
+              stream.toolUse(block.name, block.input, block.id);
               if (block.name === 'Write' || block.name === 'Edit') {
                 const input = block.input as Record<string, unknown>;
                 if (input.file_path) {
@@ -462,7 +465,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
                 ? block.content
                 : JSON.stringify(block.content);
               const isError = block.is_error ?? false;
-              stream.toolResult(block.tool_use_id ?? 'unknown', resultContent, !isError);
+              const resolvedResumeName = block.tool_use_id ? resumeToolUseNames.get(block.tool_use_id) : undefined;
+              stream.toolResult(resolvedResumeName || block.tool_use_id || 'unknown', resultContent, !isError, block.tool_use_id);
             }
           }
         } else if (msg.type === 'result') {
@@ -1081,7 +1085,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
             if (block.id) toolUseNames.set(block.id, block.name);
             progress = Math.min(Math.round(75 * Math.log10(toolUseCount + 1) / Math.log10(150)), 75);
             stream.status('running', progress, `Using tool: ${block.name}`);
-            stream.toolUse(block.name, block.input);
+            stream.toolUse(block.name, block.input, block.id);
 
             const inputSummary = JSON.stringify(block.input).slice(0, 200);
             console.log(`[claude-sdk] Task ${task.id} tool: ${block.name} (input: ${inputSummary})`);
@@ -1118,11 +1122,15 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
               ? block.content
               : JSON.stringify(block.content);
             const isError = block.is_error ?? false;
-            const toolName = block.tool_use_id ?? 'unknown';
+            // Resolve tool_use_id to actual tool name so the browser can match
+            // tool_result back to its tool_use (both matched by toolName).
+            const resolvedName = block.tool_use_id ? toolUseNames.get(block.tool_use_id) : undefined;
+            const toolName = resolvedName || block.tool_use_id || 'unknown';
             stream.toolResult(
               toolName,
               resultContent,
               !isError,
+              block.tool_use_id,
             );
 
             console.log(`[claude-sdk] Task ${task.id} tool_result: ${toolName} success=${!isError} (${resultContent.length} chars)`);
