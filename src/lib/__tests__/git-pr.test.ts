@@ -19,6 +19,7 @@ import {
   getDefaultBranch,
   pushBranch,
   createPullRequest,
+  mergePullRequest,
   isGhAvailable,
   hasRemoteOrigin,
   getGitRoot,
@@ -511,5 +512,48 @@ describe('createPullRequest with repoSlug', () => {
 
     const args = mockExecFileAsync.mock.calls[0][1] as string[];
     expect(args).not.toContain('--repo');
+  });
+});
+
+describe('mergePullRequest with repoSlug', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should pass --repo when repoSlug is provided', async () => {
+    mockExecFileAsync.mockResolvedValueOnce({ stdout: '' });
+
+    const result = await mergePullRequest('/repo', 42, {
+      method: 'squash',
+      repoSlug: 'owner/repo',
+    });
+
+    expect(result).toEqual({ ok: true });
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      'gh',
+      expect.arrayContaining(['--repo', 'owner/repo']),
+      expect.any(Object),
+    );
+  });
+
+  it('should not pass --repo when repoSlug is undefined', async () => {
+    mockExecFileAsync.mockResolvedValueOnce({ stdout: '' });
+
+    await mergePullRequest('/repo', 42, { method: 'squash' });
+
+    const args = mockExecFileAsync.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--repo');
+  });
+
+  it('should return error when merge fails', async () => {
+    mockExecFileAsync.mockRejectedValueOnce(new Error('merge conflict'));
+
+    const result = await mergePullRequest('/repo', 42, {
+      method: 'squash',
+      repoSlug: 'owner/repo',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('merge conflict');
   });
 });

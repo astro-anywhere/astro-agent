@@ -131,6 +131,9 @@ async function tryPreMergeRebase(
   // in gitRoot is the user's main checkout (e.g., main) — NOT the task branch.
   // Rebasing from gitRoot would corrupt the user's working directory.
   // Skip the rebase entirely; the merge/PR flow handles conflicts anyway.
+  //
+  // Best-effort check — worktree could still be deleted after this (TOCTOU),
+  // but the git commands will fail safely and be caught by the outer catch.
   try {
     statSync(workdir);
   } catch {
@@ -1537,10 +1540,10 @@ export class TaskExecutor {
                     }
 
                     // Retry the GitHub merge.
-                    // Use gitRoot as cwd (always valid) instead of worktree path
-                    // which may have been deleted by the agent during resolution.
+                    // Use gitRoot as cwd (always valid, guarded at L1518) instead of
+                    // worktree path which may have been deleted during resolution.
                     this.wsClient.sendTaskStatus(task.id, 'running', 98, `Retrying PR merge (attempt ${attempt})...`);
-                    const retryMerge = await mergePullRequest(prepared.gitRoot ?? prepared.workingDirectory, prResult.prNumber, {
+                    const retryMerge = await mergePullRequest(prepared.gitRoot!, prResult.prNumber, {
                       method: 'squash',
                       deleteBranch: true,
                       repoSlug: repoSlug ?? undefined,

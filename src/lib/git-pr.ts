@@ -144,6 +144,8 @@ export async function pushBranch(
 export function parseRepoSlug(remoteUrl: string): string | null {
   // Handles both SSH (git@github.com:owner/repo.git)
   // and HTTPS (https://github.com/owner/repo.git) formats.
+  // Note: assumes OWNER/REPO (two segments). GitLab subgroups
+  // (group/subgroup/repo) will extract only the last two segments.
   const match = remoteUrl.match(/[:/]([^/]+\/[^/]+?)(?:\.git)?$/);
   if (match) return match[1];
   return null;
