@@ -27,6 +27,10 @@ export interface WorktreeOptions {
   projectBranch?: string;
   stdout?: (data: string) => void;
   stderr?: (data: string) => void;
+  /** Emit visible activity text to the Astro UI (shows in the task activity stream) */
+  text?: (data: string) => void;
+  /** Abort signal — checked between git operations so cancellation stops workspace prep */
+  signal?: AbortSignal;
 }
 
 export interface WorktreeSetup {
@@ -58,9 +62,11 @@ export async function createWorktree(
     shortNodeId,
     agentDir,
     baseBranch: dispatchBaseBranch,
+    text,
     projectBranch: dispatchProjectBranch,
     stdout,
     stderr,
+    signal,
   } = options;
 
   // Validate taskId format to prevent command injection
@@ -95,26 +101,38 @@ export async function createWorktree(
     : sanitize(taskId);
   const taskBranchName = `${branchPrefix}${branchSuffix}`;
   const worktreePath = join(baseRoot, branchSuffix);
+  // Abort-signal gate: check between every long git operation so cancellation
+  // actually halts workspace prep instead of letting it run to completion.
+  const checkAborted = () => {
+    if (signal?.aborted) throw new Error(`Task ${taskId} cancelled during workspace preparation`);
+  };
+
+  text?.(`\n[Astro] Preparing worktree: branch ${taskBranchName}\n`);
+  checkAborted();
   await rm(worktreePath, { recursive: true, force: true });
   await pruneWorktrees(gitRoot);
 
   // Clean up lingering worktrees and branches for the TASK branch only.
   // Never delete the project branch — it accumulates work across tasks.
+  checkAborted();
   await removeLingeringWorktrees(gitRoot, taskBranchName);
   await ensureBranchAvailable(gitRoot, taskBranchName);
 
   // Delete remote task branch if it exists — prevents non-fast-forward push
   // failures when re-executing a task whose previous branch was already pushed
+  checkAborted();
   await deleteRemoteBranch(gitRoot, taskBranchName);
 
   // Fetch latest so we branch from up-to-date origin (skip for local-only repos)
+  checkAborted();
   const hasRemote = await repoHasRemote(gitRoot);
   if (hasRemote) {
+    text?.(`[Astro] Fetching latest from origin...\n`);
     try {
       await execFileAsync(
         'git',
         ['-C', gitRoot, '-c', 'core.hooksPath=/dev/null', 'fetch', 'origin'],
-        { env: withGitEnv(), timeout: 30_000 }
+        { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
       );
     } catch {
       // Non-fatal: proceed with potentially stale refs
@@ -134,6 +152,7 @@ export async function createWorktree(
 
   // Ensure the project branch exists on origin. If this is the first task,
   // create it from origin/{defaultBranch}. Idempotent.
+  checkAborted();
   if (projectBranchName) {
     await ensureProjectBranch(gitRoot, projectBranchName, defaultBranch);
   }
@@ -169,13 +188,16 @@ export async function createWorktree(
     console.warn('[worktree] Failed to capture commitBeforeSha for audit trail');
   }
 
+  checkAborted();
+  text?.(`[Astro] Creating worktree from ${startPoint}...\n`);
   await execFileAsync(
     'git',
     ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
-    { env: withGitEnv(), timeout: 30_000 }
+    { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
   );
 
   // Initialize submodules if the repo uses them (non-fatal)
+  checkAborted();
   try {
     await initSubmodules(worktreePath, stderr);
   } catch (err) {
@@ -184,6 +206,7 @@ export async function createWorktree(
   }
 
   // Orchestration: include files + setup script (both non-fatal)
+  checkAborted();
   const log = stdout;
   try {
     await applyWorktreeInclude({ gitRoot, worktreePath, log });
@@ -192,6 +215,7 @@ export async function createWorktree(
     stderr?.(`worktree-include failed: ${msg}`);
   }
 
+  checkAborted();
   try {
     await runSetupScript({
       gitRoot,
@@ -237,6 +261,8 @@ export async function createWorktree(
       throw new Error(`Failed to copy untracked working directory "${relativePath}" into worktree: ${msg}`);
     }
   }
+
+  text?.(`[Astro] Worktree ready: ${worktreeWorkingDirectory}\n`);
 
   return {
     workingDirectory: worktreeWorkingDirectory,
