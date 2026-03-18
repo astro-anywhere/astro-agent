@@ -125,47 +125,32 @@ async function tryPreMergeRebase(
   workdir: string,
   targetBranch: string,
   isRemote: boolean,
-  options?: {
-    /** Branch name — required when workdir is gone (uses gitRoot + explicit ref instead of HEAD) */
-    branchName?: string;
-    /** Git root directory — fallback when the worktree directory no longer exists */
-    gitRoot?: string;
-  },
 ): Promise<{ rebased: boolean; skipped?: boolean }> {
-  // Determine the working directory for git commands.
-  // When the worktree is gone, fall back to gitRoot — the task branch ref
-  // lives in the shared git object store and is accessible from any directory
-  // in the same repo.
-  let gitDir = workdir;
-  let headRef = 'HEAD';
+  // `git rebase` always operates on the currently checked-out branch (HEAD).
+  // It cannot rebase a detached branch ref. When the worktree is gone, HEAD
+  // in gitRoot is the user's main checkout (e.g., main) — NOT the task branch.
+  // Rebasing from gitRoot would corrupt the user's working directory.
+  // Skip the rebase entirely; the merge/PR flow handles conflicts anyway.
   try {
     statSync(workdir);
   } catch {
-    // Worktree directory doesn't exist
-    if (options?.gitRoot && options?.branchName) {
-      gitDir = options.gitRoot;
-      headRef = options.branchName;
-      console.log(`[git] Worktree at ${workdir} gone, using gitRoot: ${gitDir}, branch: ${headRef}`);
-    } else {
-      console.warn(`[git] Worktree at ${workdir} gone, no gitRoot/branchName fallback — skipping rebase`);
-      return { rebased: false, skipped: true };
-    }
+    console.log(`[git] Worktree at ${workdir} gone — skipping rebase (cannot rebase non-checked-out branch)`);
+    return { rebased: false, skipped: true };
   }
 
   try {
     const rebaseTarget = isRemote ? `origin/${targetBranch}` : targetBranch;
-
     const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
 
     if (isRemote) {
-      console.log(`[git] fetch origin ${targetBranch} (cwd: ${gitDir})`);
-      await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: gitDir, env: gitEnv, timeout: 30_000 });
+      console.log(`[git] fetch origin ${targetBranch} (cwd: ${workdir})`);
+      await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: workdir, env: gitEnv, timeout: 30_000 });
     }
 
     // Check if rebase is needed (target branch moved since we branched)
-    console.log(`[git] merge-base ${headRef} ${rebaseTarget} (cwd: ${gitDir})`);
-    const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', headRef, rebaseTarget], { cwd: gitDir, env: gitEnv });
-    const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: gitDir, env: gitEnv });
+    console.log(`[git] merge-base HEAD ${rebaseTarget} (cwd: ${workdir})`);
+    const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', 'HEAD', rebaseTarget], { cwd: workdir, env: gitEnv });
+    const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: workdir, env: gitEnv });
 
     if (mergeBase.trim() === targetTip.trim()) {
       console.log(`[git] Already up to date (merge-base = target tip: ${targetTip.trim().slice(0, 7)})`);
@@ -173,15 +158,15 @@ async function tryPreMergeRebase(
     }
 
     // Try automatic rebase — timeout after 60s (should be fast for non-conflicting changes)
-    console.log(`[git] rebase ${rebaseTarget} (cwd: ${gitDir})`);
-    await execFileAsync('git', ['rebase', rebaseTarget], { cwd: gitDir, env: gitEnv, timeout: 60_000 });
+    console.log(`[git] rebase ${rebaseTarget} (cwd: ${workdir})`);
+    await execFileAsync('git', ['rebase', rebaseTarget], { cwd: workdir, env: gitEnv, timeout: 60_000 });
     console.log(`[git] Rebase onto ${rebaseTarget} succeeded`);
     return { rebased: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[git] Rebase onto ${targetBranch} failed: ${msg}`);
     // Abort on failure — existing retry loop will handle conflicts
-    await execFileAsync('git', ['rebase', '--abort'], { cwd: gitDir }).catch(() => {});
+    await execFileAsync('git', ['rebase', '--abort'], { cwd: workdir }).catch(() => {});
     return { rebased: false };
   }
 }
@@ -1340,10 +1325,7 @@ export class TaskExecutor {
               // Pre-merge rebase: if the project branch moved forward (another task
               // merged), rebase our task branch first. Avoids conflicts when changes
               // don't overlap, and saves one retry cycle when they do.
-              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.projectBranch, false, {
-                branchName: prepared.branchName,
-                gitRoot: prepared.gitRoot,
-              });
+              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.projectBranch, false);
               if (preRebase.rebased) {
                 stream.text?.(`── [Git] Rebased onto ${prepared.projectBranch}\n`);
                 console.log(`[executor] Task ${task.id}: pre-merge rebase onto ${prepared.projectBranch} succeeded`);
@@ -1487,10 +1469,7 @@ export class TaskExecutor {
             // branch so the PR will be cleanly mergeable. The branch hasn't been
             // pushed yet, so no force-push is needed.
             if (prepared.baseBranch) {
-              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.baseBranch, true, {
-                branchName: prepared.branchName,
-                gitRoot: prepared.gitRoot,
-              });
+              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.baseBranch, true);
               if (preRebase.rebased) {
                 stream.text?.(`── [Git] Rebased onto origin/${prepared.baseBranch}\n`);
                 console.log(`[executor] Task ${task.id}: pre-push rebase onto origin/${prepared.baseBranch} succeeded`);

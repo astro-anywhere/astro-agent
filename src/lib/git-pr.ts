@@ -460,8 +460,9 @@ export async function pushAndCreatePR(
 
   // Resolve the repo slug for gh commands (OWNER/REPO from remote URL).
   // This makes gh pr create/merge independent of the local filesystem.
+  // Only required when we'll actually run gh commands (not skipPR mode).
   const repoSlug = await getRepoSlug(gitRoot);
-  if (!repoSlug && !worktreeAlive) {
+  if (!repoSlug && !worktreeAlive && !options.skipPR) {
     console.warn(`[git-pr] Cannot resolve repo slug from ${gitRoot} and worktree is gone`);
     result.error = 'Cannot resolve GitHub repo — worktree gone and no repo slug';
     return result;
@@ -474,8 +475,11 @@ export async function pushAndCreatePR(
   const baseBranch = options.baseBranch ?? await readBaseBranchFromConfig(gitRoot) ?? await getDefaultBranch(gitRoot);
 
   // Auto-commit uncommitted changes — only when the worktree still exists.
+  // When the worktree is gone, there's nothing to stage (agent cleaned it up).
   if (options.autoCommit !== false && worktreeAlive) {
     await autoCommitChanges(worktreePath, options.taskTitle);
+  } else if (options.autoCommit !== false && !worktreeAlive) {
+    console.log(`[git-pr] Skipping auto-commit — worktree at ${worktreePath} no longer exists`);
   }
 
   // Check if there are commits to push.
