@@ -698,6 +698,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     let success = true;
     let errorMessage: string | undefined;
     let resultMetrics: TaskResult['metrics'] | undefined;
+    // Map tool_use_id → tool name for matching results back to uses
+    const toolUseNames = new Map<string, string>();
 
     for await (const msg of gen) {
       if (msg.type === 'system' && msg.subtype === 'init') {
@@ -712,6 +714,30 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           if (block.type === 'text') {
             output += block.text;
             stream.text(block.text);
+          } else if (block.type === 'tool_use') {
+            if (block.id) toolUseNames.set(block.id, block.name);
+            stream.toolUse(block.name, block.input, block.id);
+            // Emit file change events for write/edit tools
+            if (block.name === 'Write' || block.name === 'Edit') {
+              const input = block.input as Record<string, unknown>;
+              if (input.file_path) {
+                const action = block.name === 'Write' ? 'created' : 'modified';
+                stream.fileChange(String(input.file_path), action as 'created' | 'modified' | 'deleted');
+              }
+            }
+          }
+        }
+      } else if (msg.type === 'user') {
+        // Tool results from the SDK
+        for (const block of msg.message.content) {
+          if (typeof block === 'string') continue;
+          if (block.type === 'tool_result') {
+            const resultContent = typeof block.content === 'string'
+              ? block.content
+              : JSON.stringify(block.content);
+            const isError = block.is_error ?? false;
+            const resolvedName = block.tool_use_id ? toolUseNames.get(block.tool_use_id) : undefined;
+            stream.toolResult(resolvedName || block.tool_use_id || 'unknown', resultContent, !isError, block.tool_use_id);
           }
         }
       } else if (msg.type === 'result') {
@@ -776,16 +802,14 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // starting a new session.
     delete process.env.CLAUDECODE;
 
-    const isTextOnlyTask = task.type === 'chat' || task.type === 'summarize';
+    const isTextOnlyTask = task.type === 'summarize';
 
     // Plan/chat/summarize tasks without a working directory run without cwd context
     const workdir: string | undefined = task.workingDirectory || undefined;
     const hasWorkdir = !!workdir;
 
-    // ── Fast path for text-only tasks (chat, summarize) ──
-    // These tasks use structured text blocks (not tools/MCP) for plan mutations.
-    // Skip HPC context, MCP servers, tool infrastructure, and CLAUDE.md loading
-    // to minimize time-to-first-token.
+    // ── Fast path for text-only tasks (summarize) ──
+    // Summarize tasks use no tools/MCP. Skip everything to minimize time-to-first-token.
     if (isTextOnlyTask) {
       return this.runTextOnlyQuery(task, stream, abortController, hasWorkdir);
     }
@@ -797,7 +821,9 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
       ...(task.maxTurns != null ? { maxTurns: task.maxTurns } : {}),
-      permissionMode: 'bypassPermissions', // Auto-accept all tool calls
+      // All task types use bypassPermissions. Plan tasks are restricted via allowedTools instead
+      // (plan permissionMode disables ALL tool execution, which is too restrictive).
+      permissionMode: 'bypassPermissions',
       // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
       ...getSandboxOption(task.model),
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
@@ -982,16 +1008,18 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       }
     }
 
-    // Plan tasks are read-only: no file writes, edits, or shell access regardless
-    // of workdir/MCP configuration. Only allow codebase exploration + web search.
+    // Plan tasks: read-only built-in tools + Bash (for astro-cli plan mutations) +
+    // AskUserQuestion (for clarifications, like Claude Code's plan mode).
+    // No file writes or edits — plan chat should explore the codebase and mutate
+    // plans via `astro-cli` commands only, not edit files directly.
+    // MCP tools are excluded — plan mode uses CLI via Bash, not MCP.
     if (task.type === 'plan') {
       const planTools = [
-        ...(hasWorkdir ? ['Read', 'Glob', 'Grep'] : []),
-        'WebSearch', 'WebFetch',
-        ...mcpAllowedTools,
+        ...(hasWorkdir ? ['Read', 'Glob', 'Grep', 'Bash'] : ['Bash']),
+        'WebSearch', 'WebFetch', 'AskUserQuestion',
       ];
       (options as Record<string, unknown>).allowedTools = planTools;
-      console.log(`[claude-sdk] Plan task — read-only tools: [${planTools.join(', ')}]`);
+      console.log(`[claude-sdk] Plan task — allowed tools: [${planTools.join(', ')}]`);
     } else if (!hasWorkdir) {
       // For tasks without a working directory, disable file system and shell tools
       // but keep web search so the agent can research. MCP tools are also allowed.
