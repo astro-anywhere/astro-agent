@@ -251,16 +251,30 @@ describe('PiRpcBridge', () => {
       bridge.stop();
     });
 
-    it('should timeout after 30 seconds', async () => {
+    it('should timeout control commands after 30 seconds', async () => {
       vi.useFakeTimers();
       const bridge = await createBridge();
       bridge.start();
 
-      const p = bridge.prompt('test');
+      // Control commands (getState, setModel, etc.) have 30s timeout
+      const p = bridge.getState();
       vi.advanceTimersByTime(31_000);
       await expect(p).rejects.toThrow(/timed out/);
       bridge.stop();
       vi.useRealTimers();
+    });
+
+    it('prompt and steer have no timeout (rely on abort signal)', async () => {
+      const bridge = await createBridge();
+      bridge.start();
+      captureStdin({ autoRespond: true, autoRespondDelay: 5 });
+
+      // prompt and steer should complete via response, not timeout
+      const p = await bridge.prompt('test');
+      expect(p.ok).toBe(true);
+      const s = await bridge.steer('msg');
+      expect(s.ok).toBe(true);
+      bridge.stop();
     });
 
     it('should reject pending commands when process exits', async () => {

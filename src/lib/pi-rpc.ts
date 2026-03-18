@@ -116,7 +116,7 @@ type PiRpcMessage = PiRpcResponse | (PiEvent & { id?: never });
 // Bridge
 // ---------------------------------------------------------------------------
 
-/** Default command timeout (30 seconds) */
+/** Default command timeout (30 seconds) — for quick control commands */
 const COMMAND_TIMEOUT_MS = 30_000;
 
 export type PiEventHandler = (event: PiEvent) => void;
@@ -127,7 +127,7 @@ export class PiRpcBridge {
   private pendingCommands = new Map<string, {
     resolve: (res: PiRpcResponse) => void;
     reject: (err: Error) => void;
-    timer: ReturnType<typeof setTimeout>;
+    timer: ReturnType<typeof setTimeout> | null;
   }>();
   private eventHandlers: PiEventHandler[] = [];
   private piPath: string;
@@ -173,7 +173,7 @@ export class PiRpcBridge {
       this.started = false;
       // Reject all pending commands
       for (const [id, pending] of this.pendingCommands) {
-        clearTimeout(pending.timer);
+        if (pending.timer) clearTimeout(pending.timer);
         pending.reject(new Error(`Pi process exited (code=${code}, signal=${sig})`));
         this.pendingCommands.delete(id);
       }
@@ -182,7 +182,7 @@ export class PiRpcBridge {
     this.process.on('error', (err) => {
       this.started = false;
       for (const [id, pending] of this.pendingCommands) {
-        clearTimeout(pending.timer);
+        if (pending.timer) clearTimeout(pending.timer);
         pending.reject(err);
         this.pendingCommands.delete(id);
       }
@@ -242,20 +242,25 @@ export class PiRpcBridge {
 
   /**
    * Send an RPC command and wait for the response.
+   * @param timeoutMs Override the default timeout for this command.
    */
-  async sendCommand(method: string, params?: Record<string, unknown>): Promise<PiRpcResponse> {
+  async sendCommand(method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<PiRpcResponse> {
     if (!this.isRunning) {
       throw new Error('Pi RPC bridge is not running');
     }
 
     const id = randomUUID();
     const command: PiRpcCommand = { id, method, params };
+    const effectiveTimeout = timeoutMs ?? COMMAND_TIMEOUT_MS;
 
     return new Promise<PiRpcResponse>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pendingCommands.delete(id);
-        reject(new Error(`Pi RPC command '${method}' timed out after ${COMMAND_TIMEOUT_MS}ms`));
-      }, COMMAND_TIMEOUT_MS);
+      // 0 = no timeout (AI completions rely on abort signal instead)
+      const timer = effectiveTimeout > 0
+        ? setTimeout(() => {
+            this.pendingCommands.delete(id);
+            reject(new Error(`Pi RPC command '${method}' timed out after ${effectiveTimeout}ms`));
+          }, effectiveTimeout)
+        : null;
 
       this.pendingCommands.set(id, { resolve, reject, timer });
 
@@ -263,21 +268,21 @@ export class PiRpcBridge {
       try {
         this.process!.stdin!.write(json);
       } catch (err) {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         this.pendingCommands.delete(id);
         reject(new Error(`Failed to write to Pi stdin: ${err instanceof Error ? err.message : String(err)}`));
       }
     });
   }
 
-  /** Send a prompt to the Pi agent */
+  /** Send a prompt to the Pi agent (no timeout — relies on abort signal, matching Claude SDK) */
   async prompt(text: string): Promise<PiRpcResponse> {
-    return this.sendCommand('prompt', { text });
+    return this.sendCommand('prompt', { text }, 0);
   }
 
-  /** Send a steer message to the Pi agent */
+  /** Send a steer message to the Pi agent (no timeout — relies on abort signal, matching Claude SDK) */
   async steer(message: string): Promise<PiRpcResponse> {
-    return this.sendCommand('steer', { message });
+    return this.sendCommand('steer', { message }, 0);
   }
 
   /** Abort the current operation */
@@ -318,7 +323,7 @@ export class PiRpcBridge {
       const response = msg as PiRpcResponse;
       const pending = this.pendingCommands.get(response.id);
       if (pending) {
-        clearTimeout(pending.timer);
+        if (pending.timer) clearTimeout(pending.timer);
         this.pendingCommands.delete(response.id);
         pending.resolve(response);
       }
