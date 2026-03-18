@@ -20,7 +20,7 @@ import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree, syncProjectWorktree } from './worktree.js';
 import { ensureProjectWorkspace } from './workspace-root.js';
 import { BranchLockManager } from './branch-lock.js';
-import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha, isGhAvailable } from './git-pr.js';
+import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha, isGhAvailable, getRepoSlug } from './git-pr.js';
 import { localMergeIntoProjectBranch } from './local-merge.js';
 import {
   checkWorkdirSafety,
@@ -126,25 +126,48 @@ async function tryPreMergeRebase(
   targetBranch: string,
   isRemote: boolean,
 ): Promise<{ rebased: boolean; skipped?: boolean }> {
+  // `git rebase` always operates on the currently checked-out branch (HEAD).
+  // It cannot rebase a detached branch ref. When the worktree is gone, HEAD
+  // in gitRoot is the user's main checkout (e.g., main) — NOT the task branch.
+  // Rebasing from gitRoot would corrupt the user's working directory.
+  // Skip the rebase entirely; the merge/PR flow handles conflicts anyway.
+  //
+  // Best-effort check — worktree could still be deleted after this (TOCTOU),
+  // but the git commands will fail safely and be caught by the outer catch.
+  try {
+    statSync(workdir);
+  } catch {
+    console.log(`[git] Worktree at ${workdir} gone — skipping rebase (cannot rebase non-checked-out branch)`);
+    return { rebased: false, skipped: true };
+  }
+
   try {
     const rebaseTarget = isRemote ? `origin/${targetBranch}` : targetBranch;
+    const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
 
     if (isRemote) {
-      await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: workdir, timeout: 30_000 });
+      console.log(`[git] fetch origin ${targetBranch} (cwd: ${workdir})`);
+      await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: workdir, env: gitEnv, timeout: 30_000 });
     }
 
     // Check if rebase is needed (target branch moved since we branched)
-    const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', 'HEAD', rebaseTarget], { cwd: workdir });
-    const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: workdir });
+    console.log(`[git] merge-base HEAD ${rebaseTarget} (cwd: ${workdir})`);
+    const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', 'HEAD', rebaseTarget], { cwd: workdir, env: gitEnv });
+    const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: workdir, env: gitEnv });
 
     if (mergeBase.trim() === targetTip.trim()) {
-      return { rebased: false, skipped: true }; // Already up to date
+      console.log(`[git] Already up to date (merge-base = target tip: ${targetTip.trim().slice(0, 7)})`);
+      return { rebased: false, skipped: true };
     }
 
     // Try automatic rebase — timeout after 60s (should be fast for non-conflicting changes)
-    await execFileAsync('git', ['rebase', rebaseTarget], { cwd: workdir, timeout: 60_000 });
+    console.log(`[git] rebase ${rebaseTarget} (cwd: ${workdir})`);
+    await execFileAsync('git', ['rebase', rebaseTarget], { cwd: workdir, env: gitEnv, timeout: 60_000 });
+    console.log(`[git] Rebase onto ${rebaseTarget} succeeded`);
     return { rebased: true };
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[git] Rebase onto ${targetBranch} failed: ${msg}`);
     // Abort on failure — existing retry loop will handle conflicts
     await execFileAsync('git', ['rebase', '--abort'], { cwd: workdir }).catch(() => {});
     return { rebased: false };
@@ -1246,6 +1269,10 @@ export class TaskExecutor {
       if (prepared.branchName && result.status === 'completed') {
         stream.text?.(`\n── [Astro] Delivering changes (mode: ${deliveryMode})...\n`);
         this.wsClient.sendTaskStatus(task.id, 'running', 90, 'Delivering changes...');
+        // Resolve GitHub repo slug (OWNER/REPO) for explicit gh --repo targeting.
+        // This makes gh pr create/merge independent of local filesystem state
+        // (worktree may be cleaned up by the agent during execution).
+        const repoSlug = prepared.gitRoot ? await getRepoSlug(prepared.gitRoot) : undefined;
         // Build PR body: enrich with summary data when available
         const prBodyParts: string[] = [];
         if (summary) {
@@ -1277,12 +1304,14 @@ export class TaskExecutor {
         try {
           if (deliveryMode === 'direct') {
             // No git delivery — files modified in-place
+            stream.text?.(`── [Delivery] Changes applied in-place (direct mode)\n`);
             console.log(`[executor] Task ${task.id}: direct mode, skipping git delivery`);
           } else if (deliveryMode === 'copy') {
             // Copy mode: worktree preserved, no git operations
+            stream.text?.(`── [Delivery] Worktree preserved (copy mode)\n`);
             console.log(`[executor] Task ${task.id}: copy mode, worktree preserved at ${prepared.workingDirectory}`);
           } else if (deliveryMode === 'branch') {
-            stream.text?.(`── [Astro] Merging into project branch ${prepared.projectBranch ?? 'local'}...\n`);
+            stream.text?.(`── [Git] Merging into project branch ${prepared.projectBranch ?? 'local'}...\n`);
             // Branch mode: commit locally, merge into project branch if available.
             // The merge lock is held only during the squash-merge (seconds, not minutes),
             // allowing tasks to execute in parallel. The squash merge naturally handles
@@ -1301,8 +1330,10 @@ export class TaskExecutor {
               // don't overlap, and saves one retry cycle when they do.
               const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.projectBranch, false);
               if (preRebase.rebased) {
+                stream.text?.(`── [Git] Rebased onto ${prepared.projectBranch}\n`);
                 console.log(`[executor] Task ${task.id}: pre-merge rebase onto ${prepared.projectBranch} succeeded`);
               } else if (!preRebase.skipped) {
+                stream.text?.(`── [Git] Rebase skipped (conflicts), retrying via merge\n`);
                 console.log(`[executor] Task ${task.id}: pre-merge rebase had conflicts, falling back to merge retry loop`);
               }
 
@@ -1327,6 +1358,7 @@ export class TaskExecutor {
                     prepared.branchName,
                     prepared.projectBranch,
                     commitMessage,
+                    (msg) => stream.text?.(`── [Git] ${msg}\n`),
                   );
                 } finally {
                   mergeLock.release();
@@ -1336,7 +1368,7 @@ export class TaskExecutor {
                 if (mergeResult.merged) {
                   result.deliveryStatus = 'success';
                   result.commitAfterSha = mergeResult.commitSha;
-                  stream.text?.(`── [Astro] Merged into ${prepared.projectBranch} (${mergeResult.commitSha?.slice(0, 7)})\n`);
+                  stream.text?.(`── [Git] Merged into ${prepared.projectBranch} (${mergeResult.commitSha?.slice(0, 7)})\n`);
                   console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
                   // Sync project worktree to reflect the merged changes on disk
                   if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
@@ -1352,7 +1384,7 @@ export class TaskExecutor {
 
                   if (taskContext?.sessionId && this.isResumableAdapter(adapter) && attempt < MAX_MERGE_ATTEMPTS) {
                     const conflictFiles = mergeResult.conflictFiles?.join(', ') ?? 'unknown files';
-                    stream.text?.(`── [Astro] Merge conflict in: ${conflictFiles} — agent resolving (attempt ${attempt})...\n`);
+                    stream.text?.(`── [Git] Merge conflict: ${conflictFiles} — agent resolving (attempt ${attempt})...\n`);
                     console.log(`[executor] Task ${task.id}: merge conflict (attempt ${attempt}), resuming ${adapter.name} to resolve: ${conflictFiles}`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `Merge conflict — agent resolving (attempt ${attempt})...`);
 
@@ -1404,7 +1436,7 @@ export class TaskExecutor {
             }
           } else if (deliveryMode === 'push') {
             // Push branch to remote, but don't create a PR — user creates PR manually
-            stream.text?.(`── [Astro] Pushing branch ${prepared.branchName} to origin...\n`);
+            stream.text?.(`── [Git] Pushing ${prepared.branchName} to origin...\n`);
             this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Pushing branch...');
             console.log(`[executor] Task ${task.id}: push mode, pushing branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
@@ -1413,27 +1445,28 @@ export class TaskExecutor {
               taskDescription: task.description || task.prompt.slice(0, 500),
               skipPR: true,
               baseBranch: prepared.baseBranch,
+              gitRoot: prepared.gitRoot,
             });
             result.branchName = prResult.branchName;
             if (prResult.error) {
               // Delivery failure — don't override execution status
               result.deliveryStatus = 'failed';
               result.deliveryError = `Push delivery failed: ${prResult.error}`;
-              stream.text?.(`── [Astro] Push failed: ${prResult.error}\n`);
+              stream.text?.(`── [Git] Push failed: ${prResult.error}\n`);
               console.error(`[executor] Task ${task.id}: push delivery failed: ${prResult.error}`);
             } else if (prResult.pushed) {
               result.deliveryStatus = 'success';
               keepBranch = true;
-              stream.text?.(`── [Astro] Branch pushed to origin: ${prepared.branchName}\n`);
+              stream.text?.(`── [Git] Pushed to origin: ${prepared.branchName}\n`);
               console.log(`[executor] Task ${task.id}: branch pushed (${prepared.branchName})`);
             } else {
               result.deliveryStatus = 'skipped';
-              stream.text?.(`── [Astro] No changes to push\n`);
+              stream.text?.(`── [Git] No changes to push\n`);
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           } else {
             // 'pr' — push + create PR, auto-merge into project branch if applicable
-            stream.text?.(`── [Astro] Creating pull request for branch ${prepared.branchName}...\n`);
+            stream.text?.(`── [Git] Creating PR: ${prepared.branchName} → ${prepared.baseBranch ?? 'main'}...\n`);
             this.wsClient.sendTaskStatus(task.id, 'running', 94, 'Rebasing before push...');
             // Pre-push rebase: if the target branch moved forward, rebase our task
             // branch so the PR will be cleanly mergeable. The branch hasn't been
@@ -1441,8 +1474,10 @@ export class TaskExecutor {
             if (prepared.baseBranch) {
               const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.baseBranch, true);
               if (preRebase.rebased) {
+                stream.text?.(`── [Git] Rebased onto origin/${prepared.baseBranch}\n`);
                 console.log(`[executor] Task ${task.id}: pre-push rebase onto origin/${prepared.baseBranch} succeeded`);
               } else if (!preRebase.skipped) {
+                stream.text?.(`── [Git] Rebase skipped (conflicts), proceeding without rebase\n`);
                 console.log(`[executor] Task ${task.id}: pre-push rebase had conflicts, proceeding without rebase`);
               }
             }
@@ -1458,6 +1493,7 @@ export class TaskExecutor {
               baseBranch: prepared.baseBranch,
               autoMerge: hasProjectBranch,
               commitBeforeSha: prepared.commitBeforeSha,
+              gitRoot: prepared.gitRoot,
             });
             result.branchName = prResult.branchName;
             if (prResult.prUrl) {
@@ -1466,7 +1502,7 @@ export class TaskExecutor {
               result.commitBeforeSha = prResult.commitBeforeSha;
               result.commitAfterSha = prResult.commitAfterSha;
               keepBranch = true;
-              stream.text?.(`── [Astro] Pull request created: ${prResult.prUrl}\n`);
+              stream.text?.(`── [Git] PR created: ${prResult.prUrl}\n`);
 
               if (prResult.autoMergeFailed) {
                 // PR was created but auto-merge failed (likely conflict).
@@ -1481,7 +1517,7 @@ export class TaskExecutor {
 
                 if (prTaskContext?.sessionId && this.isResumableAdapter(adapter) && hasProjectBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
                   for (let attempt = 1; attempt <= MAX_PR_MERGE_ATTEMPTS; attempt++) {
-                    stream.text?.(`── [Astro] PR auto-merge failed — agent resolving conflict (attempt ${attempt})...\n`);
+                    stream.text?.(`── [Git] Auto-merge failed — agent resolving conflict (attempt ${attempt})...\n`);
                     console.log(`[executor] Task ${task.id}: PR auto-merge failed (attempt ${attempt}), resuming ${adapter.name} to resolve`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `PR merge conflict — agent resolving (attempt ${attempt})...`);
 
@@ -1503,11 +1539,14 @@ export class TaskExecutor {
                       break;
                     }
 
-                    // Retry the GitHub merge
+                    // Retry the GitHub merge.
+                    // Use gitRoot as cwd (always valid, guarded at L1518) instead of
+                    // worktree path which may have been deleted during resolution.
                     this.wsClient.sendTaskStatus(task.id, 'running', 98, `Retrying PR merge (attempt ${attempt})...`);
-                    const retryMerge = await mergePullRequest(prepared.workingDirectory, prResult.prNumber, {
+                    const retryMerge = await mergePullRequest(prepared.gitRoot!, prResult.prNumber, {
                       method: 'squash',
                       deleteBranch: true,
+                      repoSlug: repoSlug ?? undefined,
                     });
 
                     if (retryMerge.ok) {
@@ -1548,16 +1587,16 @@ export class TaskExecutor {
               result.deliveryStatus = 'failed';
               result.deliveryError = `PR delivery failed: ${prResult.error}`;
               keepBranch = prResult.pushed ?? false; // Keep branch if it was pushed
-              stream.text?.(`── [Astro] PR delivery failed: ${prResult.error}\n`);
+              stream.text?.(`── [Git] PR delivery failed: ${prResult.error}\n`);
               console.error(`[executor] Task ${task.id}: PR delivery failed: ${prResult.error}`);
             } else {
-              stream.text?.(`── [Astro] No changes to deliver\n`);
+              stream.text?.(`── [Git] No changes to deliver\n`);
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           }
         } catch (prError) {
           const prMsg = prError instanceof Error ? prError.message : String(prError);
-          stream.text?.(`── [Astro] Delivery failed: ${prMsg}\n`);
+          stream.text?.(`── [Delivery] Failed: ${prMsg}\n`);
           console.error(`[executor] Task ${task.id}: delivery (${deliveryMode}) failed: ${prMsg}`);
           // Delivery failure — don't override execution status
           result.deliveryStatus = 'failed';
