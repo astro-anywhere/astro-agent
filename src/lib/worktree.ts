@@ -29,6 +29,8 @@ export interface WorktreeOptions {
   stderr?: (data: string) => void;
   /** Emit visible activity text to the Astro UI (shows in the task activity stream) */
   text?: (data: string) => void;
+  /** Abort signal — checked between git operations so cancellation stops workspace prep */
+  signal?: AbortSignal;
 }
 
 export interface WorktreeSetup {
@@ -64,6 +66,7 @@ export async function createWorktree(
     projectBranch: dispatchProjectBranch,
     stdout,
     stderr,
+    signal,
   } = options;
 
   // Validate taskId format to prevent command injection
@@ -98,7 +101,14 @@ export async function createWorktree(
     : sanitize(taskId);
   const taskBranchName = `${branchPrefix}${branchSuffix}`;
   const worktreePath = join(baseRoot, branchSuffix);
+  // Abort-signal gate: check between every long git operation so cancellation
+  // actually halts workspace prep instead of letting it run to completion.
+  const checkAborted = () => {
+    if (signal?.aborted) throw new Error('Task cancelled during workspace preparation');
+  };
+
   text?.(`\n[Astro] Preparing worktree: branch ${taskBranchName}\n`);
+  checkAborted();
   await rm(worktreePath, { recursive: true, force: true });
   await pruneWorktrees(gitRoot);
 
@@ -112,6 +122,7 @@ export async function createWorktree(
   await deleteRemoteBranch(gitRoot, taskBranchName);
 
   // Fetch latest so we branch from up-to-date origin (skip for local-only repos)
+  checkAborted();
   const hasRemote = await repoHasRemote(gitRoot);
   if (hasRemote) {
     text?.(`[Astro] Fetching latest from origin...\n`);
@@ -174,6 +185,7 @@ export async function createWorktree(
     console.warn('[worktree] Failed to capture commitBeforeSha for audit trail');
   }
 
+  checkAborted();
   text?.(`[Astro] Creating worktree from ${startPoint}...\n`);
   await execFileAsync(
     'git',

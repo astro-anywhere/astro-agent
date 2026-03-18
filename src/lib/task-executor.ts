@@ -1079,14 +1079,28 @@ export class TaskExecutor {
     this.runningTasks.set(normalizedTask.id, runningTask);
     this.wsClient.addActiveTask(normalizedTask.id);
 
+    // Task-level heartbeat: send a lightweight text event every 30s to keep the
+    // server's activity timer alive. This prevents the server's startup timeout
+    // from resetting the node to "planned" while we're doing workspace prep,
+    // delivery, cleanup, or any other long-running phase. The server only resets
+    // hasReceivedEvent from execution events (text, tool_use, etc.) — without
+    // this heartbeat, phases that don't produce those events (git operations,
+    // worktree creation, PR delivery) leave the server blind.
+    const TASK_HEARTBEAT_INTERVAL_MS = 30_000;
+    let taskHeartbeatPhase = 'preparing';
+    const taskHeartbeatTimer = setInterval(() => {
+      stream.text?.(`[Astro] Heartbeat — ${taskHeartbeatPhase}...\n`);
+    }, TASK_HEARTBEAT_INTERVAL_MS);
+
     // Text-only tasks (plan/chat/summarize) without a working directory skip workspace prep
     const isTextOnly = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan';
     let prepared: Awaited<ReturnType<typeof this.prepareTaskWorkspace>>;
     try {
       prepared = isTextOnly && !normalizedTask.workingDirectory
         ? { workingDirectory: '', cleanup: async () => {} }
-        : await this.prepareTaskWorkspace(normalizedTask, stream);
+        : await this.prepareTaskWorkspace(normalizedTask, stream, abortController.signal);
     } catch (prepErr) {
+      clearInterval(taskHeartbeatTimer);
       this.runningTasks.delete(normalizedTask.id);
       this.untrackTaskDirectory(task);
       // Do NOT removeActiveTask here — the caller's catch will send
@@ -1096,6 +1110,7 @@ export class TaskExecutor {
     }
     const taskWithWorkspace = { ...normalizedTask, workingDirectory: prepared.workingDirectory };
     runningTask.task = taskWithWorkspace;
+    taskHeartbeatPhase = 'executing';
     console.log(`[executor] Task ${task.id}: workspace prepared, cwd=${prepared.workingDirectory}`);
 
     // Execute with idle timeout + hard cap.
@@ -1208,6 +1223,7 @@ export class TaskExecutor {
         ? `[${task.shortProjectId}/${task.shortNodeId}] ${rawTitle}`
         : rawTitle;
       if (prepared.branchName && result.status === 'completed') {
+        taskHeartbeatPhase = 'delivering';
         stream.text?.(`\n[Astro] Delivering changes (mode: ${deliveryMode})...\n`);
         this.wsClient.sendTaskStatus(task.id, 'running', 90, 'Delivering changes...');
         // Build PR body: enrich with summary data when available
@@ -1576,6 +1592,7 @@ export class TaskExecutor {
     } finally {
       clearTimeout(hardCapTimeoutId);
       if (idleTimerId !== undefined) clearTimeout(idleTimerId);
+      taskHeartbeatPhase = 'cleaning up';
 
       // Always cleanup the local worktree directory to reclaim disk space
       // (node_modules alone is ~680MB per worktree). When keepBranch is true
@@ -1611,6 +1628,9 @@ export class TaskExecutor {
         await sandbox.cleanup();
       }
 
+      // Stop heartbeat — cleanup is done, we're about to send the result.
+      clearInterval(taskHeartbeatTimer);
+
       // Send deferred result AFTER cleanup completes.
       // This ensures the server's auto-dispatch doesn't start the next task
       // while this task's worktree cleanup is still running on the same git repo.
@@ -1645,6 +1665,7 @@ export class TaskExecutor {
   private async prepareTaskWorkspace(
     task: Task & { workingDirectory: string },
     stream: { stdout: (data: string) => void; stderr: (data: string) => void; text?: (data: string) => void },
+    signal?: AbortSignal,
   ): Promise<{
     workingDirectory: string;
     branchName?: string;
@@ -1763,6 +1784,7 @@ export class TaskExecutor {
         stdout: stream.stdout,
         stderr: stream.stderr,
         text: stream.text,
+        signal,
       });
       if (!worktree) {
         throw new Error(`Worktree creation returned null for ${task.workingDirectory}. Cannot proceed without isolation.`);
