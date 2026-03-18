@@ -695,11 +695,11 @@ export class TaskExecutor {
       text: (data: string) => {
         this.wsClient.sendTaskText(taskId, data, textSequence++);
       },
-      toolUse: (toolName: string, toolInput: unknown) => {
-        this.wsClient.sendTaskToolUse(taskId, toolName, toolInput);
+      toolUse: (toolName: string, toolInput: unknown, toolUseId?: string) => {
+        this.wsClient.sendTaskToolUse(taskId, toolName, toolInput, toolUseId);
       },
-      toolResult: (toolName: string, result: unknown, success: boolean) => {
-        this.wsClient.sendTaskToolResult(taskId, toolName, result, success);
+      toolResult: (toolName: string, result: unknown, success: boolean, toolUseId?: string) => {
+        this.wsClient.sendTaskToolResult(taskId, toolName, result, success, toolUseId);
       },
       fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number, diff?: string) => {
         this.wsClient.sendTaskFileChange(taskId, path, action, linesAdded, linesRemoved, diff);
@@ -1052,13 +1052,13 @@ export class TaskExecutor {
         resetIdleTimeout();
         this.wsClient.sendTaskText(normalizedTask.id, data, textSequence++);
       },
-      toolUse: (toolName: string, toolInput: unknown) => {
+      toolUse: (toolName: string, toolInput: unknown, toolUseId?: string) => {
         resetIdleTimeout();
-        this.wsClient.sendTaskToolUse(normalizedTask.id, toolName, toolInput);
+        this.wsClient.sendTaskToolUse(normalizedTask.id, toolName, toolInput, toolUseId);
       },
-      toolResult: (toolName: string, result: unknown, success: boolean) => {
+      toolResult: (toolName: string, result: unknown, success: boolean, toolUseId?: string) => {
         resetIdleTimeout();
-        this.wsClient.sendTaskToolResult(normalizedTask.id, toolName, result, success);
+        this.wsClient.sendTaskToolResult(normalizedTask.id, toolName, result, success, toolUseId);
       },
       fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number, diff?: string) => {
         resetIdleTimeout();
@@ -1099,7 +1099,6 @@ export class TaskExecutor {
     // 30s aligns with the server's heartbeat check interval and is well under
     // the 3-minute startup timeout (STARTUP_TIMEOUT_MS in dispatch.ts).
     const TASK_HEARTBEAT_INTERVAL_MS = 30_000;
-    let taskHeartbeatPhase = 'preparing';
     let heartbeatSeq = 0;
     const taskHeartbeatTimer = setInterval(() => {
       // Send directly via wsClient to keep the server's activity timer alive
@@ -1133,7 +1132,6 @@ export class TaskExecutor {
     }
     const taskWithWorkspace = { ...normalizedTask, workingDirectory: prepared.workingDirectory };
     runningTask.task = taskWithWorkspace;
-    taskHeartbeatPhase = 'executing';
     console.log(`[executor] Task ${task.id}: workspace prepared, cwd=${prepared.workingDirectory}`);
 
     // Execute with idle timeout + hard cap.
@@ -1246,7 +1244,6 @@ export class TaskExecutor {
         ? `[${task.shortProjectId}/${task.shortNodeId}] ${rawTitle}`
         : rawTitle;
       if (prepared.branchName && result.status === 'completed') {
-        taskHeartbeatPhase = 'delivering';
         stream.text?.(`\n── [Astro] Delivering changes (mode: ${deliveryMode})...\n`);
         this.wsClient.sendTaskStatus(task.id, 'running', 90, 'Delivering changes...');
         // Build PR body: enrich with summary data when available
@@ -1615,7 +1612,6 @@ export class TaskExecutor {
     } finally {
       clearTimeout(hardCapTimeoutId);
       if (idleTimerId !== undefined) clearTimeout(idleTimerId);
-      taskHeartbeatPhase = 'cleaning up';
 
       // Always cleanup the local worktree directory to reclaim disk space
       // (node_modules alone is ~680MB per worktree). When keepBranch is true
