@@ -23,6 +23,8 @@ import {
   hasRemoteOrigin,
   getGitRoot,
   autoCommitChanges,
+  parseRepoSlug,
+  getRepoSlug,
 } from '../git-pr.js';
 
 describe('hasBranchCommits', () => {
@@ -355,5 +357,159 @@ describe('autoCommitChanges', () => {
     const result = await autoCommitChanges('/repo/worktree', 'Fix something');
 
     expect(result).toBe(false);
+  });
+});
+
+describe('parseRepoSlug', () => {
+  it('should parse SSH remote URLs', () => {
+    expect(parseRepoSlug('git@github.com:owner/repo.git')).toBe('owner/repo');
+  });
+
+  it('should parse SSH URLs without .git suffix', () => {
+    expect(parseRepoSlug('git@github.com:owner/repo')).toBe('owner/repo');
+  });
+
+  it('should parse HTTPS remote URLs', () => {
+    expect(parseRepoSlug('https://github.com/owner/repo.git')).toBe('owner/repo');
+  });
+
+  it('should parse HTTPS URLs without .git suffix', () => {
+    expect(parseRepoSlug('https://github.com/owner/repo')).toBe('owner/repo');
+  });
+
+  it('should handle enterprise GitHub URLs', () => {
+    expect(parseRepoSlug('git@github.corp.com:team/project.git')).toBe('team/project');
+    expect(parseRepoSlug('https://github.corp.com/team/project.git')).toBe('team/project');
+  });
+
+  it('should return null for malformed URLs', () => {
+    expect(parseRepoSlug('')).toBeNull();
+    expect(parseRepoSlug('not-a-url')).toBeNull();
+    expect(parseRepoSlug('git@github.com')).toBeNull();
+  });
+});
+
+describe('getRepoSlug', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should return slug from SSH remote', async () => {
+    mockExecFileAsync.mockResolvedValueOnce({ stdout: 'git@github.com:owner/repo.git\n' });
+
+    const result = await getRepoSlug('/repo');
+
+    expect(result).toBe('owner/repo');
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      'git',
+      ['-C', '/repo', 'remote', 'get-url', 'origin'],
+      expect.any(Object),
+    );
+  });
+
+  it('should return slug from HTTPS remote', async () => {
+    mockExecFileAsync.mockResolvedValueOnce({ stdout: 'https://github.com/org/project.git\n' });
+
+    const result = await getRepoSlug('/repo');
+
+    expect(result).toBe('org/project');
+  });
+
+  it('should return null when git command fails', async () => {
+    mockExecFileAsync.mockRejectedValueOnce(new Error('not a git repo'));
+
+    const result = await getRepoSlug('/not-a-repo');
+
+    expect(result).toBeNull();
+  });
+
+  it('should return null for unparseable remote URL', async () => {
+    mockExecFileAsync.mockResolvedValueOnce({ stdout: 'not-a-valid-remote\n' });
+
+    const result = await getRepoSlug('/repo');
+
+    expect(result).toBeNull();
+  });
+});
+
+describe('hasBranchCommits with explicit branchName', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should use explicit branchName instead of HEAD when provided', async () => {
+    mockExecFileAsync.mockResolvedValueOnce({ stdout: '2\n' });
+
+    const result = await hasBranchCommits('/repo', 'main', 'astro/proj-task');
+
+    expect(result).toBe(true);
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      'git',
+      ['-C', '/repo', 'rev-list', '--count', 'origin/main..astro/proj-task'],
+      expect.objectContaining({ timeout: 10_000 }),
+    );
+  });
+
+  it('should use HEAD when branchName is undefined', async () => {
+    mockExecFileAsync.mockResolvedValueOnce({ stdout: '1\n' });
+
+    const result = await hasBranchCommits('/repo', 'main', undefined);
+
+    expect(result).toBe(true);
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      'git',
+      ['-C', '/repo', 'rev-list', '--count', 'origin/main..HEAD'],
+      expect.any(Object),
+    );
+  });
+
+  it('should return false when explicit branch has no commits ahead', async () => {
+    mockExecFileAsync.mockResolvedValueOnce({ stdout: '0\n' });
+
+    const result = await hasBranchCommits('/repo', 'main', 'astro/proj-task');
+
+    expect(result).toBe(false);
+  });
+});
+
+describe('createPullRequest with repoSlug', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should pass --repo when repoSlug is provided', async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: 'https://github.com/owner/repo/pull/99\n',
+    });
+
+    await createPullRequest('/repo', {
+      branchName: 'task-branch',
+      baseBranch: 'project-branch',
+      title: 'Task PR',
+      body: 'body',
+      repoSlug: 'owner/repo',
+    });
+
+    expect(mockExecFileAsync).toHaveBeenCalledWith(
+      'gh',
+      expect.arrayContaining(['--repo', 'owner/repo']),
+      expect.any(Object),
+    );
+  });
+
+  it('should not pass --repo when repoSlug is undefined', async () => {
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: 'https://github.com/owner/repo/pull/99\n',
+    });
+
+    await createPullRequest('/repo', {
+      branchName: 'task-branch',
+      baseBranch: 'project-branch',
+      title: 'Task PR',
+      body: 'body',
+    });
+
+    const args = mockExecFileAsync.mock.calls[0][1] as string[];
+    expect(args).not.toContain('--repo');
   });
 });

@@ -155,15 +155,17 @@ async function tryPreMergeRebase(
   try {
     const rebaseTarget = isRemote ? `origin/${targetBranch}` : targetBranch;
 
+    const gitEnv = { ...process.env, GIT_TERMINAL_PROMPT: '0' };
+
     if (isRemote) {
       console.log(`[git] fetch origin ${targetBranch} (cwd: ${gitDir})`);
-      await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: gitDir, timeout: 30_000 });
+      await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: gitDir, env: gitEnv, timeout: 30_000 });
     }
 
     // Check if rebase is needed (target branch moved since we branched)
     console.log(`[git] merge-base ${headRef} ${rebaseTarget} (cwd: ${gitDir})`);
-    const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', headRef, rebaseTarget], { cwd: gitDir });
-    const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: gitDir });
+    const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', headRef, rebaseTarget], { cwd: gitDir, env: gitEnv });
+    const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: gitDir, env: gitEnv });
 
     if (mergeBase.trim() === targetTip.trim()) {
       console.log(`[git] Already up to date (merge-base = target tip: ${targetTip.trim().slice(0, 7)})`);
@@ -172,7 +174,7 @@ async function tryPreMergeRebase(
 
     // Try automatic rebase — timeout after 60s (should be fast for non-conflicting changes)
     console.log(`[git] rebase ${rebaseTarget} (cwd: ${gitDir})`);
-    await execFileAsync('git', ['rebase', rebaseTarget], { cwd: gitDir, timeout: 60_000 });
+    await execFileAsync('git', ['rebase', rebaseTarget], { cwd: gitDir, env: gitEnv, timeout: 60_000 });
     console.log(`[git] Rebase onto ${rebaseTarget} succeeded`);
     return { rebased: true };
   } catch (err) {
@@ -1555,9 +1557,11 @@ export class TaskExecutor {
                       break;
                     }
 
-                    // Retry the GitHub merge
+                    // Retry the GitHub merge.
+                    // Use gitRoot as cwd (always valid) instead of worktree path
+                    // which may have been deleted by the agent during resolution.
                     this.wsClient.sendTaskStatus(task.id, 'running', 98, `Retrying PR merge (attempt ${attempt})...`);
-                    const retryMerge = await mergePullRequest(prepared.workingDirectory, prResult.prNumber, {
+                    const retryMerge = await mergePullRequest(prepared.gitRoot ?? prepared.workingDirectory, prResult.prNumber, {
                       method: 'squash',
                       deleteBranch: true,
                       repoSlug: repoSlug ?? undefined,

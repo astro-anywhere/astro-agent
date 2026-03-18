@@ -142,9 +142,10 @@ export async function pushBranch(
  *   https://github.com/owner/repo.git → owner/repo
  */
 export function parseRepoSlug(remoteUrl: string): string | null {
-  // SSH: git@github.com:owner/repo.git
-  const sshMatch = remoteUrl.match(/[:/]([^/]+\/[^/]+?)(?:\.git)?$/);
-  if (sshMatch) return sshMatch[1];
+  // Handles both SSH (git@github.com:owner/repo.git)
+  // and HTTPS (https://github.com/owner/repo.git) formats.
+  const match = remoteUrl.match(/[:/]([^/]+\/[^/]+?)(?:\.git)?$/);
+  if (match) return match[1];
   return null;
 }
 
@@ -520,6 +521,14 @@ export async function pushAndCreatePR(
 
   // Create PR: task branch → project branch.
   // Uses --repo when available so gh doesn't depend on local git context.
+  // Guard: if repoSlug is null (non-standard remote URL) and the worktree
+  // was deleted between the initial check and now, gh will fail with a
+  // misleading "not a git repository" error. Re-check and fail clearly.
+  if (!repoSlug && !(await getGitRoot(worktreePath))) {
+    console.warn(`[git-pr] Worktree gone after push and no repo slug — cannot create PR`);
+    result.error = 'Cannot resolve GitHub repo — worktree gone and no repo slug';
+    return result;
+  }
   console.log(`[git-pr] Creating PR: ${options.branchName} → ${baseBranch}${repoSlug ? ` (repo: ${repoSlug})` : ''}`);
   const pr = await createPullRequest(gitDir, {
     branchName: options.branchName,
