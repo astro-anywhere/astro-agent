@@ -803,7 +803,8 @@ export class CodexAdapter implements ProviderAdapter {
           const item = event.item as Record<string, unknown> | undefined;
           if (item?.type === 'command_execution') {
             const command = item.command as string || '';
-            stream.toolUse(command, { command, status: 'in_progress' });
+            const itemId = item.id as string | undefined;
+            stream.toolUse(command, { command, status: 'in_progress' }, itemId);
           }
           break;
         }
@@ -840,11 +841,13 @@ export class CodexAdapter implements ProviderAdapter {
               const exitCode = item.exit_code as number | null;
               const status = item.status as string;
               const success = exitCode === 0 || status === 'completed';
+              const itemId = item.id as string | undefined;
 
               stream.toolResult(
                 command,
                 { output, exit_code: exitCode, status },
                 success,
+                itemId,
               );
 
               // Extract file artifacts from command output

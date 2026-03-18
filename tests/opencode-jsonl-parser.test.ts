@@ -154,7 +154,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         ],
       }), stream)
 
-      expect(stream.toolUse).toHaveBeenCalledWith('bash', { command: 'ls -la' })
+      expect(stream.toolUse).toHaveBeenCalledWith('bash', { command: 'ls -la' }, 'tu_001')
     })
 
     it('stores tool id-to-name mapping for later correlation', () => {
@@ -175,7 +175,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         },
       }), stream)
 
-      expect(stream.toolResult).toHaveBeenCalledWith('read_file', 'file content here', true)
+      expect(stream.toolResult).toHaveBeenCalledWith('read_file', 'file content here', true, 'tu_002')
     })
 
     it('uses "unknown" when name is missing in tool_use', () => {
@@ -186,7 +186,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         ],
       }), stream)
 
-      expect(stream.toolUse).toHaveBeenCalledWith('unknown', { data: 'test' })
+      expect(stream.toolUse).toHaveBeenCalledWith('unknown', { data: 'test' }, 'tu_003')
     })
 
     it('handles mixed text and tool_use blocks', () => {
@@ -199,7 +199,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
       }), stream)
 
       expect(stream.text).toHaveBeenCalledWith('I will run a command.\n')
-      expect(stream.toolUse).toHaveBeenCalledWith('bash', { command: 'pwd' })
+      expect(stream.toolUse).toHaveBeenCalledWith('bash', { command: 'pwd' }, 'tu_004')
     })
   })
 
@@ -226,7 +226,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         },
       }), stream)
 
-      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'hi\n', true)
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'hi\n', true, 'tu_010')
     })
 
     it('handles error tool results', () => {
@@ -246,7 +246,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         },
       }), stream)
 
-      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'command not found', false)
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'command not found', false, 'tu_011')
     })
 
     it('uses "unknown" when tool_use_id has no mapping', () => {
@@ -259,7 +259,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         },
       }), stream)
 
-      expect(stream.toolResult).toHaveBeenCalledWith('unknown', 'some result', true)
+      expect(stream.toolResult).toHaveBeenCalledWith('unknown', 'some result', true, 'tu_unknown')
     })
 
     it('handles direct tool_result event type', () => {
@@ -270,7 +270,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         is_error: false,
       }), stream)
 
-      expect(stream.toolResult).toHaveBeenCalledWith('write_file', 'File written successfully', true)
+      expect(stream.toolResult).toHaveBeenCalledWith('write_file', 'File written successfully', true, undefined)
     })
 
     it('handles direct tool_result with error', () => {
@@ -281,7 +281,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         is_error: true,
       }), stream)
 
-      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'Permission denied', false)
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'Permission denied', false, undefined)
     })
 
     it('handles tool_result with content array (using top-level content)', () => {
@@ -292,7 +292,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         ],
       }), stream)
 
-      expect(stream.toolResult).toHaveBeenCalledWith('unknown', 'result text', true)
+      expect(stream.toolResult).toHaveBeenCalledWith('unknown', 'result text', true, 'tu_020')
     })
   })
 
@@ -474,12 +474,12 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
       expect(stream.toolResult).toHaveBeenCalledTimes(2)
 
       // First tool: bash
-      expect((stream.toolUse as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(['bash', { command: 'ls -la' }])
-      expect((stream.toolResult as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(['bash', 'file1.txt\nfile2.txt', true])
+      expect((stream.toolUse as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(['bash', { command: 'ls -la' }, 'tu_100'])
+      expect((stream.toolResult as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(['bash', 'file1.txt\nfile2.txt', true, 'tu_100'])
 
       // Second tool: write_file
-      expect((stream.toolUse as ReturnType<typeof vi.fn>).mock.calls[1]).toEqual(['write_file', { path: 'mod.ts', content: 'export {}' }])
-      expect((stream.toolResult as ReturnType<typeof vi.fn>).mock.calls[1]).toEqual(['write_file', 'File written', true])
+      expect((stream.toolUse as ReturnType<typeof vi.fn>).mock.calls[1]).toEqual(['write_file', { path: 'mod.ts', content: 'export {}' }, 'tu_101'])
+      expect((stream.toolResult as ReturnType<typeof vi.fn>).mock.calls[1]).toEqual(['write_file', 'File written', true, 'tu_101'])
 
       // Verify completion status
       expect(stream.status).toHaveBeenCalledWith('running', 100, 'Completed (2 turns, $0.0250)')
@@ -519,7 +519,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         adapter.handleStreamLine(JSON.stringify(event), stream)
       }
 
-      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'Permission denied', false)
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'Permission denied', false, 'tu_200')
       expect(stream.text).toHaveBeenCalledWith('The command failed due to permissions.\n')
     })
   })
@@ -551,8 +551,8 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
       }), stream)
 
       const resultCalls = (stream.toolResult as ReturnType<typeof vi.fn>).mock.calls
-      expect(resultCalls[0]).toEqual(['read_file', 'export default {}', true])
-      expect(resultCalls[1]).toEqual(['bash', '/home/user', true])
+      expect(resultCalls[0]).toEqual(['read_file', 'export default {}', true, 'tu_300'])
+      expect(resultCalls[1]).toEqual(['bash', '/home/user', true, 'tu_301'])
     })
 
     it('handles tool_result with missing mapping (returns "unknown")', () => {
@@ -565,7 +565,7 @@ describe('OpenCode JSONL parser: handleStreamLine', () => {
         },
       }), stream)
 
-      expect(stream.toolResult).toHaveBeenCalledWith('unknown', 'result', true)
+      expect(stream.toolResult).toHaveBeenCalledWith('unknown', 'result', true, 'unmapped_id')
     })
   })
 })

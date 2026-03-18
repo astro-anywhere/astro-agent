@@ -377,8 +377,8 @@ describe('OpenClaw Gateway Adapter', () => {
 
       await adapter.execute(makeTask(), stream, controller.signal)
 
-      expect(stream.toolUse).toHaveBeenCalledWith('exec', { command: 'ls' })
-      expect(stream.toolResult).toHaveBeenCalledWith('exec', 'file1.ts', true)
+      expect(stream.toolUse).toHaveBeenCalledWith('exec', { command: 'ls' }, undefined)
+      expect(stream.toolResult).toHaveBeenCalledWith('exec', 'file1.ts', true, undefined)
     })
   })
 
