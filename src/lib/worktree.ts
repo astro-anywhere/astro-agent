@@ -132,7 +132,7 @@ export async function createWorktree(
       await execFileAsync(
         'git',
         ['-C', gitRoot, '-c', 'core.hooksPath=/dev/null', 'fetch', 'origin'],
-        { env: withGitEnv(), timeout: 30_000 }
+        { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
       );
     } catch {
       // Non-fatal: proceed with potentially stale refs
@@ -193,7 +193,7 @@ export async function createWorktree(
   await execFileAsync(
     'git',
     ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
-    { env: withGitEnv(), timeout: 30_000 }
+    { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
   );
 
   // Initialize submodules if the repo uses them (non-fatal)

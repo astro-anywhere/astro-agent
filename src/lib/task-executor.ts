@@ -220,6 +220,8 @@ export class TaskExecutor {
   private branchLockManager = new BranchLockManager();
   /** Per-directory lock for serializing tasks on non-git directories (no worktree isolation). */
   private directoryLockManager = new BranchLockManager();
+  /** Tasks claimed by submitTask() but not yet in runningTasks (closes TOCTOU dedup gap). */
+  private claimedTasks: Set<string> = new Set();
   private openclawBridge: OpenClawBridge | null = null;
 
   // Safety tracking
@@ -285,13 +287,17 @@ export class TaskExecutor {
    * Submit a task for execution (with safety checks)
    */
   async submitTask(task: Task): Promise<void> {
-    // Dedup: if this task is already running, skip the duplicate dispatch.
-    // This prevents concurrent createWorktree() calls for the same branch when the
-    // server retries a dispatch (startup timeout) before the previous attempt finishes.
-    if (this.runningTasks.has(task.id)) {
-      console.warn(`[executor] Task ${task.id}: already running, skipping duplicate dispatch`);
+    // Dedup: reject if this task is already running OR claimed by a concurrent submitTask().
+    // runningTasks is only populated inside executeTask() (line ~1079), but submitTask()
+    // does async work (safety checks, git detection) before reaching executeTask(). Without
+    // claimedTasks, two rapid dispatches for the same taskId could both pass the runningTasks
+    // check and execute concurrently (TOCTOU race).
+    if (this.runningTasks.has(task.id) || this.claimedTasks.has(task.id)) {
+      console.warn(`[executor] Task ${task.id}: already running or claimed, skipping duplicate dispatch`);
       return;
     }
+    this.claimedTasks.add(task.id);
+    try {
 
     // Skip workingDirectory resolution for lightweight text-only tasks (no file system access)
     const isTextOnlyTask = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan';
@@ -407,6 +413,10 @@ export class TaskExecutor {
       // Queue the task
       this.taskQueue.push(normalizedTask);
       this.wsClient.sendTaskStatus(normalizedTask.id, 'queued', 0, 'Waiting for available slot');
+    }
+
+    } finally {
+      this.claimedTasks.delete(task.id);
     }
   }
 
