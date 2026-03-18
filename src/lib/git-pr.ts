@@ -1,5 +1,13 @@
 /**
- * Git PR utilities for creating pull requests after task execution
+ * Git PR utilities for creating pull requests after task execution.
+ *
+ * GitHub workflow: task branch → PR → project branch (auto-merge).
+ * Task branches NEVER create PRs directly to the base branch (main).
+ * The only PR to main comes from the "Push to GitHub" task node.
+ *
+ * When the worktree is gone (agent cleaned it up during execution),
+ * git operations fall back to gitRoot (branch refs live in shared store),
+ * and gh commands use explicit --repo OWNER/REPO (no local context needed).
  */
 
 import { execFile } from 'node:child_process';
@@ -67,16 +75,22 @@ export async function getDefaultBranch(repoDir: string): Promise<string> {
 }
 
 /**
- * Check if the current branch has commits ahead of the base branch
+ * Check if a branch has commits ahead of the base branch.
+ *
+ * When called from a worktree, HEAD resolves to the task branch.
+ * When called from the git root (worktree cleaned up), pass branchName
+ * explicitly so we compare the right ref instead of HEAD.
  */
 export async function hasBranchCommits(
-  worktreePath: string,
+  repoDir: string,
   baseBranch: string,
+  branchName?: string,
 ): Promise<boolean> {
   try {
+    const headRef = branchName ?? 'HEAD';
     const { stdout } = await execFileAsync(
       'git',
-      ['-C', worktreePath, 'rev-list', '--count', `origin/${baseBranch}..HEAD`],
+      ['-C', repoDir, 'rev-list', '--count', `origin/${baseBranch}..${headRef}`],
       { env: withGitEnv(), timeout: 10_000 }
     );
     return parseInt(stdout.trim(), 10) > 0;
@@ -89,25 +103,25 @@ export async function hasBranchCommits(
  * Push the branch to origin
  */
 export async function pushBranch(
-  worktreePath: string,
+  repoDir: string,
   branchName: string,
 ): Promise<{ ok: boolean; error?: string }> {
   // Log remote URL for debugging push target
   try {
     const { stdout: remoteUrl } = await execFileAsync(
       'git',
-      ['-C', worktreePath, 'remote', 'get-url', 'origin'],
+      ['-C', repoDir, 'remote', 'get-url', 'origin'],
       { env: withGitEnv(), timeout: 5_000 }
     );
     console.log(`[git-pr] Pushing branch ${branchName} to origin (${remoteUrl.trim()})`);
   } catch {
-    console.warn(`[git-pr] Could not resolve origin URL for ${worktreePath}`);
+    console.warn(`[git-pr] Could not resolve origin URL for ${repoDir}`);
   }
 
   try {
     const { stdout, stderr } = await execFileAsync(
       'git',
-      ['-C', worktreePath, 'push', '-u', 'origin', branchName],
+      ['-C', repoDir, 'push', '-u', 'origin', branchName],
       { env: withGitEnv(), timeout: 60_000 }
     );
     if (stderr) console.log(`[git-pr] Push stderr: ${stderr.trim()}`);
@@ -122,28 +136,67 @@ export async function pushBranch(
 }
 
 /**
- * Create a pull request using the `gh` CLI
+ * Extract the GitHub repo slug (OWNER/REPO) from a git remote URL.
+ * Supports both SSH and HTTPS formats:
+ *   git@github.com:owner/repo.git → owner/repo
+ *   https://github.com/owner/repo.git → owner/repo
+ */
+export function parseRepoSlug(remoteUrl: string): string | null {
+  // SSH: git@github.com:owner/repo.git
+  const sshMatch = remoteUrl.match(/[:/]([^/]+\/[^/]+?)(?:\.git)?$/);
+  if (sshMatch) return sshMatch[1];
+  return null;
+}
+
+/**
+ * Get the GitHub repo slug (OWNER/REPO) from a git directory's origin remote.
+ */
+export async function getRepoSlug(repoDir: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      'git',
+      ['-C', repoDir, 'remote', 'get-url', 'origin'],
+      { env: withGitEnv(), timeout: 5_000 }
+    );
+    return parseRepoSlug(stdout.trim());
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Create a pull request using the `gh` CLI.
+ *
+ * Uses --repo OWNER/REPO when provided so the command doesn't depend on
+ * the local git directory being valid (worktree may have been cleaned up).
  */
 export async function createPullRequest(
-  worktreePath: string,
+  cwd: string,
   options: {
     branchName: string;
     baseBranch: string;
     title: string;
     body: string;
+    /** Explicit GitHub repo slug (OWNER/REPO) — avoids local git context resolution */
+    repoSlug?: string;
   },
 ): Promise<{ prUrl: string; prNumber: number } | null> {
   try {
+    const args = [
+      'pr', 'create',
+      '--base', options.baseBranch,
+      '--head', options.branchName,
+      '--title', options.title,
+      '--body', options.body,
+    ];
+    if (options.repoSlug) {
+      args.push('--repo', options.repoSlug);
+    }
+
     const { stdout } = await execFileAsync(
       'gh',
-      [
-        'pr', 'create',
-        '--base', options.baseBranch,
-        '--head', options.branchName,
-        '--title', options.title,
-        '--body', options.body,
-      ],
-      { cwd: worktreePath, env: withGitEnv(), timeout: 30_000 }
+      args,
+      { cwd, env: withGitEnv(), timeout: 30_000 }
     );
 
     const prUrl = stdout.trim();
@@ -162,13 +215,18 @@ export async function createPullRequest(
 /**
  * Merge a pull request using the `gh` CLI.
  * Used to auto-merge per-task PRs into the project branch.
+ *
+ * Uses --repo OWNER/REPO when provided so the command doesn't depend on
+ * the local git directory being valid.
  */
 export async function mergePullRequest(
-  worktreePath: string,
+  cwd: string,
   prNumber: number,
   options?: {
     method?: 'squash' | 'merge' | 'rebase';
     deleteBranch?: boolean;
+    /** Explicit GitHub repo slug (OWNER/REPO) */
+    repoSlug?: string;
   },
 ): Promise<{ ok: boolean; error?: string }> {
   const method = options?.method ?? 'squash';
@@ -179,10 +237,13 @@ export async function mergePullRequest(
   if (options?.deleteBranch !== false) {
     args.push('--delete-branch');
   }
+  if (options?.repoSlug) {
+    args.push('--repo', options.repoSlug);
+  }
 
   try {
     await execFileAsync('gh', args, {
-      cwd: worktreePath,
+      cwd,
       env: withGitEnv(),
       timeout: 60_000,
     });
@@ -326,7 +387,21 @@ async function readBaseBranchFromConfig(gitRoot: string): Promise<string | null>
 }
 
 /**
- * Full PR creation flow: auto-commit + push + create PR, with graceful fallbacks
+ * Full PR delivery following the accumulative project branch workflow:
+ *
+ *   task branch → push → PR → auto-merge → project branch
+ *
+ * When the worktree has been cleaned up (agent removed it during execution):
+ * - git operations (push, rev-list) use gitRoot — the task branch lives in
+ *   the shared git object store, not the worktree directory
+ * - gh operations (pr create, pr merge) use --repo OWNER/REPO — explicitly
+ *   targets the GitHub repo without depending on local filesystem state
+ * - auto-commit is skipped (nothing to stage if the worktree is gone)
+ *
+ * baseBranch MUST be provided by the caller. It is the project branch
+ * (e.g., astro/7b19a9), never auto-detected. Task branches must never
+ * create PRs directly to the base branch (main) — that's exclusively
+ * the "Push to GitHub" node's responsibility.
  */
 export async function pushAndCreatePR(
   worktreePath: string,
@@ -340,24 +415,39 @@ export async function pushAndCreatePR(
     autoCommit?: boolean;
     /** Override the default PR body */
     body?: string;
-    /** Target branch for PR base — avoids re-detecting (should match what worktree was created from) */
+    /** Target branch for PR base (project branch). Required for PR creation. */
     baseBranch?: string;
-    /** If true, auto-merge the PR after creation (squash merge into base branch) */
+    /** If true, auto-merge the PR after creation (squash merge into project branch) */
     autoMerge?: boolean;
     /** Merge method for auto-merge (default: 'squash') */
     mergeMethod?: 'squash' | 'merge' | 'rebase';
     /** Git SHA of the base branch before this task — passed through to PRResult */
     commitBeforeSha?: string;
+    /** Git root directory — used when the worktree has been cleaned up */
+    gitRoot?: string;
   },
 ): Promise<PRResult> {
   const result: PRResult = { branchName: options.branchName };
 
-  // Get git root from worktree to find default branch
-  const gitRoot = await getGitRoot(worktreePath);
+  // Resolve git context: worktree if it still exists, gitRoot otherwise.
+  // The task branch lives in the shared git object store (all worktrees
+  // share one .git), so push/rev-list work from gitRoot even when the
+  // worktree directory is gone.
+  const worktreeGitRoot = await getGitRoot(worktreePath);
+  const gitRoot = worktreeGitRoot ?? options.gitRoot ?? null;
   if (!gitRoot) {
-    console.warn(`[git-pr] No git root found for ${worktreePath}, skipping PR`);
+    console.warn(`[git-pr] No git root found for ${worktreePath} and no gitRoot provided`);
     result.error = 'Not a git repository';
     return result;
+  }
+
+  const worktreeAlive = !!worktreeGitRoot;
+  // For git commands: use worktree when available (HEAD = task branch),
+  // fall back to gitRoot (need explicit branch name for rev-list).
+  const gitDir = worktreeAlive ? worktreePath : gitRoot;
+
+  if (!worktreeAlive) {
+    console.log(`[git-pr] Worktree at ${worktreePath} is gone, using gitRoot: ${gitRoot}`);
   }
 
   // Check if repo has a remote
@@ -367,32 +457,50 @@ export async function pushAndCreatePR(
     return result;
   }
 
-  // Priority: caller-provided baseBranch > config file > auto-detection
+  // Resolve the repo slug for gh commands (OWNER/REPO from remote URL).
+  // This makes gh pr create/merge independent of the local filesystem.
+  const repoSlug = await getRepoSlug(gitRoot);
+  if (!repoSlug && !worktreeAlive) {
+    console.warn(`[git-pr] Cannot resolve repo slug from ${gitRoot} and worktree is gone`);
+    result.error = 'Cannot resolve GitHub repo — worktree gone and no repo slug';
+    return result;
+  }
+
+  // baseBranch: caller-provided (project branch) > config > auto-detect.
+  // For the accumulative workflow, the caller should always provide the
+  // project branch. Auto-detection is only a fallback for edge cases
+  // (e.g., "Push to GitHub" node targeting the default branch).
   const baseBranch = options.baseBranch ?? await readBaseBranchFromConfig(gitRoot) ?? await getDefaultBranch(gitRoot);
 
-  // Auto-commit any uncommitted changes the agent left behind (opt-in, default true)
-  if (options.autoCommit !== false) {
+  // Auto-commit uncommitted changes — only when the worktree still exists.
+  if (options.autoCommit !== false && worktreeAlive) {
     await autoCommitChanges(worktreePath, options.taskTitle);
   }
 
-  // Check if there are commits to push
-  const hasCommits = await hasBranchCommits(worktreePath, baseBranch);
+  // Check if there are commits to push.
+  // From gitRoot, HEAD is the main checkout (not the task branch), so we
+  // must compare by explicit branch name.
+  const hasCommits = await hasBranchCommits(
+    gitDir,
+    baseBranch,
+    worktreeAlive ? undefined : options.branchName,
+  );
   if (!hasCommits) {
-    console.log(`[git-pr] No commits ahead of ${baseBranch} in ${worktreePath}, skipping PR`);
-    // Not an error — agent made no changes
+    console.log(`[git-pr] No commits ahead of ${baseBranch} for ${options.branchName}`);
     return result;
   }
   console.log(`[git-pr] Branch ${options.branchName} has commits ahead of ${baseBranch}`);
 
-  // Push the branch
-  const pushResult = await pushBranch(worktreePath, options.branchName);
+  // Push the task branch to origin.
+  // Works from gitRoot because the branch ref lives in the shared store.
+  const pushResult = await pushBranch(gitDir, options.branchName);
   if (!pushResult.ok) {
     result.error = pushResult.error || 'Failed to push branch';
     return result;
   }
   result.pushed = true;
 
-  // Skip PR creation if requested (push-only mode)
+  // Skip PR creation if requested (push-only mode, e.g., "Push to GitHub" node)
   if (options.skipPR) {
     console.log(`[git-pr] skipPR=true, branch pushed (${options.branchName})`);
     return result;
@@ -410,11 +518,15 @@ export async function pushAndCreatePR(
       ? `## Task\n\n${options.taskDescription}\n\n---\n*Created by Astro task automation*`
       : '*Created by Astro task automation*');
 
-  const pr = await createPullRequest(worktreePath, {
+  // Create PR: task branch → project branch.
+  // Uses --repo when available so gh doesn't depend on local git context.
+  console.log(`[git-pr] Creating PR: ${options.branchName} → ${baseBranch}${repoSlug ? ` (repo: ${repoSlug})` : ''}`);
+  const pr = await createPullRequest(gitDir, {
     branchName: options.branchName,
     baseBranch,
     title: options.taskTitle,
     body,
+    repoSlug: repoSlug ?? undefined,
   });
 
   if (pr) {
@@ -424,9 +536,10 @@ export async function pushAndCreatePR(
 
     // Auto-merge: squash-merge the per-task PR into the project branch
     if (options.autoMerge && pr.prNumber) {
-      const mergeResult = await mergePullRequest(worktreePath, pr.prNumber, {
+      const mergeResult = await mergePullRequest(gitDir, pr.prNumber, {
         method: options.mergeMethod ?? 'squash',
         deleteBranch: true,
+        repoSlug: repoSlug ?? undefined,
       });
       if (mergeResult.ok) {
         // Capture the project branch SHA after merge

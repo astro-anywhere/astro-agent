@@ -20,7 +20,7 @@ import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree, syncProjectWorktree } from './worktree.js';
 import { ensureProjectWorkspace } from './workspace-root.js';
 import { BranchLockManager } from './branch-lock.js';
-import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha, isGhAvailable } from './git-pr.js';
+import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha, isGhAvailable, getRepoSlug } from './git-pr.js';
 import { localMergeIntoProjectBranch } from './local-merge.js';
 import {
   checkWorkdirSafety,
@@ -1246,6 +1246,10 @@ export class TaskExecutor {
       if (prepared.branchName && result.status === 'completed') {
         stream.text?.(`\n── [Astro] Delivering changes (mode: ${deliveryMode})...\n`);
         this.wsClient.sendTaskStatus(task.id, 'running', 90, 'Delivering changes...');
+        // Resolve GitHub repo slug (OWNER/REPO) for explicit gh --repo targeting.
+        // This makes gh pr create/merge independent of local filesystem state
+        // (worktree may be cleaned up by the agent during execution).
+        const repoSlug = prepared.gitRoot ? await getRepoSlug(prepared.gitRoot) : undefined;
         // Build PR body: enrich with summary data when available
         const prBodyParts: string[] = [];
         if (summary) {
@@ -1413,6 +1417,7 @@ export class TaskExecutor {
               taskDescription: task.description || task.prompt.slice(0, 500),
               skipPR: true,
               baseBranch: prepared.baseBranch,
+              gitRoot: prepared.gitRoot,
             });
             result.branchName = prResult.branchName;
             if (prResult.error) {
@@ -1458,6 +1463,7 @@ export class TaskExecutor {
               baseBranch: prepared.baseBranch,
               autoMerge: hasProjectBranch,
               commitBeforeSha: prepared.commitBeforeSha,
+              gitRoot: prepared.gitRoot,
             });
             result.branchName = prResult.branchName;
             if (prResult.prUrl) {
@@ -1508,6 +1514,7 @@ export class TaskExecutor {
                     const retryMerge = await mergePullRequest(prepared.workingDirectory, prResult.prNumber, {
                       method: 'squash',
                       deleteBranch: true,
+                      repoSlug: repoSlug ?? undefined,
                     });
 
                     if (retryMerge.ok) {
