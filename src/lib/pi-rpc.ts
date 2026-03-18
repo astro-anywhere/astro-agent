@@ -148,6 +148,10 @@ export class PiRpcBridge {
   start(signal?: AbortSignal, cwd?: string, env?: Record<string, string>): void {
     if (this.started) return;
 
+    if (signal?.aborted) {
+      throw new Error('Cannot start bridge with an already-aborted signal');
+    }
+
     try {
       this.process = spawn(this.piPath, ['--mode', 'rpc'], {
         cwd,

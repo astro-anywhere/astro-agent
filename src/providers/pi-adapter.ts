@@ -255,7 +255,7 @@ export class PiAdapter implements ProviderAdapter {
       this.lastError = errorMsg;
 
       // Clean up bridge on exception to prevent orphaned processes
-      try { if (bridge?.isRunning) bridge.stop(); } catch { /* ignore cleanup errors */ }
+      try { if (bridge?.isRunning) bridge.stop(); } catch (cleanupErr) { console.warn(`[pi] Bridge cleanup failed:`, cleanupErr); }
 
       if (signal.aborted || timeoutAc?.signal.aborted) {
         return {
@@ -301,8 +301,13 @@ export class PiAdapter implements ProviderAdapter {
     _workingDirectory: string,
     _sessionId: string,
     stream: TaskOutputStream,
-    _signal: AbortSignal,
+    signal: AbortSignal,
   ): Promise<{ success: boolean; output: string; error?: string }> {
+    // Check abort before doing any work
+    if (signal.aborted) {
+      return { success: false, output: '', error: 'Resume aborted' };
+    }
+
     const session = this.preservedSessions.get(taskId);
     if (!session || !session.bridge.isRunning || Date.now() - session.createdAt > SESSION_TTL_MS) {
       // Clean up an expired-but-still-running bridge to avoid resource leaks.
@@ -326,6 +331,10 @@ export class PiAdapter implements ProviderAdapter {
       };
       session.bridge.onEvent(eventHandler);
 
+      // Wire abort signal to stop the bridge if caller cancels
+      const abortHandler = () => session.bridge.stop();
+      signal.addEventListener('abort', abortHandler, { once: true });
+
       try {
         const response = await session.bridge.steer(message);
 
@@ -338,6 +347,7 @@ export class PiAdapter implements ProviderAdapter {
           error: response.error?.message,
         };
       } finally {
+        signal.removeEventListener('abort', abortHandler);
         session.bridge.offEvent(eventHandler);
       }
     } catch (error) {
