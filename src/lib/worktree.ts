@@ -849,8 +849,26 @@ async function ensureBranchAvailable(gitRoot: string, branchName: string): Promi
       ['-C', gitRoot, 'branch', '-D', branchName],
       { env: withGitEnv(), timeout: 10_000 }
     );
-  } catch {
-    // Branch didn't exist — that's fine
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('not found')) return; // Branch didn't exist — fine
+
+    // Branch exists but can't be deleted (e.g., checked out in a stale worktree).
+    // Prune stale worktree references and retry.
+    console.warn(`[worktree] branch -D ${branchName} failed: ${msg.split('\n')[0]}. Pruning and retrying...`);
+    try {
+      await execFileAsync('git', ['-C', gitRoot, 'worktree', 'prune'], {
+        env: withGitEnv(), timeout: 10_000,
+      });
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, 'branch', '-D', branchName],
+        { env: withGitEnv(), timeout: 10_000 }
+      );
+    } catch {
+      // Still can't delete — warn but don't crash (caller will fail with descriptive error)
+      console.warn(`[worktree] Failed to delete branch ${branchName} after prune`);
+    }
   }
 }
 
