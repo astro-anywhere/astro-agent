@@ -7,6 +7,7 @@ export { ClaudeSdkAdapter } from './claude-sdk-adapter.js';
 export { CodexAdapter } from './codex-adapter.js';
 export { OpenClawAdapter } from './openclaw-adapter.js';
 export { OpenCodeAdapter } from './opencode-adapter.js';
+export { PiAdapter } from './pi-adapter.js';
 
 import type { ProviderType, HpcCapability } from '../types.js';
 import type { ProviderAdapter } from './base-adapter.js';
@@ -14,6 +15,7 @@ import { ClaudeSdkAdapter } from './claude-sdk-adapter.js';
 import { CodexAdapter } from './codex-adapter.js';
 import { OpenClawAdapter } from './openclaw-adapter.js';
 import { OpenCodeAdapter } from './opencode-adapter.js';
+import { PiAdapter } from './pi-adapter.js';
 import type { OpenClawBridge } from '../lib/openclaw-bridge.js';
 
 /**
@@ -38,6 +40,8 @@ export function createProviderAdapter(type: ProviderType, hpcCapability?: HpcCap
     }
     case 'opencode':
       return new OpenCodeAdapter();
+    case 'pi':
+      return new PiAdapter();
     case 'slurm':
       // Slurm is no longer a standalone provider — HPC is handled via
       // prompt injection in ClaudeSdkAdapter. Return null for backward compat.
@@ -59,6 +63,7 @@ export async function getAvailableAdapters(): Promise<ProviderAdapter[]> {
     new CodexAdapter(),
     new OpenClawAdapter(),
     new OpenCodeAdapter(),
+    new PiAdapter(),
   ];
 
   const available: ProviderAdapter[] = [];

@@ -408,6 +408,85 @@ async function detectOpenCode(): Promise<ProviderInfo | null> {
 }
 
 /**
+ * Common installation paths for Pi coding agent
+ */
+function getPiPaths(): string[] {
+  const home = homedir();
+  const platform = process.platform;
+
+  const paths: string[] = [];
+
+  // npm global installs
+  paths.push(join(home, '.npm', 'bin', 'pi'));
+  paths.push(join(home, '.npm-global', 'bin', 'pi'));
+  paths.push(join(home, '.local', 'bin', 'pi'));
+  paths.push(join(home, '.yarn', 'bin', 'pi'));
+  paths.push(join(home, '.pnpm-global', 'bin', 'pi'));
+
+  if (platform === 'darwin') {
+    paths.push('/usr/local/bin/pi');
+    paths.push('/opt/homebrew/bin/pi');
+  } else if (platform === 'win32') {
+    const appData = process.env.APPDATA ?? join(home, 'AppData', 'Roaming');
+    paths.push(join(appData, 'npm', 'pi.cmd'));
+    paths.push(join(appData, 'npm', 'pi'));
+  } else {
+    paths.push('/usr/local/bin/pi');
+    paths.push('/usr/bin/pi');
+  }
+
+  return paths;
+}
+
+/**
+ * Detect Pi coding agent installation
+ */
+async function detectPi(): Promise<ProviderInfo | null> {
+  const exists = await commandExists('pi');
+  if (exists) {
+    const path = await getCommandPath('pi');
+    const version = await getCommandVersion('pi', '--version');
+
+    return {
+      type: 'pi' as ProviderType,
+      name: 'Pi',
+      version,
+      path: path ?? 'pi',
+      available: true,
+      capabilities: {
+        streaming: true,
+        tools: true,
+        multiTurn: true,
+        maxConcurrentTasks: 2,
+      },
+    };
+  }
+
+  const commonPaths = getPiPaths();
+  for (const piPath of commonPaths) {
+    const isExecutable = await fileExecutable(piPath);
+    if (isExecutable) {
+      const version = await getCommandVersion(piPath, '--version');
+      return {
+        type: 'pi' as ProviderType,
+        name: 'Pi',
+        version,
+        path: piPath,
+        available: true,
+        capabilities: {
+          streaming: true,
+          tools: true,
+          multiTurn: true,
+          maxConcurrentTasks: 2,
+        },
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Check for custom provider configuration
  */
 async function detectCustomProviders(): Promise<ProviderInfo[]> {
@@ -508,13 +587,14 @@ export async function detectProviders(): Promise<ProviderInfo[]> {
     detectCodex(),
     detectOpenClaw(),
     detectOpenCode(),
+    detectPi(),
     detectHpcCapability(),
     detectCustomProviders(),
   ]);
 
   const providers: ProviderInfo[] = [];
 
-  const [claudeSdk, claudeCli, codex, openclaw, opencode, hpcCapability, customProviders] = detectionResults;
+  const [claudeSdk, claudeCli, codex, openclaw, opencode, pi, hpcCapability, customProviders] = detectionResults;
 
   // Add Claude provider — SDK import preferred over CLI binary detection.
   // Both report as 'claude-sdk'; SDK import gives more reliable availability signal.
@@ -540,6 +620,10 @@ export async function detectProviders(): Promise<ProviderInfo[]> {
 
   if (opencode) {
     providers.push(opencode);
+  }
+
+  if (pi) {
+    providers.push(pi);
   }
 
   // Add custom providers
