@@ -1300,6 +1300,7 @@ export class TaskExecutor {
                 if (mergeResult.merged) {
                   result.deliveryStatus = 'success';
                   result.commitAfterSha = mergeResult.commitSha;
+                  stream.text?.(`[Astro] Merged into ${prepared.projectBranch} (${mergeResult.commitSha?.slice(0, 7)})\n`);
                   console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
                   // Sync project worktree to reflect the merged changes on disk
                   if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
@@ -1315,6 +1316,7 @@ export class TaskExecutor {
 
                   if (taskContext?.sessionId && this.isResumableAdapter(adapter) && attempt < MAX_MERGE_ATTEMPTS) {
                     const conflictFiles = mergeResult.conflictFiles?.join(', ') ?? 'unknown files';
+                    stream.text?.(`[Astro] Merge conflict in: ${conflictFiles} — agent resolving (attempt ${attempt})...\n`);
                     console.log(`[executor] Task ${task.id}: merge conflict (attempt ${attempt}), resuming ${adapter.name} to resolve: ${conflictFiles}`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `Merge conflict — agent resolving (attempt ${attempt})...`);
 
@@ -1381,13 +1383,16 @@ export class TaskExecutor {
               // Delivery failure — don't override execution status
               result.deliveryStatus = 'failed';
               result.deliveryError = `Push delivery failed: ${prResult.error}`;
+              stream.text?.(`[Astro] Push failed: ${prResult.error}\n`);
               console.error(`[executor] Task ${task.id}: push delivery failed: ${prResult.error}`);
             } else if (prResult.pushed) {
               result.deliveryStatus = 'success';
               keepBranch = true;
+              stream.text?.(`[Astro] Branch pushed to origin: ${prepared.branchName}\n`);
               console.log(`[executor] Task ${task.id}: branch pushed (${prepared.branchName})`);
             } else {
               result.deliveryStatus = 'skipped';
+              stream.text?.(`[Astro] No changes to push\n`);
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           } else {
@@ -1425,6 +1430,7 @@ export class TaskExecutor {
               result.commitBeforeSha = prResult.commitBeforeSha;
               result.commitAfterSha = prResult.commitAfterSha;
               keepBranch = true;
+              stream.text?.(`[Astro] Pull request created: ${prResult.prUrl}\n`);
 
               if (prResult.autoMergeFailed) {
                 // PR was created but auto-merge failed (likely conflict).
@@ -1439,6 +1445,7 @@ export class TaskExecutor {
 
                 if (prTaskContext?.sessionId && this.isResumableAdapter(adapter) && hasProjectBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
                   for (let attempt = 1; attempt <= MAX_PR_MERGE_ATTEMPTS; attempt++) {
+                    stream.text?.(`[Astro] PR auto-merge failed — agent resolving conflict (attempt ${attempt})...\n`);
                     console.log(`[executor] Task ${task.id}: PR auto-merge failed (attempt ${attempt}), resuming ${adapter.name} to resolve`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `PR merge conflict — agent resolving (attempt ${attempt})...`);
 
@@ -1505,13 +1512,16 @@ export class TaskExecutor {
               result.deliveryStatus = 'failed';
               result.deliveryError = `PR delivery failed: ${prResult.error}`;
               keepBranch = prResult.pushed ?? false; // Keep branch if it was pushed
+              stream.text?.(`[Astro] PR delivery failed: ${prResult.error}\n`);
               console.error(`[executor] Task ${task.id}: PR delivery failed: ${prResult.error}`);
             } else {
+              stream.text?.(`[Astro] No changes to deliver\n`);
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           }
         } catch (prError) {
           const prMsg = prError instanceof Error ? prError.message : String(prError);
+          stream.text?.(`[Astro] Delivery failed: ${prMsg}\n`);
           console.error(`[executor] Task ${task.id}: delivery (${deliveryMode}) failed: ${prMsg}`);
           // Delivery failure — don't override execution status
           result.deliveryStatus = 'failed';
