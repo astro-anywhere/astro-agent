@@ -510,7 +510,13 @@ export class WebSocketClient {
   }
 
   /**
-   * Send structured text (bypasses stdout throttle on relay)
+   * Send structured text (bypasses stdout throttle on relay).
+   *
+   * IMPORTANT: This method must NOT reset any agent-side timeouts (idle timeout,
+   * hard cap, etc.). The task-level heartbeat in task-executor.ts calls this
+   * directly to keep the server's activity timer alive without resetting the
+   * agent-side idle timeout. If this method ever gains timeout-reset behavior,
+   * hung agents will run until hard cap instead of idle-timing out.
    */
   sendTaskText(taskId: string, text: string, sequence: number): void {
     const msg: TaskTextMessage = {
