@@ -143,7 +143,7 @@ export class PiAdapter implements ProviderAdapter {
             const ev = event as any;
             lastToolArgs = ev.args;
             toolCount++;
-            stream.toolUse(ev.toolName, ev.args);
+            stream.toolUse(ev.toolName, ev.args, ev.toolUseId || ev.id);
             stream.status('running', Math.min(80, Math.round(20 * Math.log2(toolCount + 1))), `Tool: ${ev.toolName}`);
             break;
           }
@@ -153,7 +153,7 @@ export class PiAdapter implements ProviderAdapter {
             const resultText = typeof ev.result === 'string'
               ? ev.result
               : JSON.stringify(ev.result ?? '');
-            stream.toolResult(ev.toolName, resultText, !ev.isError);
+            stream.toolResult(ev.toolName, resultText, !ev.isError, ev.toolUseId || ev.id);
 
             if (FILE_TOOLS.has(ev.toolName)) {
               const args = lastToolArgs ?? {};

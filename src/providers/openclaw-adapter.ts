@@ -540,12 +540,14 @@ export class OpenClawAdapter implements ProviderAdapter {
           } else if (streamType === 'tool_use') {
             const toolName = (eventData?.name as string) || (eventData?.toolName as string) || 'unknown';
             const toolInput = eventData?.input || eventData?.toolInput || {};
-            stream.toolUse(toolName, toolInput);
+            const toolUseId = (eventData?.id as string) || (eventData?.toolUseId as string) || undefined;
+            stream.toolUse(toolName, toolInput, toolUseId);
           } else if (streamType === 'tool_result') {
             const toolName = (eventData?.name as string) || (eventData?.toolName as string) || 'unknown';
             const result = eventData?.result || eventData?.output || '';
             const success = eventData?.success !== false;
-            stream.toolResult(toolName, result, success);
+            const toolUseId = (eventData?.tool_use_id as string) || (eventData?.toolUseId as string) || undefined;
+            stream.toolResult(toolName, result, success, toolUseId);
           } else if (streamType === 'file_change') {
             const filePath = eventData?.path as string || eventData?.file as string;
             const rawAction = (eventData?.type as string) || (eventData?.action as string) || 'modified';
