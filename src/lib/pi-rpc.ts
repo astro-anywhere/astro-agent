@@ -143,15 +143,16 @@ export class PiRpcBridge {
    * Start the Pi RPC process.
    * @param signal Optional AbortSignal to terminate the process.
    * @param cwd Optional working directory for the process.
+   * @param env Optional extra environment variables (e.g., task.environment).
    */
-  start(signal?: AbortSignal, cwd?: string): void {
+  start(signal?: AbortSignal, cwd?: string, env?: Record<string, string>): void {
     if (this.started) return;
 
     try {
       this.process = spawn(this.piPath, ['--mode', 'rpc'], {
         cwd,
         stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env },
+        env: { ...process.env, ...env },
       });
     } catch (err) {
       throw new Error(`Failed to spawn Pi process: ${err instanceof Error ? err.message : String(err)}`);

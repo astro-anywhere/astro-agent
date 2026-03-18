@@ -37,6 +37,13 @@ interface PreservedSession {
 /** TTL for preserved sessions (10 minutes) */
 const SESSION_TTL_MS = 10 * 60 * 1000;
 
+/** File-modifying tool names — emit fileChange events for these */
+const FILE_TOOLS = new Set([
+  'Write', 'Edit', 'Create', 'MultiEdit',
+  'write', 'edit', 'create', 'multi_edit',
+  'write_file', 'edit_file', 'create_file',
+]);
+
 // ---------------------------------------------------------------------------
 // Adapter
 // ---------------------------------------------------------------------------
@@ -105,19 +112,64 @@ export class PiAdapter implements ProviderAdapter {
 
     this.activeTasks++;
     const startedAt = new Date().toISOString();
+    let bridge: PiRpcBridge | null = null;
+
+    // Timeout support: abort the bridge if task.timeout is exceeded
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    const timeoutAc = task.timeout ? new AbortController() : null;
 
     try {
       stream.status('running', 0, 'Starting Pi agent');
 
-      const bridge = new PiRpcBridge(this.piPath!);
-      bridge.start(signal, task.workingDirectory);
+      bridge = new PiRpcBridge(this.piPath!);
+
+      // Combine user abort signal with timeout signal
+      if (timeoutAc && task.timeout) {
+        timeoutTimer = setTimeout(() => timeoutAc.abort(), task.timeout);
+        // If user aborts first, also trigger timeout controller
+        signal.addEventListener('abort', () => timeoutAc.abort(), { once: true });
+      }
+      const effectiveSignal = timeoutAc?.signal ?? signal;
+
+      bridge.start(effectiveSignal, task.workingDirectory, task.environment);
+
+      // Configure model if specified
+      if (task.model) {
+        try {
+          await bridge.setModel(task.model);
+        } catch {
+          // Non-fatal — Pi may not support setModel, continue with default
+        }
+      }
 
       let lastMetrics: TaskResult['metrics'] | undefined;
       let outputText = '';
+      let toolCount = 0;
+
+      // Track tool input by tool name for fileChange emission
+      let lastToolInput: Record<string, unknown> | undefined;
 
       // Wire up event handler
       const eventHandler = (event: PiEvent) => {
-        this.mapEventToStream(event, stream);
+        this.mapEventToStream(event, stream, bridge!);
+
+        // Track tool input from tool_execution_start
+        if (event.event === 'tool_execution_start') {
+          lastToolInput = event.data.toolInput as Record<string, unknown> | undefined;
+          toolCount++;
+          const progress = Math.min(80, Math.round(20 * Math.log2(toolCount + 1)));
+          stream.status('running', progress, `Tool: ${event.data.toolName}`);
+        }
+
+        // Emit fileChange for file-modifying tools
+        if (event.event === 'tool_execution_end' && FILE_TOOLS.has(event.data.toolName)) {
+          const input = lastToolInput ?? {};
+          const path = (input.path || input.file_path || input.filePath || '') as string;
+          if (path) {
+            const action = event.data.toolName.toLowerCase().includes('create') ? 'created' : 'modified';
+            stream.fileChange(path, action);
+          }
+        }
 
         // Accumulate text output
         if (event.event === 'message_update') {
@@ -152,10 +204,13 @@ export class PiAdapter implements ProviderAdapter {
       }
 
       // Send the prompt
-      const response = await bridge.prompt(effectivePrompt);
+      let response;
+      try {
+        response = await bridge.prompt(effectivePrompt);
+      } finally {
+        bridge.offEvent(eventHandler);
+      }
       const succeeded = response.ok;
-
-      bridge.offEvent(eventHandler);
 
       // Preserve session for multi-turn resume
       if (succeeded) {
@@ -173,12 +228,12 @@ export class PiAdapter implements ProviderAdapter {
       // Save metrics before summary
       const savedMetrics = lastMetrics;
 
-      // Generate summary for execution tasks
+      // Generate summary only for execution tasks
       let summary: ExecutionSummary | undefined;
       const isExecutionTask = !task.type || task.type === 'execution';
       if (isExecutionTask && succeeded) {
         try {
-          stream.status('running', 80, 'Generating summary');
+          stream.status('running', 85, 'Generating summary');
           summary = await this.generateSummary(task.id, task.workingDirectory);
         } catch (summaryError) {
           console.warn(`[pi] Task ${task.id}: summary generation failed:`, summaryError);
@@ -199,11 +254,14 @@ export class PiAdapter implements ProviderAdapter {
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.lastError = errorMsg;
 
-      if (signal.aborted) {
+      // Clean up bridge on exception to prevent orphaned processes
+      try { if (bridge?.isRunning) bridge.stop(); } catch { /* ignore cleanup errors */ }
+
+      if (signal.aborted || timeoutAc?.signal.aborted) {
         return {
           taskId: task.id,
           status: 'cancelled',
-          error: 'Task cancelled',
+          error: timeoutAc?.signal.aborted && !signal.aborted ? 'Task timed out' : 'Task cancelled',
           startedAt,
           completedAt: new Date().toISOString(),
         };
@@ -218,6 +276,7 @@ export class PiAdapter implements ProviderAdapter {
       };
     } finally {
       this.activeTasks--;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
     }
   }
 
@@ -259,7 +318,7 @@ export class PiAdapter implements ProviderAdapter {
       let outputText = '';
 
       const eventHandler = (event: PiEvent) => {
-        this.mapEventToStream(event, stream);
+        this.mapEventToStream(event, stream, session.bridge);
         if (event.event === 'message_update') {
           const delta = event.data?.delta || event.data?.text || '';
           if (delta) outputText += delta;
@@ -267,17 +326,20 @@ export class PiAdapter implements ProviderAdapter {
       };
       session.bridge.onEvent(eventHandler);
 
-      const response = await session.bridge.steer(message);
-      session.bridge.offEvent(eventHandler);
+      try {
+        const response = await session.bridge.steer(message);
 
-      // Update session timestamp
-      session.createdAt = Date.now();
+        // Update session timestamp
+        session.createdAt = Date.now();
 
-      return {
-        success: response.ok,
-        output: outputText,
-        error: response.error?.message,
-      };
+        return {
+          success: response.ok,
+          output: outputText,
+          error: response.error?.message,
+        };
+      } finally {
+        session.bridge.offEvent(eventHandler);
+      }
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.lastError = errorMsg;
@@ -347,7 +409,7 @@ export class PiAdapter implements ProviderAdapter {
 
   // ─── Event Mapping ──────────────────────────────────────────────
 
-  private mapEventToStream(event: PiEvent, stream: TaskOutputStream): void {
+  private mapEventToStream(event: PiEvent, stream: TaskOutputStream, bridge: PiRpcBridge): void {
     switch (event.event) {
       case 'agent_start':
         stream.sessionInit(randomSessionId(), undefined);
@@ -381,13 +443,22 @@ export class PiAdapter implements ProviderAdapter {
         break;
       }
 
-      case 'extension_ui_request':
-        // Map to approval request — fire and forget since we can't await in event handler
+      case 'extension_ui_request': {
+        const { question, options, requestId } = event.data;
+        // Await user response and route it back to Pi via extensionUiResponse
         stream.approvalRequest(
-          event.data.question,
-          event.data.options || ['yes', 'no'],
-        ).catch(() => { /* ignore */ });
+          question,
+          options || ['yes', 'no'],
+        ).then(response => {
+          if (response.answered && bridge.isRunning) {
+            bridge.sendCommand('extensionUiResponse', {
+              requestId,
+              answer: response.answer || response.message,
+            }).catch(() => { /* Pi may not support this command — ignore */ });
+          }
+        }).catch(() => { /* ignore approval errors */ });
         break;
+      }
 
       case 'auto_compaction_start':
         stream.status('running', undefined, 'Compacting context');

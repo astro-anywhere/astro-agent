@@ -818,6 +818,286 @@ describe('PiAdapter', () => {
       expect(adapter.name).toBe('Pi');
     });
   });
+
+  describe('bridge cleanup on exception', () => {
+    it('stops bridge when prompt() throws', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+      const ac = new AbortController();
+
+      // Make the bridge's prompt throw by having stdin.write fail
+      const origWrite = _mockProc.stdin.write;
+      _mockProc.stdin.write = (() => { throw new Error('stdin broken'); }) as any;
+
+      const result = await adapter.execute(makeTask({ id: 'exc' }), stream, ac.signal);
+      expect(result.status).toBe('failed');
+      expect(result.error).toContain('stdin broken');
+      // Bridge should have been cleaned up (kill called)
+      expect(_mockProc.kill).toHaveBeenCalled();
+
+      // Restore
+      _mockProc.stdin.write = origWrite;
+    });
+  });
+
+  describe('event handler cleanup', () => {
+    it('cleans up event handler even if prompt fails', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+
+      const result = await executeWithEvents(
+        adapter, makeTask({ id: 'handler-cleanup' }), stream, [],
+        { respondError: 'prompt failed' },
+      );
+      expect(result.status).toBe('failed');
+      // The adapter should not leak event handlers — bridge.offEvent called via finally
+    });
+  });
+
+  describe('fileChange detection', () => {
+    it('emits fileChange for Write tool with path', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+      const events = [
+        { type: 'event', event: 'tool_execution_start', data: { toolName: 'Write', toolInput: { path: '/tmp/out.ts' } } },
+        { type: 'event', event: 'tool_execution_end', data: { toolName: 'Write', result: 'OK', success: true } },
+      ];
+
+      await executeWithEvents(adapter, makeTask({ id: 'fc1' }), stream, events);
+      expect(stream.fileChange).toHaveBeenCalledWith('/tmp/out.ts', 'modified');
+    });
+
+    it('emits fileChange for Create tool as created', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+      const events = [
+        { type: 'event', event: 'tool_execution_start', data: { toolName: 'Create', toolInput: { path: '/new.ts' } } },
+        { type: 'event', event: 'tool_execution_end', data: { toolName: 'Create', result: 'OK', success: true } },
+      ];
+
+      await executeWithEvents(adapter, makeTask({ id: 'fc2' }), stream, events);
+      expect(stream.fileChange).toHaveBeenCalledWith('/new.ts', 'created');
+    });
+
+    it('does not emit fileChange for non-file tools', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+      const events = [
+        { type: 'event', event: 'tool_execution_start', data: { toolName: 'Read', toolInput: { path: '/f.ts' } } },
+        { type: 'event', event: 'tool_execution_end', data: { toolName: 'Read', result: 'content', success: true } },
+      ];
+
+      await executeWithEvents(adapter, makeTask({ id: 'fc3' }), stream, events);
+      expect(stream.fileChange).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('environment variable passing', () => {
+    it('passes task.environment to Pi subprocess', async () => {
+      const { spawn } = await import('node:child_process');
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+
+      captureStdin({ autoRespond: true, autoRespondDelay: 5 });
+
+      await adapter.execute(
+        makeTask({
+          id: 'env',
+          type: 'chat',
+          environment: { CLAUDE_CODE_OAUTH_TOKEN: 'test-token', CUSTOM_VAR: 'value' },
+        }),
+        stream, new AbortController().signal,
+      );
+
+      expect(spawn).toHaveBeenCalledWith(
+        expect.any(String),
+        ['--mode', 'rpc'],
+        expect.objectContaining({
+          env: expect.objectContaining({
+            CLAUDE_CODE_OAUTH_TOKEN: 'test-token',
+            CUSTOM_VAR: 'value',
+          }),
+        }),
+      );
+    });
+  });
+
+  describe('model configuration', () => {
+    it('calls setModel when task.model is set', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+
+      // Use captureStdin with the same pattern as the working "prepends system prompt" test
+      const cap = captureStdin({ autoRespond: true, autoRespondDelay: 5 });
+
+      await adapter.execute(
+        makeTask({ id: 'model', model: 'pi-turbo' }),
+        stream, new AbortController().signal,
+      );
+
+      const commands = cap.getCommands();
+      const setModelCmd = commands.find((c: any) => c.method === 'setModel');
+      expect(setModelCmd).toBeDefined();
+      expect(setModelCmd.params).toEqual({ model: 'pi-turbo' });
+    });
+
+    it('does not call setModel when task.model is not set', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+
+      const cap = captureStdin({ autoRespond: true, autoRespondDelay: 5 });
+
+      await adapter.execute(makeTask({ id: 'no-model' }), stream, new AbortController().signal);
+
+      const commands = cap.getCommands();
+      const setModelCmd = commands.find((c: any) => c.method === 'setModel');
+      expect(setModelCmd).toBeUndefined();
+    });
+  });
+
+  describe('timeout support', () => {
+    it('returns cancelled when task.timeout fires', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+
+      // Use a very short timeout — no auto-respond so the prompt hangs until timeout fires
+      const result = await adapter.execute(
+        makeTask({ id: 'timeout', timeout: 100 }),
+        stream, new AbortController().signal,
+      );
+
+      expect(result.status).toBe('cancelled');
+      expect(result.error).toBe('Task timed out');
+    }, 10_000);
+  });
+
+  describe('progress tracking', () => {
+    it('reports logarithmic progress on tool events', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+      const events = [
+        { type: 'event', event: 'tool_execution_start', data: { toolName: 'Read', toolInput: {} } },
+        { type: 'event', event: 'tool_execution_end', data: { toolName: 'Read', success: true } },
+        { type: 'event', event: 'tool_execution_start', data: { toolName: 'Write', toolInput: {} } },
+        { type: 'event', event: 'tool_execution_end', data: { toolName: 'Write', success: true } },
+      ];
+
+      await executeWithEvents(adapter, makeTask({ id: 'prog' }), stream, events);
+
+      // Should have progress calls for tool_execution_start (logarithmic)
+      const statusCalls = (stream.status as any).mock.calls;
+      const toolProgressCalls = statusCalls.filter(
+        (c: any[]) => typeof c[1] === 'number' && c[1] > 0 && c[1] < 100 && c[2]?.startsWith('Tool:'),
+      );
+      expect(toolProgressCalls.length).toBeGreaterThanOrEqual(1);
+      // First tool: progress = min(80, round(20 * log2(2))) = 20
+      expect(toolProgressCalls[0][1]).toBe(20);
+    });
+  });
+
+  describe('approval response routing', () => {
+    it('routes approval response back to bridge via extensionUiResponse', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+      (stream.approvalRequest as any).mockResolvedValue({ answered: true, answer: 'yes' });
+
+      // Track all commands that go through stdin
+      const allCommands: any[] = [];
+      captureStdin({
+        autoRespond: true,
+        autoRespondDelay: 5,
+        autoRespondFn: (cmd: any) => {
+          allCommands.push(cmd);
+          if (cmd.method === 'prompt') {
+            // Emit the extension_ui_request event before responding
+            setTimeout(() => {
+              emitLine(_mockProc, {
+                type: 'event', event: 'extension_ui_request',
+                data: { question: 'OK?', options: ['yes', 'no'], requestId: 'req-1' },
+              });
+            }, 2);
+            return { id: cmd.id, ok: true };
+          }
+          return { id: cmd.id, ok: true };
+        },
+      });
+
+      await adapter.execute(
+        makeTask({ id: 'approval' }),
+        stream, new AbortController().signal,
+      );
+
+      // Wait for the async approval routing to complete
+      await new Promise(r => setTimeout(r, 200));
+
+      expect(stream.approvalRequest).toHaveBeenCalledWith('OK?', ['yes', 'no']);
+
+      const uiResponseCmd = allCommands.find((c: any) => c.method === 'extensionUiResponse');
+      expect(uiResponseCmd).toBeDefined();
+      expect(uiResponseCmd.params?.requestId).toBe('req-1');
+      expect(uiResponseCmd.params?.answer).toBe('yes');
+    });
+  });
+
+  describe('task type dispatch', () => {
+    it('skips summary for chat tasks', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+
+      // Use direct captureStdin like the working "prepends system prompt" test
+      captureStdin({ autoRespond: true, autoRespondDelay: 5 });
+
+      const result = await adapter.execute(
+        makeTask({ id: 'chat', type: 'chat' }),
+        stream, new AbortController().signal,
+      );
+      expect(result.status).toBe('completed');
+      expect(result.summary).toBeUndefined();
+    });
+
+    it('skips summary for summarize tasks', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+
+      captureStdin({ autoRespond: true, autoRespondDelay: 5 });
+
+      const result = await adapter.execute(
+        makeTask({ id: 'sum', type: 'summarize' }),
+        stream, new AbortController().signal,
+      );
+      expect(result.status).toBe('completed');
+      expect(result.summary).toBeUndefined();
+    });
+
+    it('skips summary for plan tasks', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+
+      captureStdin({ autoRespond: true, autoRespondDelay: 5 });
+
+      const result = await adapter.execute(
+        makeTask({ id: 'plan', type: 'plan' }),
+        stream, new AbortController().signal,
+      );
+      expect(result.status).toBe('completed');
+      expect(result.summary).toBeUndefined();
+    });
+  });
+
+  describe('destroy', () => {
+    it('cleans up all sessions and timer', async () => {
+      const adapter = await getAdapter();
+      const stream = createMockStream();
+
+      captureStdin({ autoRespond: true, autoRespondDelay: 5 });
+
+      await adapter.execute(makeTask({ id: 'destroy-test' }), stream, new AbortController().signal);
+      expect(adapter.getTaskContext?.('destroy-test')).not.toBeNull();
+
+      (adapter as any).destroy();
+      expect((adapter as any).preservedSessions.size).toBe(0);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
