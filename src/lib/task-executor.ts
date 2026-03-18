@@ -125,28 +125,72 @@ async function tryPreMergeRebase(
   workdir: string,
   targetBranch: string,
   isRemote: boolean,
+  options?: {
+    /** Branch name — required when workdir is gone (uses gitRoot + explicit ref instead of HEAD) */
+    branchName?: string;
+    /** Git root directory — fallback when the worktree directory no longer exists */
+    gitRoot?: string;
+    /** Optional logging callback for user-visible messages */
+    log?: (msg: string) => void;
+  },
 ): Promise<{ rebased: boolean; skipped?: boolean }> {
+  const log = options?.log ?? (() => {});
+  // Determine the working directory for git commands.
+  // When the worktree is gone, fall back to gitRoot — the task branch ref
+  // lives in the shared git object store and is accessible from any directory
+  // in the same repo.
+  let gitDir = workdir;
+  let headRef = 'HEAD';
+  try {
+    statSync(workdir);
+  } catch {
+    // Worktree directory doesn't exist
+    if (options?.gitRoot && options?.branchName) {
+      gitDir = options.gitRoot;
+      headRef = options.branchName;
+      log(`Worktree gone, using gitRoot for rebase (branch: ${headRef})`);
+      console.log(`[tryPreMergeRebase] Worktree at ${workdir} gone, using gitRoot: ${gitDir}, branch: ${headRef}`);
+    } else {
+      log('Worktree gone and no gitRoot/branchName — skipping rebase');
+      console.warn(`[tryPreMergeRebase] Worktree at ${workdir} gone, no gitRoot/branchName fallback — skipping`);
+      return { rebased: false, skipped: true };
+    }
+  }
+
   try {
     const rebaseTarget = isRemote ? `origin/${targetBranch}` : targetBranch;
 
     if (isRemote) {
-      await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: workdir, timeout: 30_000 });
+      log(`Fetching origin/${targetBranch}...`);
+      console.log(`[tryPreMergeRebase] git fetch origin ${targetBranch} (cwd: ${gitDir})`);
+      await execFileAsync('git', ['fetch', 'origin', targetBranch], { cwd: gitDir, timeout: 30_000 });
     }
 
     // Check if rebase is needed (target branch moved since we branched)
-    const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', 'HEAD', rebaseTarget], { cwd: workdir });
-    const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: workdir });
+    console.log(`[tryPreMergeRebase] git merge-base ${headRef} ${rebaseTarget} (cwd: ${gitDir})`);
+    const { stdout: mergeBase } = await execFileAsync('git', ['merge-base', headRef, rebaseTarget], { cwd: gitDir });
+    console.log(`[tryPreMergeRebase] git rev-parse ${rebaseTarget} (cwd: ${gitDir})`);
+    const { stdout: targetTip } = await execFileAsync('git', ['rev-parse', rebaseTarget], { cwd: gitDir });
 
     if (mergeBase.trim() === targetTip.trim()) {
+      log(`Already up to date with ${targetBranch}`);
+      console.log(`[tryPreMergeRebase] Already up to date (merge-base = target tip: ${targetTip.trim().slice(0, 7)})`);
       return { rebased: false, skipped: true }; // Already up to date
     }
 
     // Try automatic rebase — timeout after 60s (should be fast for non-conflicting changes)
-    await execFileAsync('git', ['rebase', rebaseTarget], { cwd: workdir, timeout: 60_000 });
+    log(`Rebasing onto ${rebaseTarget}...`);
+    console.log(`[tryPreMergeRebase] git rebase ${rebaseTarget} (cwd: ${gitDir})`);
+    await execFileAsync('git', ['rebase', rebaseTarget], { cwd: gitDir, timeout: 60_000 });
+    log(`Rebase succeeded`);
+    console.log(`[tryPreMergeRebase] Rebase succeeded`);
     return { rebased: true };
-  } catch {
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log(`Rebase failed: ${msg.slice(0, 100)}`);
+    console.warn(`[tryPreMergeRebase] Rebase failed: ${msg}`);
     // Abort on failure — existing retry loop will handle conflicts
-    await execFileAsync('git', ['rebase', '--abort'], { cwd: workdir }).catch(() => {});
+    await execFileAsync('git', ['rebase', '--abort'], { cwd: gitDir }).catch(() => {});
     return { rebased: false };
   }
 }
@@ -1281,9 +1325,11 @@ export class TaskExecutor {
         try {
           if (deliveryMode === 'direct') {
             // No git delivery — files modified in-place
+            stream.text?.(`── [Astro] Direct mode — files modified in-place, no git delivery\n`);
             console.log(`[executor] Task ${task.id}: direct mode, skipping git delivery`);
           } else if (deliveryMode === 'copy') {
             // Copy mode: worktree preserved, no git operations
+            stream.text?.(`── [Astro] Copy mode — worktree preserved at ${prepared.workingDirectory}\n`);
             console.log(`[executor] Task ${task.id}: copy mode, worktree preserved at ${prepared.workingDirectory}`);
           } else if (deliveryMode === 'branch') {
             stream.text?.(`── [Astro] Merging into project branch ${prepared.projectBranch ?? 'local'}...\n`);
@@ -1303,10 +1349,17 @@ export class TaskExecutor {
               // Pre-merge rebase: if the project branch moved forward (another task
               // merged), rebase our task branch first. Avoids conflicts when changes
               // don't overlap, and saves one retry cycle when they do.
-              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.projectBranch, false);
+              stream.text?.(`── [Astro] Rebasing ${prepared.branchName} onto ${prepared.projectBranch}...\n`);
+              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.projectBranch, false, {
+                branchName: prepared.branchName,
+                gitRoot: prepared.gitRoot,
+                log: (msg) => stream.text?.(`── [Astro] ${msg}\n`),
+              });
               if (preRebase.rebased) {
+                stream.text?.(`── [Astro] Rebase onto ${prepared.projectBranch} succeeded\n`);
                 console.log(`[executor] Task ${task.id}: pre-merge rebase onto ${prepared.projectBranch} succeeded`);
               } else if (!preRebase.skipped) {
+                stream.text?.(`── [Astro] Rebase had conflicts, falling back to merge retry loop\n`);
                 console.log(`[executor] Task ${task.id}: pre-merge rebase had conflicts, falling back to merge retry loop`);
               }
 
@@ -1331,6 +1384,7 @@ export class TaskExecutor {
                     prepared.branchName,
                     prepared.projectBranch,
                     commitMessage,
+                    (msg) => stream.text?.(`── [Astro] ${msg}\n`),
                   );
                 } finally {
                   mergeLock.release();
@@ -1444,10 +1498,17 @@ export class TaskExecutor {
             // branch so the PR will be cleanly mergeable. The branch hasn't been
             // pushed yet, so no force-push is needed.
             if (prepared.baseBranch) {
-              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.baseBranch, true);
+              stream.text?.(`── [Astro] Rebasing ${prepared.branchName} onto origin/${prepared.baseBranch}...\n`);
+              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.baseBranch, true, {
+                branchName: prepared.branchName,
+                gitRoot: prepared.gitRoot,
+                log: (msg) => stream.text?.(`── [Astro] ${msg}\n`),
+              });
               if (preRebase.rebased) {
+                stream.text?.(`── [Astro] Rebase onto origin/${prepared.baseBranch} succeeded\n`);
                 console.log(`[executor] Task ${task.id}: pre-push rebase onto origin/${prepared.baseBranch} succeeded`);
               } else if (!preRebase.skipped) {
+                stream.text?.(`── [Astro] Rebase had conflicts, proceeding without rebase\n`);
                 console.log(`[executor] Task ${task.id}: pre-push rebase had conflicts, proceeding without rebase`);
               }
             }

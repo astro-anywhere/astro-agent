@@ -39,8 +39,14 @@ export async function localMergeIntoProjectBranch(
   taskBranch: string,
   projectBranch: string,
   commitMessage: string,
+  /** Optional logging callback for user-visible messages */
+  log?: (msg: string) => void,
 ): Promise<LocalMergeResult> {
+  const emit = log ?? (() => {});
+
   // 1. Check if there are actual changes between the branches
+  console.log(`[local-merge] git diff --stat ${projectBranch}...${taskBranch} (gitRoot: ${gitRoot})`);
+  emit(`Checking diff: ${projectBranch}...${taskBranch}`);
   try {
     const { stdout: diff } = await execFileAsync(
       'git',
@@ -48,37 +54,50 @@ export async function localMergeIntoProjectBranch(
       { env: withGitEnv(), timeout: 10_000 },
     );
     if (!diff.trim()) {
+      console.log(`[local-merge] No changes between ${projectBranch} and ${taskBranch}`);
+      emit('No changes to merge');
       return { merged: false };
     }
+    console.log(`[local-merge] Changes detected:\n${diff.trim()}`);
   } catch {
+    console.warn(`[local-merge] diff failed (branch may not exist yet), proceeding with merge`);
     // If diff fails (e.g., branch doesn't exist), try the merge anyway
   }
 
   // 2. Create a temporary worktree for the merge operation
   const suffix = `${Date.now()}-${randomBytes(4).toString('hex')}`;
   const tmpMergeDir = join(gitRoot, '.astro', 'tmp-merge', `merge-${suffix}`);
+  console.log(`[local-merge] git worktree add ${tmpMergeDir} ${projectBranch}`);
+  emit(`Creating temporary merge worktree on ${projectBranch}`);
   try {
     await execFileAsync(
       'git',
       ['-C', gitRoot, 'worktree', 'add', tmpMergeDir, projectBranch],
       { env: withGitEnv(), timeout: 15_000 },
     );
+    console.log(`[local-merge] Merge worktree created at ${tmpMergeDir}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[local-merge] Failed to create merge worktree: ${msg}`);
     return { merged: false, error: `Failed to create merge worktree: ${msg}` };
   }
 
   try {
     // 3. Squash-merge the task branch
+    console.log(`[local-merge] git merge --squash ${taskBranch} (cwd: ${tmpMergeDir})`);
+    emit(`Squash-merging ${taskBranch} into ${projectBranch}`);
     try {
       await execFileAsync(
         'git',
         ['-C', tmpMergeDir, 'merge', '--squash', taskBranch],
         { env: withGitEnv(), timeout: 30_000 },
       );
+      console.log(`[local-merge] Squash-merge succeeded`);
     } catch (mergeErr) {
+      console.warn(`[local-merge] Squash-merge failed, checking for conflicts...`);
       // Check for merge conflicts
       try {
+        console.log(`[local-merge] git status --porcelain (cwd: ${tmpMergeDir})`);
         const { stdout: status } = await execFileAsync(
           'git',
           ['-C', tmpMergeDir, 'status', '--porcelain'],
@@ -90,10 +109,13 @@ export async function localMergeIntoProjectBranch(
           .map((l) => l.slice(3).trim());
 
         if (conflictFiles.length > 0) {
+          console.log(`[local-merge] Merge conflict in: ${conflictFiles.join(', ')}`);
+          emit(`Merge conflict in: ${conflictFiles.join(', ')}`);
           // Reset the failed squash merge to leave worktree clean before removal.
           // Note: `merge --abort` does NOT work after `merge --squash` because
           // squash merges don't set MERGE_HEAD. `reset --merge` is the correct way.
           try {
+            console.log(`[local-merge] git reset --merge (cwd: ${tmpMergeDir})`);
             await execFileAsync(
               'git',
               ['-C', tmpMergeDir, 'reset', '--merge'],
@@ -105,16 +127,20 @@ export async function localMergeIntoProjectBranch(
       } catch { /* fall through to generic error */ }
 
       const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
+      console.error(`[local-merge] Merge failed: ${msg}`);
       return { merged: false, error: `Merge failed: ${msg}` };
     }
 
     // 4. Commit the squash merge
+    console.log(`[local-merge] git commit -m "${commitMessage.slice(0, 60)}..." (cwd: ${tmpMergeDir})`);
+    emit(`Committing merge: ${commitMessage.slice(0, 80)}`);
     try {
       await execFileAsync(
         'git',
         ['-C', tmpMergeDir, 'commit', '-m', commitMessage],
         { env: withGitEnv(), timeout: 10_000 },
       );
+      console.log(`[local-merge] Commit succeeded`);
     } catch (commitErr: unknown) {
       // Node's execFile error has .message='Command failed: ...' but the actual
       // git output is in .stdout/.stderr on the error object.
@@ -123,34 +149,45 @@ export async function localMergeIntoProjectBranch(
         .filter(Boolean).join('\n');
       if (allOutput.includes('nothing to commit') || allOutput.includes('nothing added to commit')) {
         // Identical trees — not an error
+        console.log(`[local-merge] Nothing to commit (identical trees)`);
+        emit('No changes to commit (identical trees)');
         return { merged: false };
       }
       // Real commit failure (pre-commit hook, disk full, etc.)
       const msg = commitErr instanceof Error ? commitErr.message : String(commitErr);
+      console.error(`[local-merge] Commit failed: ${msg}`);
       return { merged: false, error: `Commit failed: ${msg}` };
     }
 
     // 5. Get the resulting commit SHA
+    console.log(`[local-merge] git rev-parse HEAD (cwd: ${tmpMergeDir})`);
     try {
       const { stdout: sha } = await execFileAsync(
         'git',
         ['-C', tmpMergeDir, 'rev-parse', 'HEAD'],
         { env: withGitEnv(), timeout: 5_000 },
       );
+      console.log(`[local-merge] Merge committed: ${sha.trim()}`);
+      emit(`Merge committed: ${sha.trim().slice(0, 7)}`);
       return { merged: true, commitSha: sha.trim() };
     } catch (shaErr) {
       const msg = shaErr instanceof Error ? shaErr.message : String(shaErr);
+      console.error(`[local-merge] Failed to capture SHA: ${msg}`);
       return { merged: false, error: `Merge committed but failed to capture SHA: ${msg}` };
     }
   } finally {
     // 6. Always clean up the temporary merge worktree
+    console.log(`[local-merge] git worktree remove --force ${tmpMergeDir}`);
+    emit('Cleaning up merge worktree');
     try {
       await execFileAsync(
         'git',
         ['-C', gitRoot, 'worktree', 'remove', '--force', tmpMergeDir],
         { env: withGitEnv(), timeout: 10_000 },
       );
+      console.log(`[local-merge] Merge worktree removed`);
     } catch {
+      console.warn(`[local-merge] git worktree remove failed, force-removing directory`);
       // Force-remove if git worktree remove fails
       try { await rm(tmpMergeDir, { recursive: true, force: true }); } catch { /* best effort */ }
       try {
@@ -158,6 +195,7 @@ export async function localMergeIntoProjectBranch(
           'git', ['-C', gitRoot, 'worktree', 'prune'],
           { env: withGitEnv(), timeout: 5_000 },
         );
+        console.log(`[local-merge] Worktree pruned after force-remove`);
       } catch { /* best effort */ }
     }
   }
