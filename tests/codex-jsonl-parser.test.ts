@@ -146,6 +146,7 @@ describe('Codex JSONL parser: handleStreamLine', () => {
       expect(stream.toolUse).toHaveBeenCalledWith(
         "/bin/zsh -lc 'pwd; ls -la'",
         { command: "/bin/zsh -lc 'pwd; ls -la'", status: 'in_progress' },
+        'item_2',
       )
     })
 
@@ -262,6 +263,7 @@ describe('Codex JSONL parser: handleStreamLine', () => {
           status: 'completed',
         },
         true,
+        'item_2',
       )
     })
 
@@ -282,6 +284,7 @@ describe('Codex JSONL parser: handleStreamLine', () => {
         "/bin/zsh -lc 'git clone https://github.com/leanprover/lean4 lean/code/lean4'",
         expect.objectContaining({ exit_code: 128, status: 'failed' }),
         false,
+        'item_8',
       )
     })
 
@@ -558,13 +561,14 @@ describe('Codex JSONL parser: handleStreamLine', () => {
       expect((stream.text as ReturnType<typeof vi.fn>).mock.calls[3][0]).toBe('The directory contains 2 files.\n')
 
       expect(stream.toolUse).toHaveBeenCalledTimes(1)
-      expect(stream.toolUse).toHaveBeenCalledWith('ls -la', { command: 'ls -la', status: 'in_progress' })
+      expect(stream.toolUse).toHaveBeenCalledWith('ls -la', { command: 'ls -la', status: 'in_progress' }, 'item_2')
 
       expect(stream.toolResult).toHaveBeenCalledTimes(1)
       expect(stream.toolResult).toHaveBeenCalledWith(
         'ls -la',
         { output: 'file1.txt\nfile2.txt\n', exit_code: 0, status: 'completed' },
         true,
+        'item_2',
       )
     })
 
@@ -588,8 +592,10 @@ describe('Codex JSONL parser: handleStreamLine', () => {
       const results = (stream.toolResult as ReturnType<typeof vi.fn>).mock.calls
       expect(results[0][0]).toBe('cmd-a')
       expect(results[0][2]).toBe(true)
+      expect(results[0][3]).toBe('item_5')
       expect(results[1][0]).toBe('cmd-b')
       expect(results[1][2]).toBe(false)
+      expect(results[1][3]).toBe('item_6')
     })
   })
 
