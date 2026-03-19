@@ -47,6 +47,28 @@ const FILE_TOOLS = new Set([
   'write_file', 'edit_file', 'create_file',
 ]);
 
+/**
+ * Extract plain text from a Pi SDK tool result.
+ *
+ * Pi tools return `{ content: [{ type: "text", text: "..." }, ...], details: ... }`.
+ * If the value is already a string, return it as-is. If it matches the Pi content
+ * structure, concatenate all text blocks. Otherwise fall back to JSON.stringify.
+ */
+function extractToolResultText(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object' && 'content' in (value as Record<string, unknown>)) {
+    const content = (value as Record<string, unknown>).content;
+    if (Array.isArray(content)) {
+      return content
+        .filter((c: unknown) => typeof c === 'object' && c != null && (c as Record<string, unknown>).type === 'text')
+        .map((c: unknown) => (c as Record<string, string>).text ?? '')
+        .join('');
+    }
+  }
+  return JSON.stringify(value);
+}
+
 // ---------------------------------------------------------------------------
 // Custom Tool: ask_user_question
 // ---------------------------------------------------------------------------
@@ -378,7 +400,7 @@ export class PiAdapter implements ProviderAdapter {
           const ev = event as any;
           const partial = ev.partialResult;
           if (partial != null) {
-            const text = typeof partial === 'string' ? partial : JSON.stringify(partial);
+            const text = extractToolResultText(partial);
             if (text) stream.text(text);
           }
           break;
@@ -386,9 +408,7 @@ export class PiAdapter implements ProviderAdapter {
 
         case 'tool_execution_end': {
           const ev = event as any;
-          const resultText = typeof ev.result === 'string'
-            ? ev.result
-            : (ev.result != null ? JSON.stringify(ev.result) : '');
+          const resultText = extractToolResultText(ev.result);
           stream.toolResult(ev.toolName, resultText, !ev.isError, ev.toolCallId);
 
           if (FILE_TOOLS.has(ev.toolName)) {

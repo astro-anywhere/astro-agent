@@ -602,6 +602,64 @@ describe('PiAdapter', () => {
 
       expect(stream.toolResult).toHaveBeenCalledWith('bash', '{"lines":["a","b"]}', true, undefined);
     });
+
+    it('extracts text from Pi content-structured tool results', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'tool_execution_start', toolName: 'bash', args: { command: 'ls' }, toolCallId: 'tc-pi' });
+        session.emit({
+          type: 'tool_execution_end', toolName: 'bash', toolCallId: 'tc-pi', isError: false,
+          result: { content: [{ type: 'text', text: 'file1.ts\nfile2.ts\n' }], details: {} },
+        });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'file1.ts\nfile2.ts\n', true, 'tc-pi');
+    });
+
+    it('extracts text from Pi content-structured partial results', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({
+          type: 'tool_execution_update', toolName: 'bash', toolCallId: 'tc-pi',
+          partialResult: { content: [{ type: 'text', text: 'streaming output\n' }], details: {} },
+        });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.text).toHaveBeenCalledWith('streaming output\n');
+    });
+
+    it('concatenates multiple text blocks in Pi content result', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({
+          type: 'tool_execution_end', toolName: 'bash', isError: false,
+          result: {
+            content: [
+              { type: 'text', text: 'part1' },
+              { type: 'text', text: 'part2' },
+            ],
+            details: {},
+          },
+        });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'part1part2', true, undefined);
+    });
   });
 
   describe('ask_user_question custom tool', () => {
