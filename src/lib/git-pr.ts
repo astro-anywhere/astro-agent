@@ -568,25 +568,25 @@ export async function pushAndCreatePR(
       ? `## Task\n\n${options.taskDescription}\n\n---\n*Created by Astro task automation*`
       : '*Created by Astro task automation*');
 
-  // Ensure the base branch (project branch) exists on the remote.
-  // ensureProjectBranch() treats push failures as non-fatal, so the branch
-  // may exist locally but not on origin. If gh pr create sees a missing base,
-  // it fails with a cryptic error. Push the base branch here (idempotent).
+  // Safety net: verify the base branch (project branch) exists on the remote
+  // before attempting PR creation. ensureProjectBranch() should have pushed it,
+  // but if something went wrong, catch it here with a clear error instead of
+  // letting gh pr create fail cryptically.
   if (baseBranch !== 'main' && baseBranch !== 'master') {
     try {
       const remoteSha = await getRemoteBranchSha(gitRoot, baseBranch);
       if (!remoteSha) {
-        console.log(`[git-pr] Base branch ${baseBranch} not on remote — pushing...`);
+        console.warn(`[git-pr] Base branch ${baseBranch} not found on remote — attempting push`);
         await execFileAsync(
           'git',
           ['-C', gitRoot, 'push', '-u', 'origin', baseBranch],
           { env: withGitEnv(), timeout: 30_000 }
         );
-        console.log(`[git-pr] Pushed base branch ${baseBranch} to origin`);
+        console.log(`[git-pr] Pushed base branch ${baseBranch} to origin (safety net)`);
       }
     } catch (basePushErr) {
       const bpMsg = basePushErr instanceof Error ? basePushErr.message : String(basePushErr);
-      console.warn(`[git-pr] Failed to ensure base branch ${baseBranch} on remote: ${bpMsg}`);
+      console.error(`[git-pr] Failed to ensure base branch ${baseBranch} on remote: ${bpMsg}`);
       result.error = `Base branch ${baseBranch} not available on remote: ${bpMsg}`;
       return result;
     }

@@ -127,15 +127,18 @@ export async function createWorktree(
   checkAborted();
   const hasRemote = await repoHasRemote(gitRoot);
   if (hasRemote) {
-    text?.(`── [Astro] Fetching latest from origin...\n`);
+    text?.(`── [Git] Fetching latest from origin...\n`);
     try {
       await execFileAsync(
         'git',
         ['-C', gitRoot, '-c', 'core.hooksPath=/dev/null', 'fetch', 'origin'],
         { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
       );
-    } catch {
-      // Non-fatal: proceed with potentially stale refs
+      text?.(`── [Git] Fetch complete\n`);
+    } catch (fetchErr) {
+      const fetchMsg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      text?.(`── [Git] Fetch failed (proceeding with local refs): ${fetchMsg}\n`);
+      console.warn(`[worktree] git fetch origin failed: ${fetchMsg}`);
     }
   }
 
@@ -154,7 +157,7 @@ export async function createWorktree(
   // create it from origin/{defaultBranch}. Idempotent.
   checkAborted();
   if (projectBranchName) {
-    await ensureProjectBranch(gitRoot, projectBranchName, defaultBranch);
+    await ensureProjectBranch(gitRoot, projectBranchName, defaultBranch, text);
   }
 
   // Create persistent project worktree (detached HEAD) — idempotent.
@@ -174,6 +177,12 @@ export async function createWorktree(
   const remoteRef = `origin/${effectiveBase}`;
   const hasRemoteRef = await refExists(gitRoot, remoteRef);
   const startPoint = hasRemoteRef ? remoteRef : effectiveBase;
+  if (hasRemoteRef) {
+    text?.(`── [Git] Branching from ${remoteRef}\n`);
+  } else {
+    text?.(`── [Git] Remote ref ${remoteRef} not found, using local ref ${effectiveBase}\n`);
+    console.warn(`[worktree] Remote ref ${remoteRef} not found — falling back to local ${effectiveBase}`);
+  }
 
   // Capture the commit SHA before this task's work begins
   let commitBeforeSha: string | undefined;
@@ -380,6 +389,7 @@ async function ensureProjectBranch(
   gitRoot: string,
   projectBranch: string,
   defaultBranch: string,
+  text?: (data: string) => void,
 ): Promise<void> {
   const hasRemote = await repoHasRemote(gitRoot);
 
@@ -387,63 +397,115 @@ async function ensureProjectBranch(
     // --- Remote mode: check origin, push if needed ---
     const remoteRef = `origin/${projectBranch}`;
     if (await refExists(gitRoot, remoteRef)) {
+      text?.(`── [Git] Project branch ${projectBranch} exists on origin\n`);
       console.log(`[worktree] Project branch ${projectBranch} exists on origin`);
       return;
     }
 
-    if (await refExists(gitRoot, `refs/heads/${projectBranch}`)) {
-      console.log(`[worktree] Project branch ${projectBranch} exists locally, pushing...`);
+    // Branch not on origin — either create it or push an existing local branch.
+    const localExists = await refExists(gitRoot, `refs/heads/${projectBranch}`);
+
+    if (!localExists) {
+      // First-ever task for this project — create the branch locally.
+      const defaultRemoteRef = `origin/${defaultBranch}`;
+      const hasDefaultRemote = await refExists(gitRoot, defaultRemoteRef);
+      const startPoint = hasDefaultRemote ? defaultRemoteRef : defaultBranch;
+
+      text?.(`── [Git] Creating project branch ${projectBranch} from ${startPoint}...\n`);
+      console.log(`[worktree] Creating project branch ${projectBranch} from ${startPoint}`);
       try {
+        await execFileAsync(
+          'git',
+          ['-C', gitRoot, 'branch', projectBranch, startPoint],
+          { env: withGitEnv(), timeout: 10_000 }
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Handle race condition: parallel task already created the branch locally.
+        if (msg.includes('already exists')) {
+          text?.(`── [Git] Project branch ${projectBranch} already created (race OK)\n`);
+          console.log(`[worktree] Project branch ${projectBranch} created by another task (race OK)`);
+        } else {
+          throw new Error(`Failed to create project branch ${projectBranch}: ${msg}`);
+        }
+      }
+    } else {
+      text?.(`── [Git] Project branch ${projectBranch} exists locally but not on origin\n`);
+      console.log(`[worktree] Project branch ${projectBranch} exists locally, not on origin — pushing`);
+    }
+
+    // Push the project branch to origin — required for PR mode to work.
+    // Retry once on transient failures.
+    const MAX_PUSH_ATTEMPTS = 2;
+    let pushError: string | undefined;
+
+    for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
+      try {
+        text?.(`── [Git] Pushing project branch ${projectBranch} to origin (attempt ${attempt}/${MAX_PUSH_ATTEMPTS})...\n`);
         await execFileAsync(
           'git',
           ['-C', gitRoot, 'push', '-u', 'origin', projectBranch],
           { env: withGitEnv(), timeout: 30_000 }
         );
-      } catch {
-        // Non-fatal: the branch exists locally even if push fails
+        pushError = undefined;
+        text?.(`── [Git] Project branch ${projectBranch} pushed to origin\n`);
+        console.log(`[worktree] Pushed project branch ${projectBranch} to origin (attempt ${attempt})`);
+        break;
+      } catch (err) {
+        pushError = err instanceof Error ? err.message : String(err);
+        // "everything up-to-date" is not an error — branch already exists on origin
+        if (pushError.includes('Everything up-to-date') || pushError.includes('up to date')) {
+          text?.(`── [Git] Project branch ${projectBranch} already up-to-date on origin\n`);
+          console.log(`[worktree] Project branch ${projectBranch} already up-to-date on origin`);
+          pushError = undefined;
+          break;
+        }
+        console.error(`[worktree] Push project branch attempt ${attempt} failed: ${pushError}`);
+        if (attempt < MAX_PUSH_ATTEMPTS) {
+          text?.(`── [Git] Push failed (attempt ${attempt}): ${pushError}\n── [Git] Retrying...\n`);
+        }
       }
-      return;
     }
 
-    const defaultRemoteRef = `origin/${defaultBranch}`;
-    const hasDefaultRemote = await refExists(gitRoot, defaultRemoteRef);
-    const startPoint = hasDefaultRemote ? defaultRemoteRef : defaultBranch;
-
-    console.log(`[worktree] Creating project branch ${projectBranch} from ${startPoint}`);
-    try {
-      await execFileAsync(
-        'git',
-        ['-C', gitRoot, 'branch', projectBranch, startPoint],
-        { env: withGitEnv(), timeout: 10_000 }
+    if (pushError) {
+      text?.(`── [Git] ERROR: Failed to push project branch ${projectBranch} to origin: ${pushError}\n`);
+      text?.(`── [Git] PR delivery will fail — the base branch must exist on GitHub for PRs.\n`);
+      throw new Error(
+        `Failed to push project branch ${projectBranch} to origin after ${MAX_PUSH_ATTEMPTS} attempts: ${pushError}. `
+        + `PR delivery requires the project branch to exist on the remote. `
+        + `Check: git remote permissions, SSH keys, network connectivity.`
       );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Handle race condition: parallel task already created the branch locally.
-      if (msg.includes('already exists')) {
-        console.log(`[worktree] Project branch ${projectBranch} created by another task (race OK)`);
+    }
+
+    // Verify the branch is actually on origin after push.
+    // git push can succeed but the branch may not appear if there's a ref mismatch.
+    try {
+      const { stdout: lsRemoteOut } = await execFileAsync(
+        'git',
+        ['-C', gitRoot, 'ls-remote', '--heads', 'origin', projectBranch],
+        { env: withGitEnv(), timeout: 15_000 }
+      );
+      if (lsRemoteOut.trim()) {
+        text?.(`── [Git] Verified: ${projectBranch} exists on origin\n`);
+        console.log(`[worktree] Verified project branch ${projectBranch} on origin via ls-remote`);
       } else {
-        throw new Error(`Failed to create project branch ${projectBranch}: ${msg}`);
+        text?.(`── [Git] WARNING: push succeeded but ls-remote does not show ${projectBranch} on origin\n`);
+        console.warn(`[worktree] Push succeeded but ls-remote shows no ${projectBranch} on origin — PR delivery may fail`);
       }
-    }
-    // Push to origin (idempotent — if another task already pushed, this is a no-op).
-    try {
-      await execFileAsync(
-        'git',
-        ['-C', gitRoot, 'push', '-u', 'origin', projectBranch],
-        { env: withGitEnv(), timeout: 30_000 }
-      );
-      console.log(`[worktree] Pushed project branch ${projectBranch} to origin`);
-    } catch {
-      // Non-fatal: push may fail if another task already pushed (race).
-      // The branch exists locally either way, so worktree creation proceeds.
+    } catch (lsErr) {
+      const lsMsg = lsErr instanceof Error ? lsErr.message : String(lsErr);
+      text?.(`── [Git] WARNING: Could not verify branch on origin: ${lsMsg}\n`);
+      console.warn(`[worktree] ls-remote verification failed: ${lsMsg}`);
     }
   } else {
     // --- Local mode (no remote): create branch locally only ---
     if (await refExists(gitRoot, `refs/heads/${projectBranch}`)) {
+      text?.(`── [Git] Project branch ${projectBranch} exists locally (no remote)\n`);
       console.log(`[worktree] Project branch ${projectBranch} exists locally (no remote)`);
       return;
     }
 
+    text?.(`── [Git] Creating local project branch ${projectBranch} from ${defaultBranch}...\n`);
     console.log(`[worktree] Creating local project branch ${projectBranch} from ${defaultBranch}`);
     try {
       await execFileAsync(
@@ -451,12 +513,12 @@ async function ensureProjectBranch(
         ['-C', gitRoot, 'branch', projectBranch, defaultBranch],
         { env: withGitEnv(), timeout: 10_000 }
       );
+      text?.(`── [Git] Created local project branch ${projectBranch}\n`);
       console.log(`[worktree] Created local project branch ${projectBranch}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      // Handle race condition: if parallel tasks both try to create the branch,
-      // the second one fails with "already exists" — that's fine, not an error.
       if (msg.includes('already exists')) {
+        text?.(`── [Git] Project branch ${projectBranch} already created (race OK)\n`);
         console.log(`[worktree] Project branch ${projectBranch} created by another task (race OK)`);
         return;
       }
