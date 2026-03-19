@@ -821,8 +821,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
       ...(task.maxTurns != null ? { maxTurns: task.maxTurns } : {}),
-      // All task types use bypassPermissions. Plan tasks are restricted via allowedTools instead
-      // (plan permissionMode disables ALL tool execution, which is too restrictive).
+      // All task types use bypassPermissions. The prompt controls behavior
+      // (plan vs execute), not tool-level permission enforcement.
       permissionMode: 'bypassPermissions',
       // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
       ...getSandboxOption(task.model),
@@ -842,10 +842,12 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         ...process.env,
         ...task.environment,
         CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1', // Enable additional directories for CLAUDE.md loading
-        // Inject Astro auth so astro-cli works inside the session without
-        // a separate login step (works on local and remote machines).
+        // Inject Astro auth + execution context so astro-cli works inside
+        // the session without a separate login step. ASTRO_EXECUTION_ID
+        // enables the CLI to link plan mutations back to the streaming pipeline.
         ...(config.getAccessToken() ? { ASTRO_AUTH_TOKEN: config.getAccessToken()! } : {}),
         ASTRO_SERVER_URL: config.getConfig().apiUrl,
+        ASTRO_EXECUTION_ID: task.id,
       },
       // Intercept built-in AskUserQuestion to handle approvals (following Cyrus pattern)
       canUseTool: async (toolName: string, input: Record<string, unknown>, options: { toolUseID: string; signal: AbortSignal }) => {
@@ -1008,19 +1010,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       }
     }
 
-    // Plan tasks: read-only built-in tools + Bash (for astro-cli plan mutations) +
-    // AskUserQuestion (for clarifications, like Claude Code's plan mode).
-    // No file writes or edits — plan chat should explore the codebase and mutate
-    // plans via `astro-cli` commands only, not edit files directly.
-    // MCP tools are excluded — plan mode uses CLI via Bash, not MCP.
-    if (task.type === 'plan') {
-      const planTools = [
-        ...(hasWorkdir ? ['Read', 'Glob', 'Grep', 'Bash'] : ['Bash']),
-        'WebSearch', 'WebFetch', 'AskUserQuestion',
-      ];
-      (options as Record<string, unknown>).allowedTools = planTools;
-      console.log(`[claude-sdk] Plan task — allowed tools: [${planTools.join(', ')}]`);
-    } else if (!hasWorkdir) {
+    // All task types (including plan) get the same tool set. The prompt
+    // controls whether the agent plans or executes — tool restrictions are
+    // not needed since Bash can do anything anyway. MCP tools are available
+    // to all pathways so plan agents can use astro-cli MCP tools directly.
+    if (!hasWorkdir) {
       // For tasks without a working directory, disable file system and shell tools
       // but keep web search so the agent can research. MCP tools are also allowed.
       const noWorkdirTools = ['WebSearch', 'WebFetch', ...mcpAllowedTools];
