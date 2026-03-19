@@ -3,7 +3,7 @@
  */
 
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { Task, TaskResult, TaskStatus, ExecutionSummary } from '../types.js';
 
 /**
@@ -19,6 +19,8 @@ export interface TaskOutputStream {
   toolTrace: (toolName: string, toolInput?: unknown, toolResult?: unknown, success?: boolean) => void;
   /** Structured text output (bypasses stdout throttle) */
   text: (data: string) => void;
+  /** Structured operational status line (Astro/Git/Delivery) */
+  operational: (message: string, source: 'astro' | 'git' | 'delivery') => void;
   /** Structured tool use event */
   toolUse: (toolName: string, toolInput: unknown, toolUseId?: string) => void;
   /** Structured tool result event */
@@ -135,6 +137,7 @@ export function createNoopStream(): TaskOutputStream {
     status: () => {},
     toolTrace: () => {},
     text: () => {},
+    operational: () => {},
     toolUse: () => {},
     toolResult: () => {},
     fileChange: () => {},
@@ -192,4 +195,30 @@ export function getApprovalServerPath(): string {
   const thisFile = fileURLToPath(import.meta.url);
   // From dist/providers/base-adapter.js → dist/mcp/approval-server.js
   return join(dirname(thisFile), '..', 'mcp', 'approval-server.js');
+}
+
+/**
+ * Returns the system PATH augmented with this package's own node_modules/.bin.
+ *
+ * When `@astroanywhere/agent` is installed globally (or via the SSH installer
+ * into `$HOME/.local`), `@astroanywhere/cli` is installed as a dependency and
+ * its `astro-cli` binary lands in the same package's `node_modules/.bin/`.
+ *
+ * Prepending that directory guarantees:
+ * - The version of `astro-cli` that ships with this agent-runner is used,
+ *   not an outdated globally-installed one (e.g. v0.2.x vs the required v0.3+).
+ * - `astro-cli` is accessible even if the user's global npm bin dir is not on
+ *   PATH (e.g. when astro-agent is started as a daemon or via cron).
+ *
+ * Falls back gracefully if the directory cannot be resolved.
+ */
+export function getAugmentedPath(): string {
+  try {
+    // This file compiles to dist/providers/base-adapter.js.
+    // ../../node_modules/.bin resolves to the package root's node_modules/.bin.
+    const pkgBinDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'node_modules', '.bin');
+    return [pkgBinDir, process.env.PATH ?? ''].filter(Boolean).join(':');
+  } catch {
+    return process.env.PATH ?? '';
+  }
 }

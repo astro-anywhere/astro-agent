@@ -30,6 +30,8 @@ export interface WorktreeOptions {
   stderr?: (data: string) => void;
   /** Emit visible activity text to the Astro UI (shows in the task activity stream) */
   text?: (data: string) => void;
+  /** Emit structured operational activity lines */
+  operational?: (message: string, source: 'astro' | 'git' | 'delivery') => void;
   /** Abort signal — checked between git operations so cancellation stops workspace prep */
   signal?: AbortSignal;
 }
@@ -63,11 +65,11 @@ export async function createWorktree(
     shortNodeId,
     agentDir,
     baseBranch: dispatchBaseBranch,
-    text,
     projectBranch: dispatchProjectBranch,
     stdout,
     stderr,
     signal,
+    operational,
   } = options;
 
   // Validate taskId format to prevent command injection
@@ -108,7 +110,7 @@ export async function createWorktree(
     if (signal?.aborted) throw new Error(`Task ${taskId} cancelled during workspace preparation`);
   };
 
-  text?.(`\n── [Astro] Preparing worktree: branch ${taskBranchName}\n`);
+  operational?.(`Preparing worktree: branch ${taskBranchName}`, 'astro');
   checkAborted();
   await rm(worktreePath, { recursive: true, force: true });
   await pruneWorktrees(gitRoot);
@@ -128,7 +130,7 @@ export async function createWorktree(
   checkAborted();
   const hasRemote = await repoHasRemote(gitRoot);
   if (hasRemote) {
-    text?.(`── [Git] Fetching latest from origin...\n`);
+    operational?.('Fetching latest from origin...', 'astro');
     try {
       await execFileAsync(
         'git',
@@ -199,7 +201,7 @@ export async function createWorktree(
   }
 
   checkAborted();
-  text?.(`── [Astro] Creating worktree from ${startPoint}...\n`);
+  operational?.(`Creating worktree from ${startPoint}...`, 'astro');
   try {
     await execFileAsync(
       'git',
@@ -303,7 +305,7 @@ export async function createWorktree(
     }
   }
 
-  text?.(`── [Astro] Worktree ready: ${worktreeWorkingDirectory}\n`);
+  operational?.(`Worktree ready: ${worktreeWorkingDirectory}`, 'astro');
 
   return {
     workingDirectory: worktreeWorkingDirectory,
