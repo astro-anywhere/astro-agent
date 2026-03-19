@@ -249,14 +249,51 @@ describe('PiAdapter', () => {
       expect(stream.toolResult).toHaveBeenCalledWith('bash', 'error msg', false, undefined);
     });
 
+    it('emits empty string for null/undefined tool result', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'tool_execution_end', toolName: 'bash', result: null, isError: false });
+        session.emit({ type: 'tool_execution_end', toolName: 'bash', result: undefined, isError: false });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', '', true, undefined);
+      expect(stream.toolResult).toHaveBeenCalledTimes(2);
+    });
+
+    it('resolves correct file args for parallel tool executions', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        // Two file tools start before either ends (parallel execution)
+        session.emit({ type: 'tool_execution_start', toolName: 'Write', args: { path: '/tmp/a.ts' }, toolCallId: 'tc-a' });
+        session.emit({ type: 'tool_execution_start', toolName: 'Write', args: { path: '/tmp/b.ts' }, toolCallId: 'tc-b' });
+        // End in reverse order
+        session.emit({ type: 'tool_execution_end', toolName: 'Write', result: 'ok', isError: false, toolCallId: 'tc-b' });
+        session.emit({ type: 'tool_execution_end', toolName: 'Write', result: 'ok', isError: false, toolCallId: 'tc-a' });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      // Each fileChange should reference its own tool's path, not the last started tool's path
+      expect(stream.fileChange).toHaveBeenCalledWith('/tmp/b.ts', 'modified');
+      expect(stream.fileChange).toHaveBeenCalledWith('/tmp/a.ts', 'modified');
+    });
+
     it('emits fileChange for file-modifying tools', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
-        session.emit({ type: 'tool_execution_start', toolName: 'Write', args: { path: '/tmp/foo.ts' } });
-        session.emit({ type: 'tool_execution_end', toolName: 'Write', result: 'ok', isError: false });
+        session.emit({ type: 'tool_execution_start', toolName: 'Write', args: { path: '/tmp/foo.ts' }, toolCallId: 'tc-1' });
+        session.emit({ type: 'tool_execution_end', toolName: 'Write', result: 'ok', isError: false, toolCallId: 'tc-1' });
       });
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
@@ -270,8 +307,8 @@ describe('PiAdapter', () => {
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
-        session.emit({ type: 'tool_execution_start', toolName: 'Create', args: { path: '/tmp/new.ts' } });
-        session.emit({ type: 'tool_execution_end', toolName: 'Create', result: 'ok', isError: false });
+        session.emit({ type: 'tool_execution_start', toolName: 'Create', args: { path: '/tmp/new.ts' }, toolCallId: 'tc-2' });
+        session.emit({ type: 'tool_execution_end', toolName: 'Create', result: 'ok', isError: false, toolCallId: 'tc-2' });
       });
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);

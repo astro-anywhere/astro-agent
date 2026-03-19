@@ -118,7 +118,7 @@ export class PiAdapter implements ProviderAdapter {
 
       let outputText = '';
       let toolCount = 0;
-      let lastToolArgs: Record<string, unknown> | undefined;
+      const toolArgsMap = new Map<string, Record<string, unknown>>();
       let agentFailed = false;
 
       const modelStr = session.model
@@ -167,7 +167,7 @@ export class PiAdapter implements ProviderAdapter {
 
           case 'tool_execution_start': {
             const ev = event as any;
-            lastToolArgs = ev.args;
+            if (ev.toolCallId && ev.args) toolArgsMap.set(ev.toolCallId, ev.args);
             toolCount++;
             stream.toolUse(ev.toolName, ev.args, ev.toolCallId);
             stream.status('running', Math.min(80, Math.round(20 * Math.log2(toolCount + 1))), `Tool: ${ev.toolName}`);
@@ -189,17 +189,18 @@ export class PiAdapter implements ProviderAdapter {
             const ev = event as any;
             const resultText = typeof ev.result === 'string'
               ? ev.result
-              : JSON.stringify(ev.result ?? '');
+              : (ev.result != null ? JSON.stringify(ev.result) : '');
             stream.toolResult(ev.toolName, resultText, !ev.isError, ev.toolCallId);
 
             if (FILE_TOOLS.has(ev.toolName)) {
-              const args = lastToolArgs ?? {};
+              const args = (ev.toolCallId ? toolArgsMap.get(ev.toolCallId) : undefined) ?? {};
               const filePath = (args.path || args.file_path || args.filePath || '') as string;
               if (filePath) {
                 const action = ev.toolName.toLowerCase().includes('create') ? 'created' : 'modified';
                 stream.fileChange(filePath, action);
               }
             }
+            if (ev.toolCallId) toolArgsMap.delete(ev.toolCallId);
             break;
           }
 
