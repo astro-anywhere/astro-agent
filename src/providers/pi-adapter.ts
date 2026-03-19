@@ -19,7 +19,8 @@ import {
   parseSummaryResponse,
   createNoopStream,
 } from './base-adapter.js';
-import type { AgentSession } from '@mariozechner/pi-coding-agent';
+import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent';
+import { config } from '../lib/config.js';
 
 // ---------------------------------------------------------------------------
 // Session Preservation
@@ -45,6 +46,87 @@ const FILE_TOOLS = new Set([
   'write', 'edit', 'create', 'multi_edit',
   'write_file', 'edit_file', 'create_file',
 ]);
+
+// ---------------------------------------------------------------------------
+// Custom Tool: ask_user_question
+// ---------------------------------------------------------------------------
+
+/** Approval request timeout (5 minutes) — same as MCP approval server */
+const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Build a Pi-compatible `ask_user_question` custom tool that posts to the
+ * same HTTP approval endpoint used by the Codex MCP approval server.
+ *
+ * This is intentionally identical to the Codex approach: the tool is
+ * stateless — it only needs the server URL and execution ID, both stable
+ * for the lifetime of the session. No stream reference, no closure issues
+ * across resume/summary calls.
+ */
+async function buildAskUserQuestionTool(executionId: string, serverUrl: string): Promise<ToolDefinition> {
+  const { Type } = await import('@sinclair/typebox');
+
+  return {
+    name: 'ask_user_question',
+    label: 'Ask User',
+    description:
+      'Ask the user a clarifying question before proceeding. ' +
+      'Execution pauses until the user selects one of the provided options. ' +
+      'Use this when multiple approaches are valid and the decision depends on user preference.',
+    parameters: Type.Object({
+      question: Type.String({ description: 'The question to ask the user.' }),
+      options: Type.Array(Type.String(), {
+        description: 'Array of 2-5 option strings the user can choose from.',
+        minItems: 2,
+        maxItems: 5,
+      }),
+    }),
+    async execute(
+      _toolCallId: string,
+      params: { question: string; options: string[] },
+      signal?: AbortSignal,
+    ): Promise<{ content: { type: string; text: string }[]; details: unknown }> {
+      const { question, options } = params;
+
+      try {
+        const abortCtl = new AbortController();
+        const timeout = setTimeout(() => abortCtl.abort(), APPROVAL_TIMEOUT_MS);
+        signal?.addEventListener('abort', () => abortCtl.abort(), { once: true });
+        let response: Response;
+        try {
+          response = await fetch(`${serverUrl}/api/dispatch/request-dynamic-approval`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ executionId, question, options }),
+            signal: abortCtl.signal,
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
+
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+          return {
+            content: [{ type: 'text', text: `Approval request failed: ${(error as Record<string, string>).error || response.status}` }],
+            details: { answered: false },
+          };
+        }
+
+        const result = await response.json() as { selectedOption: string };
+        return {
+          content: [{ type: 'text', text: `User selected: ${result.selectedOption}` }],
+          details: { answered: true, answer: result.selectedOption },
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: 'text', text: `Failed to get user approval: ${errorMessage}. Proceeding with best judgment.` }],
+          details: { answered: false, error: errorMessage },
+        };
+      }
+    },
+  } as ToolDefinition;
+}
 
 // ---------------------------------------------------------------------------
 // Adapter
@@ -102,6 +184,10 @@ export class PiAdapter implements ProviderAdapter {
       const { session } = await createAgentSession({
         cwd: task.workingDirectory,
         sessionManager: SessionManager.inMemory(),
+        customTools: [await buildAskUserQuestionTool(
+          task.id,
+          config.getConfig().apiUrl || 'http://localhost:3001',
+        )],
       });
 
       // Build prompt
@@ -116,125 +202,15 @@ export class PiAdapter implements ProviderAdapter {
         effectivePrompt = `${conversationContext}\n\nHuman: ${effectivePrompt}`;
       }
 
-      let outputText = '';
-      let toolCount = 0;
-      const toolArgsMap = new Map<string, Record<string, unknown>>();
       let agentFailed = false;
 
       const modelStr = session.model
         ? `${(session.model as any).provider ?? 'unknown'}/${(session.model as any).id ?? 'unknown'}`
         : undefined;
 
-      const unsubscribe = session.subscribe((event) => {
-        switch (event.type) {
-          case 'agent_start':
-            stream.sessionInit(
-              `pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              modelStr,
-            );
-            break;
-
-          case 'message_update': {
-            const msgEvent = (event as any).assistantMessageEvent;
-            if (!msgEvent) break;
-
-            switch (msgEvent.type) {
-              case 'text_delta': {
-                const delta: string = msgEvent.delta ?? '';
-                if (delta) {
-                  outputText += delta;
-                  stream.text(delta);
-                }
-                break;
-              }
-              case 'thinking_delta': {
-                const delta: string = msgEvent.delta ?? '';
-                if (delta) {
-                  stream.text(delta);
-                }
-                break;
-              }
-              case 'error': {
-                const errMsg = msgEvent.error?.errorMessage ?? 'Unknown Pi error';
-                stream.text(`\n[Pi error] ${errMsg}\n`);
-                break;
-              }
-              // text_start, text_end, thinking_start, thinking_end, toolcall_*,
-              // start, done — no action needed (covered by other events)
-            }
-            break;
-          }
-
-          case 'tool_execution_start': {
-            const ev = event as any;
-            if (ev.toolCallId && ev.args) toolArgsMap.set(ev.toolCallId, ev.args);
-            toolCount++;
-            stream.toolUse(ev.toolName, ev.args, ev.toolCallId);
-            stream.status('running', Math.min(80, Math.round(20 * Math.log2(toolCount + 1))), `Tool: ${ev.toolName}`);
-            break;
-          }
-
-          case 'tool_execution_update': {
-            // Partial/streaming tool output (e.g., bash stdout in real time)
-            const ev = event as any;
-            const partial = ev.partialResult;
-            if (partial != null) {
-              const text = typeof partial === 'string' ? partial : JSON.stringify(partial);
-              if (text) stream.text(text);
-            }
-            break;
-          }
-
-          case 'tool_execution_end': {
-            const ev = event as any;
-            const resultText = typeof ev.result === 'string'
-              ? ev.result
-              : (ev.result != null ? JSON.stringify(ev.result) : '');
-            stream.toolResult(ev.toolName, resultText, !ev.isError, ev.toolCallId);
-
-            if (FILE_TOOLS.has(ev.toolName)) {
-              const args = (ev.toolCallId ? toolArgsMap.get(ev.toolCallId) : undefined) ?? {};
-              const filePath = (args.path || args.file_path || args.filePath || '') as string;
-              if (filePath) {
-                const action = ev.toolName.toLowerCase().includes('create') ? 'created' : 'modified';
-                stream.fileChange(filePath, action);
-              }
-            }
-            if (ev.toolCallId) toolArgsMap.delete(ev.toolCallId);
-            break;
-          }
-
-          case 'agent_end':
-            stream.status('running', 100, 'Completed');
-            break;
-
-          case 'auto_compaction_start':
-            stream.status('running', undefined, 'Compacting context');
-            break;
-
-          case 'auto_compaction_end': {
-            const ev = event as any;
-            if (ev.aborted || ev.errorMessage) {
-              stream.status('running', undefined, `Compaction ${ev.aborted ? 'aborted' : 'failed'}`);
-            }
-            break;
-          }
-
-          case 'auto_retry_start': {
-            const ev = event as any;
-            stream.status('running', undefined, `Retrying (attempt ${ev.attempt}/${ev.maxAttempts})`);
-            break;
-          }
-
-          case 'auto_retry_end': {
-            const ev = event as any;
-            if (!ev.success) {
-              stream.text(`\n[Pi] Retry failed: ${ev.finalError ?? 'unknown error'}\n`);
-            }
-            break;
-          }
-        }
-      });
+      const { unsubscribe, getOutputText } = this.subscribeToSessionEvents(
+        session, stream, { includeLifecycle: true, modelStr },
+      );
 
       const abortHandler = () => { session.abort().catch(() => {}); };
       signal.addEventListener('abort', abortHandler, { once: true });
@@ -286,7 +262,7 @@ export class PiAdapter implements ProviderAdapter {
       return {
         taskId: task.id,
         status: signal.aborted ? 'cancelled' : 'completed',
-        output: outputText,
+        output: getOutputText(),
         startedAt,
         completedAt: new Date().toISOString(),
         metrics,
@@ -329,6 +305,141 @@ export class PiAdapter implements ProviderAdapter {
     };
   }
 
+  // ─── Shared Event Subscriber ─────────────────────────────────
+
+  /**
+   * Subscribe to Pi session events and route them to a TaskOutputStream.
+   * Returns { unsubscribe, getOutputText } for the caller to manage.
+   *
+   * @param includeLifecycle - emit sessionInit/agent_end (true for initial execute, false for resume)
+   */
+  private subscribeToSessionEvents(
+    session: AgentSession,
+    stream: TaskOutputStream,
+    options: { includeLifecycle: boolean; modelStr?: string },
+  ): { unsubscribe: () => void; getOutputText: () => string } {
+    let outputText = '';
+    let toolCount = 0;
+    const toolArgsMap = new Map<string, Record<string, unknown>>();
+
+    const unsubscribe = session.subscribe((event) => {
+      switch (event.type) {
+        case 'agent_start':
+          if (options.includeLifecycle) {
+            stream.sessionInit(
+              `pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              options.modelStr,
+            );
+          }
+          break;
+
+        case 'message_update': {
+          const msgEvent = (event as any).assistantMessageEvent;
+          if (!msgEvent) break;
+
+          switch (msgEvent.type) {
+            case 'text_delta': {
+              const delta: string = msgEvent.delta ?? '';
+              if (delta) {
+                outputText += delta;
+                stream.text(delta);
+              }
+              break;
+            }
+            case 'thinking_delta': {
+              const delta: string = msgEvent.delta ?? '';
+              if (delta) {
+                stream.text(delta);
+              }
+              break;
+            }
+            case 'error': {
+              const errMsg = msgEvent.error?.errorMessage ?? 'Unknown Pi error';
+              stream.text(`\n[Pi error] ${errMsg}\n`);
+              break;
+            }
+            // text_start, text_end, thinking_start, thinking_end, toolcall_*,
+            // start, done — no action needed (covered by other events)
+          }
+          break;
+        }
+
+        case 'tool_execution_start': {
+          const ev = event as any;
+          if (ev.toolCallId && ev.args) toolArgsMap.set(ev.toolCallId, ev.args);
+          toolCount++;
+          stream.toolUse(ev.toolName, ev.args, ev.toolCallId);
+          stream.status('running', Math.min(80, Math.round(20 * Math.log2(toolCount + 1))), `Tool: ${ev.toolName}`);
+          break;
+        }
+
+        case 'tool_execution_update': {
+          // Partial/streaming tool output (e.g., bash stdout in real time)
+          const ev = event as any;
+          const partial = ev.partialResult;
+          if (partial != null) {
+            const text = typeof partial === 'string' ? partial : JSON.stringify(partial);
+            if (text) stream.text(text);
+          }
+          break;
+        }
+
+        case 'tool_execution_end': {
+          const ev = event as any;
+          const resultText = typeof ev.result === 'string'
+            ? ev.result
+            : (ev.result != null ? JSON.stringify(ev.result) : '');
+          stream.toolResult(ev.toolName, resultText, !ev.isError, ev.toolCallId);
+
+          if (FILE_TOOLS.has(ev.toolName)) {
+            const args = (ev.toolCallId ? toolArgsMap.get(ev.toolCallId) : undefined) ?? {};
+            const filePath = (args.path || args.file_path || args.filePath || '') as string;
+            if (filePath) {
+              const action = ev.toolName.toLowerCase().includes('create') ? 'created' : 'modified';
+              stream.fileChange(filePath, action);
+            }
+          }
+          if (ev.toolCallId) toolArgsMap.delete(ev.toolCallId);
+          break;
+        }
+
+        case 'agent_end':
+          if (options.includeLifecycle) {
+            stream.status('running', 100, 'Completed');
+          }
+          break;
+
+        case 'auto_compaction_start':
+          stream.status('running', undefined, 'Compacting context');
+          break;
+
+        case 'auto_compaction_end': {
+          const ev = event as any;
+          if (ev.aborted || ev.errorMessage) {
+            stream.status('running', undefined, `Compaction ${ev.aborted ? 'aborted' : 'failed'}`);
+          }
+          break;
+        }
+
+        case 'auto_retry_start': {
+          const ev = event as any;
+          stream.status('running', undefined, `Retrying (attempt ${ev.attempt}/${ev.maxAttempts})`);
+          break;
+        }
+
+        case 'auto_retry_end': {
+          const ev = event as any;
+          if (!ev.success) {
+            stream.text(`\n[Pi] Retry failed: ${ev.finalError ?? 'unknown error'}\n`);
+          }
+          break;
+        }
+      }
+    });
+
+    return { unsubscribe, getOutputText: () => outputText };
+  }
+
   // ─── Multi-Turn Resume ─────────────────────────────────────────
 
   async resumeTask(
@@ -352,20 +463,10 @@ export class PiAdapter implements ProviderAdapter {
     this.activeTasks++;
     try {
       const { session } = preserved;
-      let outputText = '';
 
-      const unsubscribe = session.subscribe((event) => {
-        if (event.type === 'message_update') {
-          const msgEvent = (event as any).assistantMessageEvent;
-          if (msgEvent?.type === 'text_delta') {
-            const delta: string = msgEvent.delta ?? '';
-            if (delta) {
-              outputText += delta;
-              stream.text(delta);
-            }
-          }
-        }
-      });
+      const { unsubscribe, getOutputText } = this.subscribeToSessionEvents(
+        session, stream, { includeLifecycle: false },
+      );
 
       const abortHandler = () => { session.abort().catch(() => {}); };
       signal.addEventListener('abort', abortHandler, { once: true });
@@ -378,13 +479,13 @@ export class PiAdapter implements ProviderAdapter {
         failed = true;
         const errorMsg = err instanceof Error ? err.message : String(err);
         this.lastError = errorMsg;
-        return { success: false, output: outputText, error: errorMsg };
+        return { success: false, output: getOutputText(), error: errorMsg };
       } finally {
         signal.removeEventListener('abort', abortHandler);
         unsubscribe();
       }
 
-      return { success: !failed, output: outputText };
+      return { success: !failed, output: getOutputText() };
     } finally {
       this.activeTasks--;
     }
