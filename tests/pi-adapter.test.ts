@@ -71,6 +71,14 @@ function createMockStream(): TaskOutputStream {
   };
 }
 
+/** Helper to mock global.fetch for approval endpoint tests */
+function mockFetchApproval(response: { ok: boolean; body: unknown }) {
+  return vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+    ok: response.ok,
+    json: () => Promise.resolve(response.body),
+  } as Response);
+}
+
 function baseTask(overrides = {}) {
   return {
     id: 'task-1',
@@ -609,42 +617,43 @@ describe('PiAdapter', () => {
       expect(callArgs.customTools[0].name).toBe('ask_user_question');
     });
 
-    it('calls stream.approvalRequest when ask_user_question tool is invoked', async () => {
+    it('posts to HTTP approval endpoint when ask_user_question tool is invoked', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
 
-      const stream = createMockStream();
-      (stream.approvalRequest as ReturnType<typeof vi.fn>).mockResolvedValue({
-        answered: true,
-        answer: 'Option B',
-      });
+      const fetchSpy = mockFetchApproval({ ok: true, body: { selectedOption: 'Option B' } });
 
-      // Capture the customTools passed to createAgentSession
       let askTool: any;
       mockCreateAgentSession.mockImplementation(async (opts: any) => {
         askTool = opts.customTools[0];
         return { session };
       });
 
-      await adapter.execute(baseTask(), stream, new AbortController().signal);
+      await adapter.execute(baseTask(), createMockStream(), new AbortController().signal);
 
-      // Invoke the tool directly (simulating Pi calling it)
       const result = await askTool.execute('tc-ask-1', {
         question: 'Which approach?',
         options: ['Option A', 'Option B'],
       });
 
-      expect(stream.approvalRequest).toHaveBeenCalledWith('Which approach?', ['Option A', 'Option B']);
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/api/dispatch/request-dynamic-approval'),
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.stringContaining('"question":"Which approach?"'),
+        }),
+      );
       expect(result.content[0].text).toBe('User selected: Option B');
       expect(result.details).toEqual({ answered: true, answer: 'Option B' });
+
+      fetchSpy.mockRestore();
     });
 
-    it('returns fallback message when user does not answer', async () => {
+    it('returns error details when approval endpoint returns non-ok', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
 
-      const stream = createMockStream();
-      // Default mock returns { answered: false }
+      const fetchSpy = mockFetchApproval({ ok: false, body: { error: 'Execution not found' } });
 
       let askTool: any;
       mockCreateAgentSession.mockImplementation(async (opts: any) => {
@@ -652,24 +661,25 @@ describe('PiAdapter', () => {
         return { session };
       });
 
-      await adapter.execute(baseTask(), stream, new AbortController().signal);
+      await adapter.execute(baseTask(), createMockStream(), new AbortController().signal);
 
       const result = await askTool.execute('tc-ask-2', {
         question: 'Pick one',
         options: ['A', 'B'],
       });
 
-      expect(result.content[0].text).toContain('did not answer');
+      expect(result.content[0].text).toContain('Approval request failed');
       expect(result.details).toEqual({ answered: false });
+
+      fetchSpy.mockRestore();
     });
 
-    it('returns graceful error when approvalRequest rejects', async () => {
+    it('returns graceful error when fetch throws', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
 
-      const stream = createMockStream();
-      (stream.approvalRequest as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('WebSocket disconnected'),
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+        new Error('Network unreachable'),
       );
 
       let askTool: any;
@@ -678,7 +688,7 @@ describe('PiAdapter', () => {
         return { session };
       });
 
-      await adapter.execute(baseTask(), stream, new AbortController().signal);
+      await adapter.execute(baseTask(), createMockStream(), new AbortController().signal);
 
       const result = await askTool.execute('tc-ask-3', {
         question: 'Which?',
@@ -686,9 +696,11 @@ describe('PiAdapter', () => {
       });
 
       expect(result.content[0].text).toContain('Failed to get user approval');
-      expect(result.content[0].text).toContain('WebSocket disconnected');
+      expect(result.content[0].text).toContain('Network unreachable');
       expect(result.details.answered).toBe(false);
-      expect(result.details.error).toBe('WebSocket disconnected');
+      expect(result.details.error).toBe('Network unreachable');
+
+      fetchSpy.mockRestore();
     });
   });
 

@@ -50,14 +50,19 @@ const FILE_TOOLS = new Set([
 // Custom Tool: ask_user_question
 // ---------------------------------------------------------------------------
 
+/** Approval request timeout (5 minutes) — same as MCP approval server */
+const APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+
 /**
- * Build a Pi-compatible `ask_user_question` custom tool that bridges to
- * Astro's approval system via `stream.approvalRequest()`.
+ * Build a Pi-compatible `ask_user_question` custom tool that posts to the
+ * same HTTP approval endpoint used by the Codex MCP approval server.
  *
- * Pi runs in-process, so we pass the TaskOutputStream directly — no MCP
- * server or HTTP needed (unlike the Codex adapter which spawns a subprocess).
+ * This is intentionally identical to the Codex approach: the tool is
+ * stateless — it only needs the server URL and execution ID, both stable
+ * for the lifetime of the session. No stream reference, no closure issues
+ * across resume/summary calls.
  */
-async function buildAskUserQuestionTool(stream: TaskOutputStream): Promise<ToolDefinition> {
+async function buildAskUserQuestionTool(executionId: string, serverUrl: string): Promise<ToolDefinition> {
   const { Type } = await import('@sinclair/typebox');
 
   return {
@@ -82,18 +87,32 @@ async function buildAskUserQuestionTool(stream: TaskOutputStream): Promise<ToolD
       const { question, options } = params;
 
       try {
-        const result = await stream.approvalRequest(question, options);
+        const abortCtl = new AbortController();
+        const timeout = setTimeout(() => abortCtl.abort(), APPROVAL_TIMEOUT_MS);
+        let response: Response;
+        try {
+          response = await fetch(`${serverUrl}/api/dispatch/request-dynamic-approval`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ executionId, question, options }),
+            signal: abortCtl.signal,
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
 
-        if (result.answered && result.answer) {
+        if (!response.ok) {
+          const error = await response.json().catch(() => ({ error: 'Unknown error' }));
           return {
-            content: [{ type: 'text', text: `User selected: ${result.answer}` }],
-            details: { answered: true, answer: result.answer },
+            content: [{ type: 'text', text: `Approval request failed: ${(error as Record<string, string>).error || response.status}` }],
+            details: { answered: false },
           };
         }
 
+        const result = await response.json() as { selectedOption: string };
         return {
-          content: [{ type: 'text', text: 'User did not answer the question. Proceed with your best judgment.' }],
-          details: { answered: false },
+          content: [{ type: 'text', text: `User selected: ${result.selectedOption}` }],
+          details: { answered: true, answer: result.selectedOption },
         };
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
@@ -162,7 +181,10 @@ export class PiAdapter implements ProviderAdapter {
       const { session } = await createAgentSession({
         cwd: task.workingDirectory,
         sessionManager: SessionManager.inMemory(),
-        customTools: [await buildAskUserQuestionTool(stream)],
+        customTools: [await buildAskUserQuestionTool(
+          task.id,
+          process.env.ASTRO_SERVER_URL || 'http://localhost:3001',
+        )],
       });
 
       // Build prompt
