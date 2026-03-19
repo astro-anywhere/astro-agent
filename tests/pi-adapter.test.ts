@@ -71,6 +71,14 @@ function createMockStream(): TaskOutputStream {
   };
 }
 
+/** Helper to mock global.fetch for approval endpoint tests */
+function mockFetchApproval(response: { ok: boolean; body: unknown }) {
+  return vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+    ok: response.ok,
+    json: () => Promise.resolve(response.body),
+  } as Response);
+}
+
 function baseTask(overrides = {}) {
   return {
     id: 'task-1',
@@ -174,7 +182,7 @@ describe('PiAdapter', () => {
       expect(result.output).toBe('Hello world');
     });
 
-    it('ignores non-text_delta message_update events', async () => {
+    it('streams thinking_delta as text', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
       const stream = createMockStream();
@@ -186,8 +194,25 @@ describe('PiAdapter', () => {
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
-      expect(stream.text).toHaveBeenCalledTimes(1);
+      expect(stream.text).toHaveBeenCalledTimes(2);
+      expect(stream.text).toHaveBeenCalledWith('thinking...');
       expect(stream.text).toHaveBeenCalledWith('answer');
+    });
+
+    it('does not include thinking_delta in output text', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'hmm' } });
+        session.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'answer' } });
+      });
+
+      const result = await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      // outputText should only contain text_delta, not thinking
+      expect(result.output).toBe('answer');
     });
 
     it('emits toolUse on tool_execution_start', async () => {
@@ -232,14 +257,51 @@ describe('PiAdapter', () => {
       expect(stream.toolResult).toHaveBeenCalledWith('bash', 'error msg', false, undefined);
     });
 
+    it('emits empty string for null/undefined tool result', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'tool_execution_end', toolName: 'bash', result: null, isError: false });
+        session.emit({ type: 'tool_execution_end', toolName: 'bash', result: undefined, isError: false });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', '', true, undefined);
+      expect(stream.toolResult).toHaveBeenCalledTimes(2);
+    });
+
+    it('resolves correct file args for parallel tool executions', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        // Two file tools start before either ends (parallel execution)
+        session.emit({ type: 'tool_execution_start', toolName: 'Write', args: { path: '/tmp/a.ts' }, toolCallId: 'tc-a' });
+        session.emit({ type: 'tool_execution_start', toolName: 'Write', args: { path: '/tmp/b.ts' }, toolCallId: 'tc-b' });
+        // End in reverse order
+        session.emit({ type: 'tool_execution_end', toolName: 'Write', result: 'ok', isError: false, toolCallId: 'tc-b' });
+        session.emit({ type: 'tool_execution_end', toolName: 'Write', result: 'ok', isError: false, toolCallId: 'tc-a' });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      // Each fileChange should reference its own tool's path, not the last started tool's path
+      expect(stream.fileChange).toHaveBeenCalledWith('/tmp/b.ts', 'modified');
+      expect(stream.fileChange).toHaveBeenCalledWith('/tmp/a.ts', 'modified');
+    });
+
     it('emits fileChange for file-modifying tools', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
-        session.emit({ type: 'tool_execution_start', toolName: 'Write', args: { path: '/tmp/foo.ts' } });
-        session.emit({ type: 'tool_execution_end', toolName: 'Write', result: 'ok', isError: false });
+        session.emit({ type: 'tool_execution_start', toolName: 'Write', args: { path: '/tmp/foo.ts' }, toolCallId: 'tc-1' });
+        session.emit({ type: 'tool_execution_end', toolName: 'Write', result: 'ok', isError: false, toolCallId: 'tc-1' });
       });
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
@@ -253,8 +315,8 @@ describe('PiAdapter', () => {
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
-        session.emit({ type: 'tool_execution_start', toolName: 'Create', args: { path: '/tmp/new.ts' } });
-        session.emit({ type: 'tool_execution_end', toolName: 'Create', result: 'ok', isError: false });
+        session.emit({ type: 'tool_execution_start', toolName: 'Create', args: { path: '/tmp/new.ts' }, toolCallId: 'tc-2' });
+        session.emit({ type: 'tool_execution_end', toolName: 'Create', result: 'ok', isError: false, toolCallId: 'tc-2' });
       });
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
@@ -289,6 +351,177 @@ describe('PiAdapter', () => {
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
       expect(stream.status).toHaveBeenCalledWith('running', undefined, 'Compacting context');
+    });
+
+    it('passes toolCallId from Pi events to stream', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'tool_execution_start', toolCallId: 'tc-123', toolName: 'read', args: { path: '/foo' } });
+        session.emit({ type: 'tool_execution_end', toolCallId: 'tc-123', toolName: 'read', result: 'contents', isError: false });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.toolUse).toHaveBeenCalledWith('read', { path: '/foo' }, 'tc-123');
+      expect(stream.toolResult).toHaveBeenCalledWith('read', 'contents', true, 'tc-123');
+    });
+
+    it('streams tool_execution_update partial results as text', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'tool_execution_start', toolCallId: 'tc-1', toolName: 'bash', args: { command: 'ls' } });
+        session.emit({ type: 'tool_execution_update', toolCallId: 'tc-1', toolName: 'bash', args: { command: 'ls' }, partialResult: 'file1.ts\n' });
+        session.emit({ type: 'tool_execution_update', toolCallId: 'tc-1', toolName: 'bash', args: { command: 'ls' }, partialResult: 'file2.ts\n' });
+        session.emit({ type: 'tool_execution_end', toolCallId: 'tc-1', toolName: 'bash', result: 'file1.ts\nfile2.ts\n', isError: false });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.text).toHaveBeenCalledWith('file1.ts\n');
+      expect(stream.text).toHaveBeenCalledWith('file2.ts\n');
+    });
+
+    it('handles object partialResult in tool_execution_update', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'tool_execution_update', toolCallId: 'tc-1', toolName: 'custom', args: {}, partialResult: { progress: 50 } });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.text).toHaveBeenCalledWith('{"progress":50}');
+    });
+
+    it('ignores null/undefined partialResult in tool_execution_update', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'tool_execution_update', toolCallId: 'tc-1', toolName: 'bash', args: {}, partialResult: null });
+        session.emit({ type: 'tool_execution_update', toolCallId: 'tc-1', toolName: 'bash', args: {}, partialResult: undefined });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.text).not.toHaveBeenCalled();
+    });
+
+    it('streams error from message_update error event', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({
+          type: 'message_update',
+          assistantMessageEvent: {
+            type: 'error',
+            reason: 'error',
+            error: { errorMessage: 'Rate limit exceeded' },
+          },
+        });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.text).toHaveBeenCalledWith(expect.stringContaining('Rate limit exceeded'));
+    });
+
+    it('emits status on auto_compaction_end with error', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'auto_compaction_end', aborted: true, errorMessage: 'context too large' });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.status).toHaveBeenCalledWith('running', undefined, 'Compaction aborted');
+    });
+
+    it('emits retry status with attempt counts', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'auto_retry_start', attempt: 2, maxAttempts: 3, delayMs: 1000, errorMessage: 'overloaded' });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.status).toHaveBeenCalledWith('running', undefined, 'Retrying (attempt 2/3)');
+    });
+
+    it('streams error text on auto_retry_end failure', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'auto_retry_end', success: false, attempt: 3, finalError: 'max retries exceeded' });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.text).toHaveBeenCalledWith(expect.stringContaining('max retries exceeded'));
+    });
+
+    it('does not stream text on auto_retry_end success', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'auto_retry_end', success: true, attempt: 1 });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.text).not.toHaveBeenCalled();
+    });
+
+    it('passes model info to sessionInit', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'agent_start' });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.sessionInit).toHaveBeenCalledWith(
+        expect.stringContaining('pi-'),
+        'anthropic/claude-sonnet-4',
+      );
+    });
+
+    it('ignores message_update with no assistantMessageEvent', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'message_update', message: {} });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.text).not.toHaveBeenCalled();
     });
 
     it('returns completed status on success', async () => {
@@ -371,6 +604,106 @@ describe('PiAdapter', () => {
     });
   });
 
+  describe('ask_user_question custom tool', () => {
+    it('passes customTools containing ask_user_question to createAgentSession', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+
+      await adapter.execute(baseTask(), createMockStream(), new AbortController().signal);
+
+      const callArgs = mockCreateAgentSession.mock.calls[0][0];
+      expect(callArgs.customTools).toBeDefined();
+      expect(callArgs.customTools).toHaveLength(1);
+      expect(callArgs.customTools[0].name).toBe('ask_user_question');
+    });
+
+    it('posts to HTTP approval endpoint when ask_user_question tool is invoked', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+
+      const fetchSpy = mockFetchApproval({ ok: true, body: { selectedOption: 'Option B' } });
+
+      let askTool: any;
+      mockCreateAgentSession.mockImplementation(async (opts: any) => {
+        askTool = opts.customTools[0];
+        return { session };
+      });
+
+      await adapter.execute(baseTask(), createMockStream(), new AbortController().signal);
+
+      const result = await askTool.execute('tc-ask-1', {
+        question: 'Which approach?',
+        options: ['Option A', 'Option B'],
+      });
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/api/dispatch/request-dynamic-approval'),
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.stringContaining('"question":"Which approach?"'),
+        }),
+      );
+      expect(result.content[0].text).toBe('User selected: Option B');
+      expect(result.details).toEqual({ answered: true, answer: 'Option B' });
+
+      fetchSpy.mockRestore();
+    });
+
+    it('returns error details when approval endpoint returns non-ok', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+
+      const fetchSpy = mockFetchApproval({ ok: false, body: { error: 'Execution not found' } });
+
+      let askTool: any;
+      mockCreateAgentSession.mockImplementation(async (opts: any) => {
+        askTool = opts.customTools[0];
+        return { session };
+      });
+
+      await adapter.execute(baseTask(), createMockStream(), new AbortController().signal);
+
+      const result = await askTool.execute('tc-ask-2', {
+        question: 'Pick one',
+        options: ['A', 'B'],
+      });
+
+      expect(result.content[0].text).toContain('Approval request failed');
+      expect(result.details).toEqual({ answered: false });
+
+      fetchSpy.mockRestore();
+    });
+
+    it('returns graceful error when fetch throws', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(
+        new Error('Network unreachable'),
+      );
+
+      let askTool: any;
+      mockCreateAgentSession.mockImplementation(async (opts: any) => {
+        askTool = opts.customTools[0];
+        return { session };
+      });
+
+      await adapter.execute(baseTask(), createMockStream(), new AbortController().signal);
+
+      const result = await askTool.execute('tc-ask-3', {
+        question: 'Which?',
+        options: ['X', 'Y'],
+      });
+
+      expect(result.content[0].text).toContain('Failed to get user approval');
+      expect(result.content[0].text).toContain('Network unreachable');
+      expect(result.details.answered).toBe(false);
+      expect(result.details.error).toBe('Network unreachable');
+
+      fetchSpy.mockRestore();
+    });
+  });
+
   describe('getStatus', () => {
     it('returns available=true when SDK is importable', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
@@ -417,6 +750,60 @@ describe('PiAdapter', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('aborted');
+    });
+
+    it('streams tool and thinking events during resume (event parity with execute)', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+
+      // Execute initial task to create preserved session
+      await adapter.execute(baseTask({ id: 'task-events' }), createMockStream(), new AbortController().signal);
+
+      // Set up mock to emit various events during resume
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking...' } });
+        session.emit({ type: 'tool_execution_start', toolName: 'bash', args: { command: 'ls' }, toolCallId: 'tc-r1' });
+        session.emit({ type: 'tool_execution_update', toolName: 'bash', partialResult: 'file.ts\n', toolCallId: 'tc-r1' });
+        session.emit({ type: 'tool_execution_end', toolName: 'bash', result: 'file.ts\n', isError: false, toolCallId: 'tc-r1' });
+        session.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Done' } });
+      });
+
+      const stream = createMockStream();
+      const result = await adapter.resumeTask('task-events', 'continue', '/tmp', 'sid', stream, new AbortController().signal);
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe('Done');
+
+      // Verify all event types were streamed
+      expect(stream.text).toHaveBeenCalledWith('thinking...');
+      expect(stream.toolUse).toHaveBeenCalledWith('bash', { command: 'ls' }, 'tc-r1');
+      expect(stream.text).toHaveBeenCalledWith('file.ts\n');
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'file.ts\n', true, 'tc-r1');
+
+      // Should NOT emit sessionInit (includeLifecycle=false)
+      expect(stream.sessionInit).not.toHaveBeenCalled();
+    });
+
+    it('does not emit sessionInit or agent_end during resume', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+
+      await adapter.execute(baseTask({ id: 'task-no-init' }), createMockStream(), new AbortController().signal);
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({ type: 'agent_start' });
+        session.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'ok' } });
+        session.emit({ type: 'agent_end' });
+      });
+
+      const stream = createMockStream();
+      await adapter.resumeTask('task-no-init', 'hi', '/tmp', 'sid', stream, new AbortController().signal);
+
+      expect(stream.sessionInit).not.toHaveBeenCalled();
+      // agent_end emits status('running', 100, 'Completed') only when includeLifecycle=true
+      const statusCalls = (stream.status as any).mock.calls;
+      const completedCalls = statusCalls.filter((c: any[]) => c[2] === 'Completed');
+      expect(completedCalls.length).toBe(0);
     });
 
     it('returns "No active Pi session" after SESSION_TTL_MS expires', async () => {
