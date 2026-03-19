@@ -118,33 +118,70 @@ export class PiAdapter implements ProviderAdapter {
 
       let outputText = '';
       let toolCount = 0;
-      let lastToolArgs: Record<string, unknown> | undefined;
+      const toolArgsMap = new Map<string, Record<string, unknown>>();
       let agentFailed = false;
+
+      const modelStr = session.model
+        ? `${(session.model as any).provider ?? 'unknown'}/${(session.model as any).id ?? 'unknown'}`
+        : undefined;
 
       const unsubscribe = session.subscribe((event) => {
         switch (event.type) {
           case 'agent_start':
-            stream.sessionInit(`pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, undefined);
+            stream.sessionInit(
+              `pi-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              modelStr,
+            );
             break;
 
           case 'message_update': {
             const msgEvent = (event as any).assistantMessageEvent;
-            if (msgEvent?.type === 'text_delta') {
-              const delta: string = msgEvent.delta ?? '';
-              if (delta) {
-                outputText += delta;
-                stream.text(delta);
+            if (!msgEvent) break;
+
+            switch (msgEvent.type) {
+              case 'text_delta': {
+                const delta: string = msgEvent.delta ?? '';
+                if (delta) {
+                  outputText += delta;
+                  stream.text(delta);
+                }
+                break;
               }
+              case 'thinking_delta': {
+                const delta: string = msgEvent.delta ?? '';
+                if (delta) {
+                  stream.text(delta);
+                }
+                break;
+              }
+              case 'error': {
+                const errMsg = msgEvent.error?.errorMessage ?? 'Unknown Pi error';
+                stream.text(`\n[Pi error] ${errMsg}\n`);
+                break;
+              }
+              // text_start, text_end, thinking_start, thinking_end, toolcall_*,
+              // start, done — no action needed (covered by other events)
             }
             break;
           }
 
           case 'tool_execution_start': {
             const ev = event as any;
-            lastToolArgs = ev.args;
+            if (ev.toolCallId && ev.args) toolArgsMap.set(ev.toolCallId, ev.args);
             toolCount++;
-            stream.toolUse(ev.toolName, ev.args, ev.toolUseId || ev.id);
+            stream.toolUse(ev.toolName, ev.args, ev.toolCallId);
             stream.status('running', Math.min(80, Math.round(20 * Math.log2(toolCount + 1))), `Tool: ${ev.toolName}`);
+            break;
+          }
+
+          case 'tool_execution_update': {
+            // Partial/streaming tool output (e.g., bash stdout in real time)
+            const ev = event as any;
+            const partial = ev.partialResult;
+            if (partial != null) {
+              const text = typeof partial === 'string' ? partial : JSON.stringify(partial);
+              if (text) stream.text(text);
+            }
             break;
           }
 
@@ -152,17 +189,18 @@ export class PiAdapter implements ProviderAdapter {
             const ev = event as any;
             const resultText = typeof ev.result === 'string'
               ? ev.result
-              : JSON.stringify(ev.result ?? '');
-            stream.toolResult(ev.toolName, resultText, !ev.isError, ev.toolUseId || ev.id);
+              : (ev.result != null ? JSON.stringify(ev.result) : '');
+            stream.toolResult(ev.toolName, resultText, !ev.isError, ev.toolCallId);
 
             if (FILE_TOOLS.has(ev.toolName)) {
-              const args = lastToolArgs ?? {};
+              const args = (ev.toolCallId ? toolArgsMap.get(ev.toolCallId) : undefined) ?? {};
               const filePath = (args.path || args.file_path || args.filePath || '') as string;
               if (filePath) {
                 const action = ev.toolName.toLowerCase().includes('create') ? 'created' : 'modified';
                 stream.fileChange(filePath, action);
               }
             }
+            if (ev.toolCallId) toolArgsMap.delete(ev.toolCallId);
             break;
           }
 
@@ -174,9 +212,27 @@ export class PiAdapter implements ProviderAdapter {
             stream.status('running', undefined, 'Compacting context');
             break;
 
-          case 'auto_retry_start':
-            stream.status('running', undefined, `Retrying (attempt ${(event as any).attempt})`);
+          case 'auto_compaction_end': {
+            const ev = event as any;
+            if (ev.aborted || ev.errorMessage) {
+              stream.status('running', undefined, `Compaction ${ev.aborted ? 'aborted' : 'failed'}`);
+            }
             break;
+          }
+
+          case 'auto_retry_start': {
+            const ev = event as any;
+            stream.status('running', undefined, `Retrying (attempt ${ev.attempt}/${ev.maxAttempts})`);
+            break;
+          }
+
+          case 'auto_retry_end': {
+            const ev = event as any;
+            if (!ev.success) {
+              stream.text(`\n[Pi] Retry failed: ${ev.finalError ?? 'unknown error'}\n`);
+            }
+            break;
+          }
         }
       });
 
