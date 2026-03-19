@@ -20,6 +20,7 @@ import {
   createNoopStream,
 } from './base-adapter.js';
 import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent';
+import { config } from '../lib/config.js';
 
 // ---------------------------------------------------------------------------
 // Session Preservation
@@ -83,12 +84,14 @@ async function buildAskUserQuestionTool(executionId: string, serverUrl: string):
     async execute(
       _toolCallId: string,
       params: { question: string; options: string[] },
+      signal?: AbortSignal,
     ): Promise<{ content: { type: string; text: string }[]; details: unknown }> {
       const { question, options } = params;
 
       try {
         const abortCtl = new AbortController();
         const timeout = setTimeout(() => abortCtl.abort(), APPROVAL_TIMEOUT_MS);
+        signal?.addEventListener('abort', () => abortCtl.abort(), { once: true });
         let response: Response;
         try {
           response = await fetch(`${serverUrl}/api/dispatch/request-dynamic-approval`, {
@@ -183,7 +186,7 @@ export class PiAdapter implements ProviderAdapter {
         sessionManager: SessionManager.inMemory(),
         customTools: [await buildAskUserQuestionTool(
           task.id,
-          process.env.ASTRO_SERVER_URL || 'http://localhost:3001',
+          config.getConfig().apiUrl || 'http://localhost:3001',
         )],
       });
 
