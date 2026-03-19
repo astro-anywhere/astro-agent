@@ -168,7 +168,8 @@ describe.skipIf(!hasAuth)('PiAdapter integration', () => {
       }
     }
 
-    // Check if tool_execution_update events were captured (streamed bash output)
+    // tool_execution_update events are now silently ignored (no longer pollute text stream)
+    // Text events should only contain assistant text/thinking, not tool output
     const textCalls = calls.filter(c => c.method === 'text');
     const textContent = textCalls.map(c => c.args[0] as string).join('');
     console.log(`[integration] Text events: ${textCalls.length}, content preview: ${textContent.slice(0, 200)}`);
@@ -228,7 +229,7 @@ describe.skipIf(!hasAuth)('PiAdapter integration', () => {
       }
     }
 
-    // Same check for text events (from tool_execution_update)
+    // Text events should not contain Pi content objects (tool_execution_update is now silent)
     const textCalls = calls.filter(c => c.method === 'text');
     for (const call of textCalls) {
       const text = call.args[0] as string;
