@@ -1169,6 +1169,7 @@ export class TaskExecutor {
     resetIdleTimeout();
 
     let keepBranch = false;
+    let deliveryFailed = false;
     // Deferred result — sent AFTER cleanup to prevent auto-dispatch race.
     // The server dispatches downstream tasks immediately on receiving the result,
     // and the new task's createWorktree() would fight with this task's cleanupWorktree()
@@ -1625,6 +1626,11 @@ export class TaskExecutor {
         result.branchName = summary.branchName;
       }
 
+      // Track delivery failure so the finally block can preserve the worktree
+      if (result.deliveryStatus === 'failed') {
+        deliveryFailed = true;
+      }
+
       console.log(`[executor] Task ${task.id}: completed with status=${result.status}${result.deliveryStatus ? ` delivery=${result.deliveryStatus}` : ''}${result.error ? ` error=${result.error}` : ''}`);
 
       // Check if there are tracked Slurm jobs still running for this task.
@@ -1652,15 +1658,23 @@ export class TaskExecutor {
       clearTimeout(hardCapTimeoutId);
       if (idleTimerId !== undefined) clearTimeout(idleTimerId);
 
-      // Always cleanup the local worktree directory to reclaim disk space
-      // (node_modules alone is ~680MB per worktree). When keepBranch is true
-      // (PR created or branch pushed), we preserve the git branch but still
-      // remove the working copy — the branch lives on remote/local refs,
-      // and re-execution will create a fresh worktree if needed.
-      if (prepared.branchName) {
-        stream.text?.(`\n── [Astro] Cleaning up worktree (branch: ${prepared.branchName})...\n`);
-      }
-      if (this.preserveWorktrees) {
+      // Worktree cleanup strategy:
+      // - On delivery failure (pr/branch mode): preserve the worktree directory
+      //   so the user can inspect, fix, and retry delivery manually.
+      // - On success or non-git modes: clean up to reclaim disk space
+      //   (node_modules alone is ~680MB per worktree). When keepBranch is true,
+      //   the git branch ref is preserved but the working copy is removed.
+      // - preserveWorktrees (debug mode): always preserve git worktrees.
+      const shouldPreserveWorktree = deliveryFailed && !!prepared.branchName;
+      if (shouldPreserveWorktree) {
+        // Delivery failed — preserve worktree for manual retry
+        stream.text?.(`\n── [Astro] Worktree preserved at: ${prepared.workingDirectory}\n`);
+        stream.text?.(`── [Astro] Branch: ${prepared.branchName} (you can retry delivery later)\n`);
+        console.log(`[executor] Task ${task.id}: worktree preserved after delivery failure at ${prepared.workingDirectory}`);
+      } else if (this.preserveWorktrees) {
+        if (prepared.branchName) {
+          stream.text?.(`\n── [Astro] Cleaning up worktree (branch: ${prepared.branchName})...\n`);
+        }
         console.log(`[executor] Task ${task.id}: worktree preserved (debug mode)`);
         // Still release directory locks even in debug mode to avoid deadlocks.
         // Git worktree paths set branchName and are preserved for inspection.
@@ -1670,6 +1684,9 @@ export class TaskExecutor {
           await prepared.cleanup({ keepBranch });
         }
       } else {
+        if (prepared.branchName) {
+          stream.text?.(`\n── [Astro] Cleaning up worktree (branch: ${prepared.branchName})...\n`);
+        }
         await prepared.cleanup({ keepBranch });
       }
 
