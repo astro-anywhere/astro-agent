@@ -205,7 +205,7 @@ describe('createPullRequest', () => {
     });
   });
 
-  it('should return null when gh pr create fails', async () => {
+  it('should return error object when gh pr create fails with non-recoverable error', async () => {
     mockExecFileAsync.mockRejectedValueOnce(new Error('gh not authenticated'));
 
     const result = await createPullRequest('/repo/worktree', {
@@ -215,7 +215,50 @@ describe('createPullRequest', () => {
       body: 'PR body',
     });
 
-    expect(result).toBeNull();
+    expect(result).toEqual({ error: 'gh not authenticated' });
+  });
+
+  it('should look up existing PR when gh reports PR already exists', async () => {
+    // gh pr create fails with "already exists"
+    mockExecFileAsync.mockRejectedValueOnce(
+      new Error('a pull request already exists for branch feature-branch')
+    );
+    // gh pr view finds the existing PR
+    mockExecFileAsync.mockResolvedValueOnce({
+      stdout: JSON.stringify({ url: 'https://github.com/user/repo/pull/55', number: 55 }),
+    });
+
+    const result = await createPullRequest('/repo/worktree', {
+      branchName: 'feature-branch',
+      baseBranch: 'main',
+      title: 'My PR',
+      body: 'PR body',
+    });
+
+    expect(result).toEqual({
+      prUrl: 'https://github.com/user/repo/pull/55',
+      prNumber: 55,
+    });
+  });
+
+  it('should extract PR URL from error message when present', async () => {
+    mockExecFileAsync.mockRejectedValueOnce(
+      new Error('already exists: https://github.com/user/repo/pull/77')
+    );
+    // findExistingPR also fails (no gh pr view)
+    mockExecFileAsync.mockRejectedValueOnce(new Error('not found'));
+
+    const result = await createPullRequest('/repo/worktree', {
+      branchName: 'feature-branch',
+      baseBranch: 'main',
+      title: 'My PR',
+      body: 'PR body',
+    });
+
+    expect(result).toEqual({
+      prUrl: 'https://github.com/user/repo/pull/77',
+      prNumber: 77,
+    });
   });
 
   it('should return prNumber 0 when URL does not match expected pattern', async () => {
