@@ -205,7 +205,7 @@ describe('createPullRequest', () => {
     });
   });
 
-  it('should return null when gh pr create fails with non-recoverable error', async () => {
+  it('should return error object when gh pr create fails with non-recoverable error', async () => {
     mockExecFileAsync.mockRejectedValueOnce(new Error('gh not authenticated'));
 
     const result = await createPullRequest('/repo/worktree', {
@@ -215,7 +215,7 @@ describe('createPullRequest', () => {
       body: 'PR body',
     });
 
-    expect(result).toBeNull();
+    expect(result).toEqual({ error: 'gh not authenticated' });
   });
 
   it('should look up existing PR when gh reports PR already exists', async () => {

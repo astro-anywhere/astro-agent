@@ -183,7 +183,7 @@ export async function createPullRequest(
     /** Explicit GitHub repo slug (OWNER/REPO) — avoids local git context resolution */
     repoSlug?: string;
   },
-): Promise<{ prUrl: string; prNumber: number } | null> {
+): Promise<{ prUrl: string; prNumber: number } | { error: string }> {
   try {
     const args = [
       'pr', 'create',
@@ -225,7 +225,7 @@ export async function createPullRequest(
       return { prUrl: urlMatch[0], prNumber: parseInt(urlMatch[1], 10) };
     }
 
-    return null;
+    return { error: msg };
   }
 }
 
@@ -568,6 +568,30 @@ export async function pushAndCreatePR(
       ? `## Task\n\n${options.taskDescription}\n\n---\n*Created by Astro task automation*`
       : '*Created by Astro task automation*');
 
+  // Ensure the base branch (project branch) exists on the remote.
+  // ensureProjectBranch() treats push failures as non-fatal, so the branch
+  // may exist locally but not on origin. If gh pr create sees a missing base,
+  // it fails with a cryptic error. Push the base branch here (idempotent).
+  if (baseBranch !== 'main' && baseBranch !== 'master') {
+    try {
+      const remoteSha = await getRemoteBranchSha(gitRoot, baseBranch);
+      if (!remoteSha) {
+        console.log(`[git-pr] Base branch ${baseBranch} not on remote — pushing...`);
+        await execFileAsync(
+          'git',
+          ['-C', gitRoot, 'push', '-u', 'origin', baseBranch],
+          { env: withGitEnv(), timeout: 30_000 }
+        );
+        console.log(`[git-pr] Pushed base branch ${baseBranch} to origin`);
+      }
+    } catch (basePushErr) {
+      const bpMsg = basePushErr instanceof Error ? basePushErr.message : String(basePushErr);
+      console.warn(`[git-pr] Failed to ensure base branch ${baseBranch} on remote: ${bpMsg}`);
+      result.error = `Base branch ${baseBranch} not available on remote: ${bpMsg}`;
+      return result;
+    }
+  }
+
   // Create PR: task branch → project branch.
   // Uses --repo when available so gh doesn't depend on local git context.
   // Guard: if repoSlug is null (non-standard remote URL) and the worktree
@@ -587,7 +611,7 @@ export async function pushAndCreatePR(
     repoSlug: repoSlug ?? undefined,
   });
 
-  if (pr) {
+  if ('prUrl' in pr) {
     result.prUrl = pr.prUrl;
     result.prNumber = pr.prNumber;
     result.commitBeforeSha = options.commitBeforeSha;
@@ -612,7 +636,7 @@ export async function pushAndCreatePR(
       }
     }
   } else {
-    result.error = 'PR creation failed (gh pr create returned an error)';
+    result.error = `PR creation failed: ${pr.error}`;
   }
 
   return result;
