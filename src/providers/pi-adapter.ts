@@ -81,19 +81,27 @@ async function buildAskUserQuestionTool(stream: TaskOutputStream): Promise<ToolD
     ): Promise<{ content: { type: string; text: string }[]; details: unknown }> {
       const { question, options } = params;
 
-      const result = await stream.approvalRequest(question, options);
+      try {
+        const result = await stream.approvalRequest(question, options);
 
-      if (result.answered && result.answer) {
+        if (result.answered && result.answer) {
+          return {
+            content: [{ type: 'text', text: `User selected: ${result.answer}` }],
+            details: { answered: true, answer: result.answer },
+          };
+        }
+
         return {
-          content: [{ type: 'text', text: `User selected: ${result.answer}` }],
-          details: { answered: true, answer: result.answer },
+          content: [{ type: 'text', text: 'User did not answer the question. Proceed with your best judgment.' }],
+          details: { answered: false },
+        };
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: 'text', text: `Failed to get user approval: ${errorMessage}. Proceeding with best judgment.` }],
+          details: { answered: false, error: errorMessage },
         };
       }
-
-      return {
-        content: [{ type: 'text', text: 'User did not answer the question. Proceed with your best judgment.' }],
-        details: { answered: false },
-      };
     },
   } as ToolDefinition;
 }

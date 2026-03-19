@@ -662,6 +662,34 @@ describe('PiAdapter', () => {
       expect(result.content[0].text).toContain('did not answer');
       expect(result.details).toEqual({ answered: false });
     });
+
+    it('returns graceful error when approvalRequest rejects', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+
+      const stream = createMockStream();
+      (stream.approvalRequest as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('WebSocket disconnected'),
+      );
+
+      let askTool: any;
+      mockCreateAgentSession.mockImplementation(async (opts: any) => {
+        askTool = opts.customTools[0];
+        return { session };
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      const result = await askTool.execute('tc-ask-3', {
+        question: 'Which?',
+        options: ['X', 'Y'],
+      });
+
+      expect(result.content[0].text).toContain('Failed to get user approval');
+      expect(result.content[0].text).toContain('WebSocket disconnected');
+      expect(result.details.answered).toBe(false);
+      expect(result.details.error).toBe('WebSocket disconnected');
+    });
   });
 
   describe('getStatus', () => {
