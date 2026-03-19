@@ -48,24 +48,54 @@ const FILE_TOOLS = new Set([
 ]);
 
 /**
+ * Extract text from a Pi content-block array.
+ * Returns the concatenated text of all `{ type: "text", text: "..." }` blocks,
+ * or null if the input is not a valid Pi content array.
+ */
+function extractContentText(content: unknown): string | null {
+  if (!Array.isArray(content)) return null;
+  const texts: string[] = [];
+  for (const block of content) {
+    if (typeof block === 'object' && block != null && (block as Record<string, unknown>).type === 'text') {
+      texts.push(String((block as Record<string, string>).text ?? ''));
+    }
+  }
+  return texts.length > 0 ? texts.join('') : null;
+}
+
+/**
  * Extract plain text from a Pi SDK tool result.
  *
  * Pi tools return `{ content: [{ type: "text", text: "..." }, ...], details: ... }`.
- * If the value is already a string, return it as-is. If it matches the Pi content
- * structure, concatenate all text blocks. Otherwise fall back to JSON.stringify.
+ * Handles three forms:
+ *   1. Already a string → try JSON parse for Pi content structure, else return as-is
+ *   2. Object with `content` array → extract text blocks
+ *   3. Other object → JSON.stringify
  */
 function extractToolResultText(value: unknown): string {
   if (value == null) return '';
-  if (typeof value === 'string') return value;
-  if (typeof value === 'object' && 'content' in (value as Record<string, unknown>)) {
-    const content = (value as Record<string, unknown>).content;
-    if (Array.isArray(content)) {
-      return content
-        .filter((c: unknown) => typeof c === 'object' && c != null && (c as Record<string, unknown>).type === 'text')
-        .map((c: unknown) => (c as Record<string, string>).text ?? '')
-        .join('');
+
+  // String: might be pre-serialized Pi content JSON
+  if (typeof value === 'string') {
+    if (value.startsWith('{"content":')) {
+      try {
+        const parsed = JSON.parse(value);
+        const text = extractContentText(parsed.content);
+        if (text != null) return text;
+      } catch { /* not valid JSON, return as-is */ }
+    }
+    return value;
+  }
+
+  // Object: check for Pi content structure
+  if (typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if ('content' in obj) {
+      const text = extractContentText(obj.content);
+      if (text != null) return text;
     }
   }
+
   return JSON.stringify(value);
 }
 
