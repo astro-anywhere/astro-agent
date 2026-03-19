@@ -211,8 +211,51 @@ export async function createPullRequest(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[git-pr] Failed to create PR: ${msg}`);
+
+    // If a PR already exists for this branch, look it up instead of failing
+    if (/already exists|already a pull request/i.test(msg)) {
+      console.log(`[git-pr] PR already exists for ${options.branchName}, looking up existing PR`);
+      const existing = await findExistingPR(cwd, options.branchName, options.repoSlug);
+      if (existing) return existing;
+    }
+
+    // Try to extract PR URL from the error message itself (gh sometimes includes it)
+    const urlMatch = msg.match(/https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/(\d+)/);
+    if (urlMatch) {
+      return { prUrl: urlMatch[0], prNumber: parseInt(urlMatch[1], 10) };
+    }
+
     return null;
   }
+}
+
+/**
+ * Look up an existing PR for a given branch using `gh pr view`.
+ */
+async function findExistingPR(
+  cwd: string,
+  branchName: string,
+  repoSlug?: string,
+): Promise<{ prUrl: string; prNumber: number } | null> {
+  try {
+    const args = ['pr', 'view', branchName, '--json', 'url,number'];
+    if (repoSlug) {
+      args.push('--repo', repoSlug);
+    }
+    const { stdout } = await execFileAsync(
+      'gh',
+      args,
+      { cwd, env: withGitEnv(), timeout: 15_000 }
+    );
+    const parsed = JSON.parse(stdout.trim());
+    if (parsed.url && parsed.number) {
+      console.log(`[git-pr] Found existing PR #${parsed.number}: ${parsed.url}`);
+      return { prUrl: parsed.url, prNumber: parsed.number };
+    }
+  } catch (lookupErr) {
+    console.warn(`[git-pr] Failed to look up existing PR for ${branchName}:`, lookupErr);
+  }
+  return null;
 }
 
 /**
