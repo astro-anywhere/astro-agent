@@ -186,6 +186,56 @@ describe.skipIf(!hasAuth)('PiAdapter integration', () => {
     }
   }, 90_000);
 
+  it('tool results are plain text, not JSON-wrapped Pi content objects', async () => {
+    const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+    adapter = new PiAdapter();
+
+    const { stream, calls } = createRecordingStream();
+    const ac = new AbortController();
+
+    const result = await adapter.execute(
+      {
+        id: 'integration-nojson-1',
+        prompt: 'List the contents of the /tmp directory using the ls tool. Then say "done".',
+        workingDirectory: '/tmp',
+        type: 'execution',
+      } as any,
+      stream,
+      ac.signal,
+    );
+
+    expect(result.status).toBe('completed');
+
+    // Every toolResult text must NOT be raw JSON with "content" wrapper
+    const toolResultCalls = calls.filter(c => c.method === 'toolResult');
+    expect(toolResultCalls.length).toBeGreaterThan(0);
+
+    for (const call of toolResultCalls) {
+      const resultText = call.args[1] as string;
+      console.log(`[integration] toolResult text (${resultText.length} chars): ${resultText.slice(0, 200)}`);
+
+      // Must not be a JSON-wrapped Pi content object
+      expect(resultText).not.toMatch(/^\{"content":\[/);
+      // Must be a plain string, not start with {
+      if (resultText.startsWith('{')) {
+        // If it starts with { it should NOT be a Pi content wrapper
+        try {
+          const parsed = JSON.parse(resultText);
+          expect(parsed).not.toHaveProperty('content');
+        } catch {
+          // Not valid JSON, that's fine
+        }
+      }
+    }
+
+    // Same check for text events (from tool_execution_update)
+    const textCalls = calls.filter(c => c.method === 'text');
+    for (const call of textCalls) {
+      const text = call.args[0] as string;
+      expect(text).not.toMatch(/^\{"content":\[/);
+    }
+  }, 90_000);
+
   it('handles abort signal correctly', async () => {
     const { PiAdapter } = await import('../src/providers/pi-adapter.js');
     adapter = new PiAdapter();
