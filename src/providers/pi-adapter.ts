@@ -57,10 +57,8 @@ const FILE_TOOLS = new Set([
  * Pi runs in-process, so we pass the TaskOutputStream directly — no MCP
  * server or HTTP needed (unlike the Codex adapter which spawns a subprocess).
  */
-function buildAskUserQuestionTool(stream: TaskOutputStream): ToolDefinition {
-  // Dynamic import of TypeBox at call-time (bundled with Pi SDK)
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const { Type } = require('@sinclair/typebox');
+async function buildAskUserQuestionTool(stream: TaskOutputStream): Promise<ToolDefinition> {
+  const { Type } = await import('@sinclair/typebox');
 
   return {
     name: 'ask_user_question',
@@ -156,7 +154,7 @@ export class PiAdapter implements ProviderAdapter {
       const { session } = await createAgentSession({
         cwd: task.workingDirectory,
         sessionManager: SessionManager.inMemory(),
-        customTools: [buildAskUserQuestionTool(stream)],
+        customTools: [await buildAskUserQuestionTool(stream)],
       });
 
       // Build prompt
