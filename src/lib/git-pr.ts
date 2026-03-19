@@ -328,6 +328,79 @@ export async function getRemoteBranchSha(
 }
 
 /**
+ * Push a branch to origin with retry, delay, and post-push verification.
+ *
+ * Shared by ensureProjectBranch() and the safety net in pushAndCreatePR().
+ * Returns { ok: true } on success, { ok: false, error } on failure.
+ *
+ * - 2-attempt retry with 2s delay between attempts
+ * - "Everything up-to-date" treated as success
+ * - Post-push verification via fetch + rev-parse
+ */
+export async function pushBranchToRemote(
+  gitRoot: string,
+  branchName: string,
+  options?: {
+    /** Log visible activity text (task activity stream) */
+    text?: (data: string) => void;
+    /** Label for log messages (default: 'push') */
+    label?: string;
+  },
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const text = options?.text;
+  const label = options?.label ?? 'push';
+  const MAX_ATTEMPTS = 2;
+  let lastError: string | undefined;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      text?.(`── [Git] Pushing ${branchName} to origin (${label} attempt ${attempt}/${MAX_ATTEMPTS})...\n`);
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, 'push', '-u', 'origin', branchName],
+        { env: withGitEnv(), timeout: 30_000 }
+      );
+      lastError = undefined;
+      text?.(`── [Git] ${branchName} pushed to origin\n`);
+      console.log(`[git-pr] Pushed ${branchName} to origin (${label} attempt ${attempt})`);
+      break;
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : String(err);
+      // "everything up-to-date" is not an error
+      if (lastError.includes('Everything up-to-date') || lastError.includes('up to date')) {
+        text?.(`── [Git] ${branchName} already up-to-date on origin\n`);
+        console.log(`[git-pr] ${branchName} already up-to-date on origin`);
+        lastError = undefined;
+        break;
+      }
+      console.error(`[git-pr] ${label} attempt ${attempt} failed: ${lastError}`);
+      if (attempt < MAX_ATTEMPTS) {
+        text?.(`── [Git] Push failed (attempt ${attempt}): ${lastError}\n── [Git] Retrying in 2s...\n`);
+        await new Promise(resolve => setTimeout(resolve, 2_000));
+      }
+    }
+  }
+
+  if (lastError) {
+    text?.(`── [Git] ERROR: Failed to push ${branchName} to origin: ${lastError}\n`);
+    return { ok: false, error: `Failed to push ${branchName} to origin after ${MAX_ATTEMPTS} attempts: ${lastError}` };
+  }
+
+  // Verify the branch is actually on origin after push.
+  const remoteSha = await getRemoteBranchSha(gitRoot, branchName);
+  if (!remoteSha) {
+    const msg = `Push reported success but ${branchName} not visible on origin (fetch + rev-parse failed)`;
+    text?.(`── [Git] ERROR: ${msg}\n`);
+    console.error(`[git-pr] ${msg}`);
+    return { ok: false, error: msg };
+  }
+
+  text?.(`── [Git] Verified: ${branchName} on origin (${remoteSha.slice(0, 8)})\n`);
+  console.log(`[git-pr] Verified ${branchName} on origin (sha: ${remoteSha.slice(0, 8)})`);
+  return { ok: true };
+}
+
+/**
  * Check if `gh` CLI is available and authenticated
  */
 export async function isGhAvailable(): Promise<boolean> {
@@ -568,74 +641,21 @@ export async function pushAndCreatePR(
       ? `## Task\n\n${options.taskDescription}\n\n---\n*Created by Astro task automation*`
       : '*Created by Astro task automation*');
 
-  // Safety net: verify the base branch (project branch) exists on the remote
-  // before attempting PR creation. ensureProjectBranch() should have pushed it,
-  // but if something went wrong, recover here instead of letting gh pr create
-  // fail cryptically. This is the last line of defense.
-  if (baseBranch !== 'main' && baseBranch !== 'master') {
+  // Safety net: verify the project branch (base for PR) exists on the remote.
+  // ensureProjectBranch() handles this during workspace prep, but if the branch
+  // was deleted between prep and delivery, recover here as a last resort.
+  // Only runs for project branches (autoMerge=true), not for PRs to main/master.
+  if (options.autoMerge) {
     const remoteSha = await getRemoteBranchSha(gitRoot, baseBranch);
     if (!remoteSha) {
       console.warn(`[git-pr] Base branch ${baseBranch} not found on remote — safety-net recovery`);
-
-      // Check if the local branch exists; if not, try to create it from default branch
-      let localExists = false;
-      try {
-        await execFileAsync('git', ['-C', gitRoot, 'rev-parse', '--verify', `refs/heads/${baseBranch}`],
-          { env: withGitEnv(), timeout: 5_000 });
-        localExists = true;
-      } catch { /* local branch doesn't exist */ }
-
-      if (!localExists) {
-        // Try to create the branch locally from the default branch
-        const defaultBr = await getDefaultBranch(gitRoot);
-        console.warn(`[git-pr] Local branch ${baseBranch} missing — creating from ${defaultBr}`);
-        try {
-          const remoteDefault = `origin/${defaultBr}`;
-          await execFileAsync('git', ['-C', gitRoot, 'branch', baseBranch, remoteDefault],
-            { env: withGitEnv(), timeout: 10_000 });
-          console.log(`[git-pr] Created local branch ${baseBranch} from ${remoteDefault}`);
-        } catch (createErr) {
-          const cMsg = createErr instanceof Error ? createErr.message : String(createErr);
-          if (!cMsg.includes('already exists')) {
-            result.error = `Base branch ${baseBranch} does not exist locally or on remote, and could not be created: ${cMsg}`;
-            return result;
-          }
-        }
-      }
-
-      // Push with retry (2 attempts)
-      let pushOk = false;
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          console.log(`[git-pr] Pushing base branch ${baseBranch} to origin (safety-net attempt ${attempt}/2)`);
-          await execFileAsync('git', ['-C', gitRoot, 'push', '-u', 'origin', baseBranch],
-            { env: withGitEnv(), timeout: 30_000 });
-          pushOk = true;
-          console.log(`[git-pr] Safety-net push succeeded (attempt ${attempt})`);
-          break;
-        } catch (pushErr) {
-          const pMsg = pushErr instanceof Error ? pushErr.message : String(pushErr);
-          if (pMsg.includes('Everything up-to-date') || pMsg.includes('up to date')) {
-            pushOk = true;
-            break;
-          }
-          console.error(`[git-pr] Safety-net push attempt ${attempt} failed: ${pMsg}`);
-        }
-      }
-
-      if (!pushOk) {
-        result.error = `Base branch ${baseBranch} not available on remote after safety-net push. PR delivery cannot proceed.`;
+      const pushRecovery = await pushBranchToRemote(gitRoot, baseBranch, {
+        label: 'safety-net',
+      });
+      if (!pushRecovery.ok) {
+        result.error = `Base branch ${baseBranch} not on remote: ${pushRecovery.error}. PR delivery cannot proceed.`;
         return result;
       }
-
-      // Verify the branch is actually on the remote
-      const verifiedSha = await getRemoteBranchSha(gitRoot, baseBranch);
-      if (!verifiedSha) {
-        console.error(`[git-pr] Base branch ${baseBranch} still not on remote after push`);
-        result.error = `Base branch ${baseBranch} pushed but not visible on remote. GitHub may be experiencing delays.`;
-        return result;
-      }
-      console.log(`[git-pr] Verified base branch ${baseBranch} on remote (sha: ${verifiedSha.slice(0, 8)})`);
     }
   }
 

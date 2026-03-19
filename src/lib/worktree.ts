@@ -7,6 +7,7 @@ import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { applyWorktreeInclude } from './worktree-include.js';
 import { runSetupScript } from './worktree-setup.js';
 import { repoHasRemote } from './workdir-safety.js';
+import { pushBranchToRemote } from './git-pr.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -435,67 +436,17 @@ async function ensureProjectBranch(
     }
 
     // Push the project branch to origin — required for PR mode to work.
-    // Retry once on transient failures.
-    const MAX_PUSH_ATTEMPTS = 2;
-    let pushError: string | undefined;
-
-    for (let attempt = 1; attempt <= MAX_PUSH_ATTEMPTS; attempt++) {
-      try {
-        text?.(`── [Git] Pushing project branch ${projectBranch} to origin (attempt ${attempt}/${MAX_PUSH_ATTEMPTS})...\n`);
-        await execFileAsync(
-          'git',
-          ['-C', gitRoot, 'push', '-u', 'origin', projectBranch],
-          { env: withGitEnv(), timeout: 30_000 }
-        );
-        pushError = undefined;
-        text?.(`── [Git] Project branch ${projectBranch} pushed to origin\n`);
-        console.log(`[worktree] Pushed project branch ${projectBranch} to origin (attempt ${attempt})`);
-        break;
-      } catch (err) {
-        pushError = err instanceof Error ? err.message : String(err);
-        // "everything up-to-date" is not an error — branch already exists on origin
-        if (pushError.includes('Everything up-to-date') || pushError.includes('up to date')) {
-          text?.(`── [Git] Project branch ${projectBranch} already up-to-date on origin\n`);
-          console.log(`[worktree] Project branch ${projectBranch} already up-to-date on origin`);
-          pushError = undefined;
-          break;
-        }
-        console.error(`[worktree] Push project branch attempt ${attempt} failed: ${pushError}`);
-        if (attempt < MAX_PUSH_ATTEMPTS) {
-          text?.(`── [Git] Push failed (attempt ${attempt}): ${pushError}\n── [Git] Retrying...\n`);
-        }
-      }
-    }
-
-    if (pushError) {
-      text?.(`── [Git] ERROR: Failed to push project branch ${projectBranch} to origin: ${pushError}\n`);
+    // Uses shared helper: 2-attempt retry with 2s delay + post-push verification.
+    const pushResult = await pushBranchToRemote(gitRoot, projectBranch, {
+      text,
+      label: 'ensureProjectBranch',
+    });
+    if (!pushResult.ok) {
       text?.(`── [Git] PR delivery will fail — the base branch must exist on GitHub for PRs.\n`);
       throw new Error(
-        `Failed to push project branch ${projectBranch} to origin after ${MAX_PUSH_ATTEMPTS} attempts: ${pushError}. `
-        + `PR delivery requires the project branch to exist on the remote. `
+        `${pushResult.error}. PR delivery requires the project branch to exist on the remote. `
         + `Check: git remote permissions, SSH keys, network connectivity.`
       );
-    }
-
-    // Verify the branch is actually on origin after push.
-    // git push can succeed but the branch may not appear if there's a ref mismatch.
-    try {
-      const { stdout: lsRemoteOut } = await execFileAsync(
-        'git',
-        ['-C', gitRoot, 'ls-remote', '--heads', 'origin', projectBranch],
-        { env: withGitEnv(), timeout: 15_000 }
-      );
-      if (lsRemoteOut.trim()) {
-        text?.(`── [Git] Verified: ${projectBranch} exists on origin\n`);
-        console.log(`[worktree] Verified project branch ${projectBranch} on origin via ls-remote`);
-      } else {
-        text?.(`── [Git] WARNING: push succeeded but ls-remote does not show ${projectBranch} on origin\n`);
-        console.warn(`[worktree] Push succeeded but ls-remote shows no ${projectBranch} on origin — PR delivery may fail`);
-      }
-    } catch (lsErr) {
-      const lsMsg = lsErr instanceof Error ? lsErr.message : String(lsErr);
-      text?.(`── [Git] WARNING: Could not verify branch on origin: ${lsMsg}\n`);
-      console.warn(`[worktree] ls-remote verification failed: ${lsMsg}`);
     }
   } else {
     // --- Local mode (no remote): create branch locally only ---
