@@ -603,22 +603,58 @@ describe('PiAdapter', () => {
       expect(stream.toolResult).toHaveBeenCalledWith('bash', '{"lines":["a","b"]}', true, undefined);
     });
 
-    it('extracts text from Pi content-structured tool results', async () => {
+    it('extracts text from Pi content-structured tool results (object)', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
       const stream = createMockStream();
 
       session.prompt = vi.fn().mockImplementation(async () => {
-        session.emit({ type: 'tool_execution_start', toolName: 'bash', args: { command: 'ls' }, toolCallId: 'tc-pi' });
+        session.emit({ type: 'tool_execution_start', toolName: 'ls', args: { path: '.' }, toolCallId: 'tc-pi' });
         session.emit({
-          type: 'tool_execution_end', toolName: 'bash', toolCallId: 'tc-pi', isError: false,
+          type: 'tool_execution_end', toolName: 'ls', toolCallId: 'tc-pi', isError: false,
           result: { content: [{ type: 'text', text: 'file1.ts\nfile2.ts\n' }], details: {} },
         });
       });
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
-      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'file1.ts\nfile2.ts\n', true, 'tc-pi');
+      expect(stream.toolResult).toHaveBeenCalledWith('ls', 'file1.ts\nfile2.ts\n', true, 'tc-pi');
+    });
+
+    it('extracts text from Pi content-structured tool results (undefined details)', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      // Pi ls tool returns { content: [...], details: undefined } for empty dirs
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({
+          type: 'tool_execution_end', toolName: 'ls', isError: false,
+          result: { content: [{ type: 'text', text: '(empty directory)' }], details: undefined },
+        });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.toolResult).toHaveBeenCalledWith('ls', '(empty directory)', true, undefined);
+    });
+
+    it('extracts text from pre-serialized JSON string tool results', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      // Some code paths may stringify the result before emitting
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({
+          type: 'tool_execution_end', toolName: 'ls', isError: false,
+          result: '{"content":[{"type":"text","text":"daily_paper\\npaper_reading\\n"}],"details":{}}',
+        });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.toolResult).toHaveBeenCalledWith('ls', 'daily_paper\npaper_reading\n', true, undefined);
     });
 
     it('extracts text from Pi content-structured partial results', async () => {
@@ -636,6 +672,23 @@ describe('PiAdapter', () => {
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
       expect(stream.text).toHaveBeenCalledWith('streaming output\n');
+    });
+
+    it('extracts text from pre-serialized JSON string partial results', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({
+          type: 'tool_execution_update', toolName: 'bash', toolCallId: 'tc-pi',
+          partialResult: '{"content":[{"type":"text","text":"streaming\\n"}],"details":{}}',
+        });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.text).toHaveBeenCalledWith('streaming\n');
     });
 
     it('concatenates multiple text blocks in Pi content result', async () => {
@@ -659,6 +712,23 @@ describe('PiAdapter', () => {
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
       expect(stream.toolResult).toHaveBeenCalledWith('bash', 'part1part2', true, undefined);
+    });
+
+    it('passes plain string results through unchanged', async () => {
+      const { PiAdapter } = await import('../src/providers/pi-adapter.js');
+      adapter = new PiAdapter();
+      const stream = createMockStream();
+
+      session.prompt = vi.fn().mockImplementation(async () => {
+        session.emit({
+          type: 'tool_execution_end', toolName: 'bash', isError: false,
+          result: 'plain text output',
+        });
+      });
+
+      await adapter.execute(baseTask(), stream, new AbortController().signal);
+
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'plain text output', true, undefined);
     });
   });
 
