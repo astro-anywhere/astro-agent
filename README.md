@@ -20,6 +20,17 @@
 
 ---
 
+<details open>
+<summary><h2>📰 News</h2></summary>
+
+| Date | Update |
+|:-----|:-------|
+| **2026-03-19** | **🤖 Pi Coding Agent support** &mdash; Astro now natively supports [Pi](https://github.com/badlogic/pi-mono), the coding agent powering [OpenClaw](https://github.com/openclaw-ai/openclaw). Auto-detected at launch alongside Claude Code, Codex, and OpenCode. Full streaming, tool result rendering, session preservation, and multi-turn resume. |
+
+</details>
+
+---
+
 ## What is Astro?
 
 [**Astro**](https://astroanywhere.com/landing/) is an orchestrator for AI coding agents. It takes a complex goal, decomposes it into a dependency graph of tasks, and executes them **in parallel** across your machines &mdash; your laptop, GPU servers, HPC clusters, cloud VMs.
@@ -572,8 +583,11 @@ Astro works with the AI coding agents you already use. Install any supported age
 |---|---|---|
 | **Claude Code** | `npm i -g @anthropic-ai/claude-code` | [anthropic.com/claude-code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) |
 | **Codex** | `npm i -g @openai/codex` | [github.com/openai/codex](https://github.com/openai/codex) |
+| **Pi** | `npm i -g @mariozechner/pi-coding-agent` | [github.com/badlogic/pi-mono](https://github.com/badlogic/pi-mono) |
 | **OpenClaw** | `npm i -g openclaw` | [github.com/openclaw-ai/openclaw](https://github.com/openclaw-ai/openclaw) |
 | **OpenCode** | `bun i -g opencode` | [github.com/opencode-ai/opencode](https://github.com/opencode-ai/opencode) |
+
+Pi is the coding agent that powers OpenClaw. If you have OpenClaw installed, Pi is already available &mdash; Astro detects it automatically. You can also install Pi standalone for direct access to its multi-provider model support (Anthropic, OpenAI, Google, Bedrock, custom providers via `models.json`).
 
 All agents get full project context injection, real-time output streaming, and session preservation for multi-turn resume. Your API keys stay on your machine &mdash; Astro never sees them.
 
