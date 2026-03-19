@@ -426,13 +426,12 @@ export class PiAdapter implements ProviderAdapter {
         }
 
         case 'tool_execution_update': {
-          // Partial/streaming tool output (e.g., bash stdout in real time)
-          const ev = event as any;
-          const partial = ev.partialResult;
-          if (partial != null) {
-            const text = extractToolResultText(partial);
-            if (text) stream.text(text);
-          }
+          // Partial/streaming tool output (e.g., bash stdout in real time).
+          // Do NOT emit as stream.text() — that pollutes the assistant text
+          // stream and causes raw tool output (file paths, bash lines) to
+          // display as unformatted text in the web UI conversation view.
+          // The complete result arrives via tool_execution_end → stream.toolResult()
+          // which renders properly in structured tool blocks.
           break;
         }
 

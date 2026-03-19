@@ -369,7 +369,7 @@ describe('PiAdapter', () => {
       expect(stream.toolResult).toHaveBeenCalledWith('read', 'contents', true, 'tc-123');
     });
 
-    it('streams tool_execution_update partial results as text', async () => {
+    it('silently ignores tool_execution_update (no text pollution)', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
       const stream = createMockStream();
@@ -383,11 +383,13 @@ describe('PiAdapter', () => {
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
-      expect(stream.text).toHaveBeenCalledWith('file1.ts\n');
-      expect(stream.text).toHaveBeenCalledWith('file2.ts\n');
+      // tool_execution_update should NOT produce text events (prevents raw output in web UI)
+      expect(stream.text).not.toHaveBeenCalled();
+      // The complete result comes via toolResult from tool_execution_end
+      expect(stream.toolResult).toHaveBeenCalledWith('bash', 'file1.ts\nfile2.ts\n', true, 'tc-1');
     });
 
-    it('handles object partialResult in tool_execution_update', async () => {
+    it('ignores object partialResult in tool_execution_update', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
       const stream = createMockStream();
@@ -398,7 +400,7 @@ describe('PiAdapter', () => {
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
-      expect(stream.text).toHaveBeenCalledWith('{"progress":50}');
+      expect(stream.text).not.toHaveBeenCalled();
     });
 
     it('ignores null/undefined partialResult in tool_execution_update', async () => {
@@ -657,7 +659,7 @@ describe('PiAdapter', () => {
       expect(stream.toolResult).toHaveBeenCalledWith('ls', 'daily_paper\npaper_reading\n', true, undefined);
     });
 
-    it('extracts text from Pi content-structured partial results', async () => {
+    it('ignores Pi content-structured partial results in tool_execution_update', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
       const stream = createMockStream();
@@ -671,10 +673,11 @@ describe('PiAdapter', () => {
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
-      expect(stream.text).toHaveBeenCalledWith('streaming output\n');
+      // tool_execution_update is now silently ignored
+      expect(stream.text).not.toHaveBeenCalled();
     });
 
-    it('extracts text from pre-serialized JSON string partial results', async () => {
+    it('ignores pre-serialized JSON string partial results in tool_execution_update', async () => {
       const { PiAdapter } = await import('../src/providers/pi-adapter.js');
       adapter = new PiAdapter();
       const stream = createMockStream();
@@ -688,7 +691,8 @@ describe('PiAdapter', () => {
 
       await adapter.execute(baseTask(), stream, new AbortController().signal);
 
-      expect(stream.text).toHaveBeenCalledWith('streaming\n');
+      // tool_execution_update is now silently ignored
+      expect(stream.text).not.toHaveBeenCalled();
     });
 
     it('concatenates multiple text blocks in Pi content result', async () => {
@@ -905,7 +909,7 @@ describe('PiAdapter', () => {
       // Verify all event types were streamed
       expect(stream.text).toHaveBeenCalledWith('thinking...');
       expect(stream.toolUse).toHaveBeenCalledWith('bash', { command: 'ls' }, 'tc-r1');
-      expect(stream.text).toHaveBeenCalledWith('file.ts\n');
+      // tool_execution_update is silently ignored (no stream.text('file.ts\n'))
       expect(stream.toolResult).toHaveBeenCalledWith('bash', 'file.ts\n', true, 'tc-r1');
 
       // Should NOT emit sessionInit (includeLifecycle=false)
