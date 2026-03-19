@@ -166,7 +166,7 @@ export async function createWorktree(
   let projectWorktreePath: string | undefined;
   if (projectBranchName && shortProjectId) {
     projectWorktreePath = await createProjectWorktree(
-      gitRoot, projectBranchName, baseRoot, sanitize(shortProjectId),
+      gitRoot, projectBranchName, baseRoot, sanitize(shortProjectId), text,
     ) ?? undefined;
   }
 
@@ -543,6 +543,7 @@ export async function createProjectWorktree(
   projectBranch: string,
   baseRoot: string,
   shortProjectId: string,
+  text?: (data: string) => void,
 ): Promise<string | null> {
   const projectWorktreePath = join(baseRoot, shortProjectId);
 
@@ -574,6 +575,7 @@ export async function createProjectWorktree(
       return projectWorktreePath;
     }
     console.warn(`[worktree] Failed to create project worktree: ${msg}`);
+    text?.(`── [Git] WARNING: Could not create project worktree (file browsing between tasks may be unavailable): ${msg}\n`);
     return null;
   }
 }
@@ -616,8 +618,10 @@ export async function syncProjectWorktree(
         { env: withGitEnv(), timeout: 15_000 }
       );
       checkoutRef = `origin/${projectBranch}`;
-    } catch {
-      // Fetch failed — fall back to local ref (best effort)
+    } catch (fetchErr) {
+      const fetchMsg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
+      console.warn(`[worktree] syncProjectWorktree: fetch origin/${projectBranch} failed: ${fetchMsg}`);
+      // Fall back to local ref (best effort)
     }
   }
 
@@ -677,8 +681,10 @@ async function deleteRemoteBranch(gitRoot: string, branchName: string): Promise<
       { env: withGitEnv(), timeout: 15_000 }
     );
     console.log(`[worktree] Deleted remote branch ${branchName}`);
-  } catch {
-    // Remote branch didn't exist — that's fine
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Expected: branch didn't exist on remote. Log at debug level.
+    console.log(`[worktree] Remote branch ${branchName} not deleted (expected if not pushed): ${msg}`);
   }
 }
 
