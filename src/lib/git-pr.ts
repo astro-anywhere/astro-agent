@@ -570,25 +570,72 @@ export async function pushAndCreatePR(
 
   // Safety net: verify the base branch (project branch) exists on the remote
   // before attempting PR creation. ensureProjectBranch() should have pushed it,
-  // but if something went wrong, catch it here with a clear error instead of
-  // letting gh pr create fail cryptically.
+  // but if something went wrong, recover here instead of letting gh pr create
+  // fail cryptically. This is the last line of defense.
   if (baseBranch !== 'main' && baseBranch !== 'master') {
-    try {
-      const remoteSha = await getRemoteBranchSha(gitRoot, baseBranch);
-      if (!remoteSha) {
-        console.warn(`[git-pr] Base branch ${baseBranch} not found on remote — attempting push`);
-        await execFileAsync(
-          'git',
-          ['-C', gitRoot, 'push', '-u', 'origin', baseBranch],
-          { env: withGitEnv(), timeout: 30_000 }
-        );
-        console.log(`[git-pr] Pushed base branch ${baseBranch} to origin (safety net)`);
+    const remoteSha = await getRemoteBranchSha(gitRoot, baseBranch);
+    if (!remoteSha) {
+      console.warn(`[git-pr] Base branch ${baseBranch} not found on remote — safety-net recovery`);
+
+      // Check if the local branch exists; if not, try to create it from default branch
+      let localExists = false;
+      try {
+        await execFileAsync('git', ['-C', gitRoot, 'rev-parse', '--verify', `refs/heads/${baseBranch}`],
+          { env: withGitEnv(), timeout: 5_000 });
+        localExists = true;
+      } catch { /* local branch doesn't exist */ }
+
+      if (!localExists) {
+        // Try to create the branch locally from the default branch
+        const defaultBr = await getDefaultBranch(gitRoot);
+        console.warn(`[git-pr] Local branch ${baseBranch} missing — creating from ${defaultBr}`);
+        try {
+          const remoteDefault = `origin/${defaultBr}`;
+          await execFileAsync('git', ['-C', gitRoot, 'branch', baseBranch, remoteDefault],
+            { env: withGitEnv(), timeout: 10_000 });
+          console.log(`[git-pr] Created local branch ${baseBranch} from ${remoteDefault}`);
+        } catch (createErr) {
+          const cMsg = createErr instanceof Error ? createErr.message : String(createErr);
+          if (!cMsg.includes('already exists')) {
+            result.error = `Base branch ${baseBranch} does not exist locally or on remote, and could not be created: ${cMsg}`;
+            return result;
+          }
+        }
       }
-    } catch (basePushErr) {
-      const bpMsg = basePushErr instanceof Error ? basePushErr.message : String(basePushErr);
-      console.error(`[git-pr] Failed to ensure base branch ${baseBranch} on remote: ${bpMsg}`);
-      result.error = `Base branch ${baseBranch} not available on remote: ${bpMsg}`;
-      return result;
+
+      // Push with retry (2 attempts)
+      let pushOk = false;
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          console.log(`[git-pr] Pushing base branch ${baseBranch} to origin (safety-net attempt ${attempt}/2)`);
+          await execFileAsync('git', ['-C', gitRoot, 'push', '-u', 'origin', baseBranch],
+            { env: withGitEnv(), timeout: 30_000 });
+          pushOk = true;
+          console.log(`[git-pr] Safety-net push succeeded (attempt ${attempt})`);
+          break;
+        } catch (pushErr) {
+          const pMsg = pushErr instanceof Error ? pushErr.message : String(pushErr);
+          if (pMsg.includes('Everything up-to-date') || pMsg.includes('up to date')) {
+            pushOk = true;
+            break;
+          }
+          console.error(`[git-pr] Safety-net push attempt ${attempt} failed: ${pMsg}`);
+        }
+      }
+
+      if (!pushOk) {
+        result.error = `Base branch ${baseBranch} not available on remote after safety-net push. PR delivery cannot proceed.`;
+        return result;
+      }
+
+      // Verify the branch is actually on the remote
+      const verifiedSha = await getRemoteBranchSha(gitRoot, baseBranch);
+      if (!verifiedSha) {
+        console.error(`[git-pr] Base branch ${baseBranch} still not on remote after push`);
+        result.error = `Base branch ${baseBranch} pushed but not visible on remote. GitHub may be experiencing delays.`;
+        return result;
+      }
+      console.log(`[git-pr] Verified base branch ${baseBranch} on remote (sha: ${verifiedSha.slice(0, 8)})`);
     }
   }
 
