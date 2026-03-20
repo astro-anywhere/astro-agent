@@ -55,8 +55,8 @@ describe('TaskDispatch type definitions (server/types/relay.ts)', () => {
     expect(dispatch.model).toBe('claude-sonnet-4-20250514')
   })
 
-  it('all 4 TaskDispatchType values are valid', () => {
-    const types: TaskDispatchType[] = ['execution', 'plan', 'chat', 'summarize']
+  it('all 5 TaskDispatchType values are valid', () => {
+    const types: TaskDispatchType[] = ['execution', 'plan', 'chat', 'summarize', 'playground']
     types.forEach(t => {
       const dispatch: TaskDispatch = {
         taskId: `task-${t}`,
@@ -145,8 +145,8 @@ describe('Agent runner Task type (packages/agent-runner/src/types.ts)', () => {
 
   it('TaskDispatchType values match between server and agent runner', () => {
     // These should be the same union type
-    const serverTypes: TaskDispatchType[] = ['execution', 'plan', 'chat', 'summarize']
-    const agentTypes: AgentTaskDispatchType[] = ['execution', 'plan', 'chat', 'summarize']
+    const serverTypes: TaskDispatchType[] = ['execution', 'plan', 'chat', 'summarize', 'playground']
+    const agentTypes: AgentTaskDispatchType[] = ['execution', 'plan', 'chat', 'summarize', 'playground']
     expect(serverTypes).toEqual(agentTypes)
   })
 

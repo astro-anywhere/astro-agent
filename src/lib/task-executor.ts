@@ -325,7 +325,7 @@ export class TaskExecutor {
     // Skip workingDirectory resolution for lightweight text-only tasks (no file system access)
     const isTextOnlyTask = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan' || task.type === 'playground';
 
-    // Text-only tasks (plan/chat/summarize) can run without a working directory.
+    // Text-only tasks (plan/chat/summarize/playground) can run without a working directory.
     // For all others, resolve the directory or auto-provision one.
     let resolvedWorkDir: string | undefined;
     if (isTextOnlyTask && !task.workingDirectory) {
@@ -1137,7 +1137,7 @@ export class TaskExecutor {
       );
     }, TASK_HEARTBEAT_INTERVAL_MS);
 
-    // Text-only tasks (plan/chat/summarize) without a working directory skip workspace prep
+    // Text-only tasks (plan/chat/summarize/playground) without a working directory skip workspace prep
     const isTextOnly = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan' || normalizedTask.type === 'playground';
     let prepared: Awaited<ReturnType<typeof this.prepareTaskWorkspace>>;
     try {

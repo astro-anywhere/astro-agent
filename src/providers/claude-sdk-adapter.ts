@@ -607,12 +607,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
   }
 
   /**
-   * Fast path for text-only tasks (chat, summarize).
+   * Fast path for summarize tasks.
    * Skips HPC context, MCP servers, tool infrastructure, canUseTool handler,
    * sandbox, and image handling to minimize time-to-first-token.
-   *
-   * Chat tasks load settingSources so user skills (~/.claude/skills/) are available.
-   * Summarize tasks skip settingSources (no skills needed for structured extraction).
+   * Uses no tools — pure structured text extraction.
    */
   private async runTextOnlyQuery(
     task: NormalizedTask,
@@ -626,20 +624,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     artifacts?: TaskArtifact[];
     metrics?: TaskResult['metrics'];
   }> {
-    // Chat tasks get read-only tools + Skill for user skill invocation;
-    // summarize tasks stay text-only
-    const isChatTask = task.type === 'chat';
-    const chatAllowedTools = hasWorkdir
-      ? ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Skill']
-      : ['WebSearch', 'WebFetch', 'Skill'];
-
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
       ...(task.maxTurns != null ? { maxTurns: task.maxTurns } : {}),
-      permissionMode: isChatTask ? 'bypassPermissions' : 'plan',
-      ...(isChatTask ? {} : { tools: [] }),
-      // Chat tasks load user skills via settingSources; summarize tasks skip for speed
-      ...(isChatTask ? { settingSources: ['user', 'project', 'local'] as const } : {}),
+      permissionMode: 'plan',
+      tools: [],
       persistSession: true,
       ...(hasWorkdir ? { cwd: task.workingDirectory } : {}),
       ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
@@ -652,14 +641,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       env: {
         ...process.env,
         ...task.environment,
-        // Enable ~/.claude/skills/ discovery so user-defined skills are available in chat
-        ...(isChatTask ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' } : {}),
       },
     };
-
-    if (isChatTask) {
-      (options as Record<string, unknown>).allowedTools = chatAllowedTools;
-    }
 
     if (task.systemPrompt) {
       (options as Record<string, unknown>).systemPrompt = task.systemPrompt;
@@ -679,7 +662,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         : conversationContext;
     }
 
-    console.log(`[claude-sdk] Fast path: text-only task (type=${task.type}, model=${task.model ?? 'default'})`);
+    console.log(`[claude-sdk] Fast path: summarize task (model=${task.model ?? 'default'})`);
 
     // Wrap prompt in async iterable so isSingleUserTurn=false and stdin stays open for steering
     const promptIterable = {
@@ -698,8 +681,6 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     let success = true;
     let errorMessage: string | undefined;
     let resultMetrics: TaskResult['metrics'] | undefined;
-    // Map tool_use_id → tool name for matching results back to uses
-    const toolUseNames = new Map<string, string>();
 
     for await (const msg of gen) {
       if (msg.type === 'system' && msg.subtype === 'init') {
@@ -714,30 +695,6 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           if (block.type === 'text') {
             output += block.text;
             stream.text(block.text);
-          } else if (block.type === 'tool_use') {
-            if (block.id) toolUseNames.set(block.id, block.name);
-            stream.toolUse(block.name, block.input, block.id);
-            // Emit file change events for write/edit tools
-            if (block.name === 'Write' || block.name === 'Edit') {
-              const input = block.input as Record<string, unknown>;
-              if (input.file_path) {
-                const action = block.name === 'Write' ? 'created' : 'modified';
-                stream.fileChange(String(input.file_path), action as 'created' | 'modified' | 'deleted');
-              }
-            }
-          }
-        }
-      } else if (msg.type === 'user') {
-        // Tool results from the SDK
-        for (const block of msg.message.content) {
-          if (typeof block === 'string') continue;
-          if (block.type === 'tool_result') {
-            const resultContent = typeof block.content === 'string'
-              ? block.content
-              : JSON.stringify(block.content);
-            const isError = block.is_error ?? false;
-            const resolvedName = block.tool_use_id ? toolUseNames.get(block.tool_use_id) : undefined;
-            stream.toolResult(resolvedName || block.tool_use_id || 'unknown', resultContent, !isError, block.tool_use_id);
           }
         }
       } else if (msg.type === 'result') {
