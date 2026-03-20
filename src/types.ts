@@ -110,7 +110,7 @@ export type TaskStatus =
  * Dispatch task type — tells the agent runner what kind of work this is.
  * Matches TaskDispatchType in server/types/relay.ts.
  */
-export type TaskDispatchType = 'execution' | 'plan' | 'chat' | 'summarize';
+export type TaskDispatchType = 'execution' | 'plan' | 'chat' | 'summarize' | 'playground';
 
 /**
  * A single message in a conversation history.
