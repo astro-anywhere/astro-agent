@@ -966,10 +966,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       }
     }
 
-    // All task types (including plan) get the same tool set. The prompt
-    // controls whether the agent plans or executes — tool restrictions are
-    // not needed since Bash can do anything anyway. MCP tools are available
-    // to all pathways so plan agents can use astro-cli MCP tools directly.
+    // All task types (including plan) get the same tool set. Plan tasks
+    // were previously restricted to read-only tools (Read/Glob/Grep/WebSearch/
+    // WebFetch), but now need Bash for astro-cli plan mutations and full MCP
+    // access. The system prompt constrains plan agent behavior, not tool-level
+    // restrictions.
     if (!hasWorkdir) {
       // For tasks without a working directory, disable file system and shell tools
       // but keep web search so the agent can research. MCP tools are also allowed.
