@@ -13,6 +13,7 @@ import type {
   TaskResultMessage,
   TaskToolTraceMessage,
   TaskTextMessage,
+  TaskOperationalMessage,
   TaskToolUseMessage,
   TaskToolResultWSMessage,
   TaskFileChangeMessage,
@@ -75,6 +76,25 @@ const DEFAULT_CONFIG: RunnerConfig = {
   taskTimeout: 3600000, // 1 hour
   logLevel: 'info',
 };
+
+type DispatchPublicKey = NonNullable<Task['dispatchTrustedKeys']>[number];
+
+function mergeDispatchPublicKeys(
+  configuredKeys: DispatchPublicKey[],
+  additionalKeys?: DispatchPublicKey[],
+): DispatchPublicKey[] {
+  const seen = new Set<string>();
+  const merged: DispatchPublicKey[] = [];
+
+  for (const key of [...configuredKeys, ...(additionalKeys ?? [])]) {
+    const fingerprint = `${key.kty ?? ''}:${key.crv ?? ''}:${key.x ?? ''}:${key.y ?? ''}`;
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    merged.push(key);
+  }
+
+  return merged;
+}
 
 export interface WebSocketClientOptions {
   runnerId: string;
@@ -523,6 +543,18 @@ export class WebSocketClient {
       type: 'task_text',
       timestamp: new Date().toISOString(),
       payload: { taskId, text, sequence },
+    };
+    this.send(msg);
+  }
+
+  /**
+   * Send a structured operational status line.
+   */
+  sendTaskOperational(taskId: string, message: string, source: 'astro' | 'git' | 'delivery'): void {
+    const msg: TaskOperationalMessage = {
+      type: 'task_operational',
+      timestamp: new Date().toISOString(),
+      payload: { taskId, message, source },
     };
     this.send(msg);
   }
@@ -1107,7 +1139,10 @@ export class WebSocketClient {
     const task = message.payload;
 
     // Verify dispatch signature if present
-    const publicKeys = configManager.getDispatchPublicKeys();
+    const publicKeys = mergeDispatchPublicKeys(
+      configManager.getDispatchPublicKeys(),
+      task.dispatchTrustedKeys,
+    );
     const requireSigned = configManager.getRequireSignedDispatches();
 
     if (task.dispatchSignature && task.dispatchSigningPayload) {

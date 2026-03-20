@@ -322,13 +322,16 @@ export class TaskExecutor {
     this.claimedTasks.add(task.id);
     try {
 
-    // Skip workingDirectory resolution for lightweight text-only tasks (no file system access)
-    const isTextOnlyTask = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan';
+    // Only execution tasks need workingDirectory resolution, safety checks,
+    // git diff, and summary generation. All other types (plan/chat/summarize/
+    // playground) skip this overhead but still get full tool access when they
+    // have a working directory.
+    const isExecutionTask = !task.type || task.type === 'execution';
 
-    // Text-only tasks (plan/chat/summarize) can run without a working directory.
-    // For all others, resolve the directory or auto-provision one.
+    // Non-execution tasks can run without a working directory.
+    // For execution tasks, resolve the directory or auto-provision one.
     let resolvedWorkDir: string | undefined;
-    if (isTextOnlyTask && !task.workingDirectory) {
+    if (!isExecutionTask && !task.workingDirectory) {
       resolvedWorkDir = undefined;
     } else {
       try {
@@ -360,7 +363,7 @@ export class TaskExecutor {
     // thinks worktree isolation is active and allows parallel execution, but
     // prepareTaskWorkspace() later falls back to direct in-place execution —
     // causing file conflicts when multiple tasks run on the same non-git directory.
-    const isGitDir = !isTextOnlyTask && normalizedTask.workingDirectory && this.gitAvailable
+    const isGitDir = isExecutionTask && normalizedTask.workingDirectory && this.gitAvailable
       ? await isGitRepo(normalizedTask.workingDirectory)
       : false;
     const willUseWorktree = this.useWorktree
@@ -368,7 +371,7 @@ export class TaskExecutor {
       && normalizedTask.deliveryMode !== 'direct'
       && (isGitDir || normalizedTask.deliveryMode === 'copy');
 
-    if (!isTextOnlyTask && task.skipSafetyCheck) {
+    if (isExecutionTask && task.skipSafetyCheck) {
       // Server already approved safety for this directory — skip the prompt.
       // Only init git when the original safety decision was 'init-git'.
       // When safetyDecision is 'proceed' (user chose non-git direct execution)
@@ -389,7 +392,7 @@ export class TaskExecutor {
       return;
     }
 
-    if (!isTextOnlyTask) {
+    if (isExecutionTask) {
       // Perform safety check (worktree flag affects tier assignment)
       const safetyCheck = await this.performSafetyCheck(normalizedTask, willUseWorktree);
 
@@ -718,6 +721,9 @@ export class TaskExecutor {
       text: (data: string) => {
         this.wsClient.sendTaskText(taskId, data, textSequence++);
       },
+      operational: (message: string, source: 'astro' | 'git' | 'delivery') => {
+        this.wsClient.sendTaskOperational(taskId, message, source);
+      },
       toolUse: (toolName: string, toolInput: unknown, toolUseId?: string) => {
         this.wsClient.sendTaskToolUse(taskId, toolName, toolInput, toolUseId);
       },
@@ -756,6 +762,7 @@ export class TaskExecutor {
             projectBranch: meta.projectBranch,
             stdout: stream.stdout,
             stderr: stream.stderr,
+            operational: stream.operational,
           });
           if (worktree) {
             resumeDir = worktree.workingDirectory;
@@ -1075,6 +1082,10 @@ export class TaskExecutor {
         resetIdleTimeout();
         this.wsClient.sendTaskText(normalizedTask.id, data, textSequence++);
       },
+      operational: (message: string, source: 'astro' | 'git' | 'delivery') => {
+        resetIdleTimeout();
+        this.wsClient.sendTaskOperational(normalizedTask.id, message, source);
+      },
       toolUse: (toolName: string, toolInput: unknown, toolUseId?: string) => {
         resetIdleTimeout();
         this.wsClient.sendTaskToolUse(normalizedTask.id, toolName, toolInput, toolUseId);
@@ -1137,11 +1148,12 @@ export class TaskExecutor {
       );
     }, TASK_HEARTBEAT_INTERVAL_MS);
 
-    // Text-only tasks (plan/chat/summarize) without a working directory skip workspace prep
-    const isTextOnly = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan';
+    // Only execution tasks get git diff, delivery, and summary — all other types (chat, plan, playground, summarize) skip them.
+    // These non-execution types still get full tool access when they have a working directory.
+    const isExecutionTask = !normalizedTask.type || normalizedTask.type === 'execution';
     let prepared: Awaited<ReturnType<typeof this.prepareTaskWorkspace>>;
     try {
-      prepared = isTextOnly && !normalizedTask.workingDirectory
+      prepared = !isExecutionTask && !normalizedTask.workingDirectory
         ? { workingDirectory: '', cleanup: async () => {} }
         : await this.prepareTaskWorkspace(normalizedTask, stream, abortController.signal);
     } catch (prepErr) {
@@ -1181,7 +1193,7 @@ export class TaskExecutor {
       // Resume existing session if resumeSessionId is provided
       const canResume = taskWithWorkspace.resumeSessionId
         && this.isResumableAdapter(adapter)
-        && isTextOnly;
+        && !isExecutionTask;
 
       let result: Awaited<ReturnType<typeof adapter.execute>>;
       if (canResume) {
@@ -1241,7 +1253,7 @@ export class TaskExecutor {
       }
 
       // Emit accurate file change events via git diff (covers all change methods)
-      if (!isTextOnly && prepared.workingDirectory) {
+      if (isExecutionTask && prepared.workingDirectory) {
         await this.emitGitDiffFileChanges(task.id, prepared.workingDirectory, prepared.commitBeforeSha, stream);
       }
 
@@ -1259,7 +1271,7 @@ export class TaskExecutor {
       const summary = result.summary;
       if (summary) {
         console.log(`[executor] Task ${task.id}: summary available — status=${summary.status}, workCompleted=${!!summary.workCompleted}, executiveSummary=${!!summary.executiveSummary}, keyFindings=${summary.keyFindings?.length ?? 0}, filesChanged=${summary.filesChanged?.length ?? 0}`);
-      } else if (!isTextOnly) {
+      } else if (isExecutionTask) {
         console.warn(`[executor] Task ${task.id}: no summary available for PR body`);
       }
       const rawTitle = summary?.workCompleted || task.title || task.prompt.slice(0, 100);
@@ -1267,7 +1279,7 @@ export class TaskExecutor {
         ? `[${task.shortProjectId}/${task.shortNodeId}] ${rawTitle}`
         : rawTitle;
       if (prepared.branchName && result.status === 'completed') {
-        stream.text?.(`\n── [Astro] Delivering changes (mode: ${deliveryMode})...\n`);
+        stream.operational?.(`Delivering changes (mode: ${deliveryMode})...`, 'astro');
         this.wsClient.sendTaskStatus(task.id, 'running', 90, 'Delivering changes...');
         // Resolve GitHub repo slug (OWNER/REPO) for explicit gh --repo targeting.
         // This makes gh pr create/merge independent of local filesystem state
@@ -1304,14 +1316,14 @@ export class TaskExecutor {
         try {
           if (deliveryMode === 'direct') {
             // No git delivery — files modified in-place
-            stream.text?.(`── [Delivery] Changes applied in-place (direct mode)\n`);
+            stream.operational?.('Changes applied in-place (direct mode)', 'delivery');
             console.log(`[executor] Task ${task.id}: direct mode, skipping git delivery`);
           } else if (deliveryMode === 'copy') {
             // Copy mode: worktree preserved, no git operations
-            stream.text?.(`── [Delivery] Worktree preserved (copy mode)\n`);
+            stream.operational?.('Worktree preserved (copy mode)', 'delivery');
             console.log(`[executor] Task ${task.id}: copy mode, worktree preserved at ${prepared.workingDirectory}`);
           } else if (deliveryMode === 'branch') {
-            stream.text?.(`── [Git] Merging into project branch ${prepared.projectBranch ?? 'local'}...\n`);
+            stream.operational?.(`Merging into project branch ${prepared.projectBranch ?? 'local'}...`, 'git');
             // Branch mode: commit locally, merge into project branch if available.
             // The merge lock is held only during the squash-merge (seconds, not minutes),
             // allowing tasks to execute in parallel. The squash merge naturally handles
@@ -1330,10 +1342,10 @@ export class TaskExecutor {
               // don't overlap, and saves one retry cycle when they do.
               const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.projectBranch, false);
               if (preRebase.rebased) {
-                stream.text?.(`── [Git] Rebased onto ${prepared.projectBranch}\n`);
+                stream.operational?.(`Rebased onto ${prepared.projectBranch}`, 'git');
                 console.log(`[executor] Task ${task.id}: pre-merge rebase onto ${prepared.projectBranch} succeeded`);
               } else if (!preRebase.skipped) {
-                stream.text?.(`── [Git] Rebase skipped (conflicts), retrying via merge\n`);
+                stream.operational?.('Rebase skipped (conflicts), retrying via merge', 'git');
                 console.log(`[executor] Task ${task.id}: pre-merge rebase had conflicts, falling back to merge retry loop`);
               }
 
@@ -1358,7 +1370,7 @@ export class TaskExecutor {
                     prepared.branchName,
                     prepared.projectBranch,
                     commitMessage,
-                    (msg) => stream.text?.(`── [Git] ${msg}\n`),
+                    (msg) => stream.operational?.(msg, 'git'),
                   );
                 } finally {
                   mergeLock.release();
@@ -1368,7 +1380,7 @@ export class TaskExecutor {
                 if (mergeResult.merged) {
                   result.deliveryStatus = 'success';
                   result.commitAfterSha = mergeResult.commitSha;
-                  stream.text?.(`── [Git] Merged into ${prepared.projectBranch} (${mergeResult.commitSha?.slice(0, 7)})\n`);
+                  stream.operational?.(`Merged into ${prepared.projectBranch} (${mergeResult.commitSha?.slice(0, 7)})`, 'git');
                   console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
                   // Sync project worktree to reflect the merged changes on disk
                   if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
@@ -1384,7 +1396,7 @@ export class TaskExecutor {
 
                   if (taskContext?.sessionId && this.isResumableAdapter(adapter) && attempt < MAX_MERGE_ATTEMPTS) {
                     const conflictFiles = mergeResult.conflictFiles?.join(', ') ?? 'unknown files';
-                    stream.text?.(`── [Git] Merge conflict: ${conflictFiles} — agent resolving (attempt ${attempt})...\n`);
+                    stream.operational?.(`Merge conflict: ${conflictFiles} — agent resolving (attempt ${attempt})...`, 'git');
                     console.log(`[executor] Task ${task.id}: merge conflict (attempt ${attempt}), resuming ${adapter.name} to resolve: ${conflictFiles}`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `Merge conflict — agent resolving (attempt ${attempt})...`);
 
@@ -1436,7 +1448,7 @@ export class TaskExecutor {
             }
           } else if (deliveryMode === 'push') {
             // Push branch to remote, but don't create a PR — user creates PR manually
-            stream.text?.(`── [Git] Pushing ${prepared.branchName} to origin...\n`);
+            stream.operational?.(`Pushing ${prepared.branchName} to origin...`, 'git');
             this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Pushing branch...');
             console.log(`[executor] Task ${task.id}: push mode, pushing branch ${prepared.branchName}`);
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
@@ -1452,21 +1464,21 @@ export class TaskExecutor {
               // Delivery failure — don't override execution status
               result.deliveryStatus = 'failed';
               result.deliveryError = `Push delivery failed: ${prResult.error}`;
-              stream.text?.(`── [Git] Push failed: ${prResult.error}\n`);
+              stream.operational?.(`Push failed: ${prResult.error}`, 'git');
               console.error(`[executor] Task ${task.id}: push delivery failed: ${prResult.error}`);
             } else if (prResult.pushed) {
               result.deliveryStatus = 'success';
               keepBranch = true;
-              stream.text?.(`── [Git] Pushed to origin: ${prepared.branchName}\n`);
+              stream.operational?.(`Pushed to origin: ${prepared.branchName}`, 'git');
               console.log(`[executor] Task ${task.id}: branch pushed (${prepared.branchName})`);
             } else {
               result.deliveryStatus = 'skipped';
-              stream.text?.(`── [Git] No changes to push\n`);
+              stream.operational?.('No changes to push', 'git');
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           } else {
             // 'pr' — push + create PR, auto-merge into project branch if applicable
-            stream.text?.(`── [Git] Creating PR: ${prepared.branchName} → ${prepared.baseBranch ?? 'main'}...\n`);
+            stream.operational?.(`Creating PR: ${prepared.branchName} → ${prepared.baseBranch ?? 'main'}...`, 'git');
             this.wsClient.sendTaskStatus(task.id, 'running', 94, 'Rebasing before push...');
             // Pre-push rebase: if the target branch moved forward, rebase our task
             // branch so the PR will be cleanly mergeable. The branch hasn't been
@@ -1474,10 +1486,10 @@ export class TaskExecutor {
             if (prepared.baseBranch) {
               const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.baseBranch, true);
               if (preRebase.rebased) {
-                stream.text?.(`── [Git] Rebased onto origin/${prepared.baseBranch}\n`);
+                stream.operational?.(`Rebased onto origin/${prepared.baseBranch}`, 'git');
                 console.log(`[executor] Task ${task.id}: pre-push rebase onto origin/${prepared.baseBranch} succeeded`);
               } else if (!preRebase.skipped) {
-                stream.text?.(`── [Git] Rebase skipped (conflicts), proceeding without rebase\n`);
+                stream.operational?.('Rebase skipped (conflicts), proceeding without rebase', 'git');
                 console.log(`[executor] Task ${task.id}: pre-push rebase had conflicts, proceeding without rebase`);
               }
             }
@@ -1502,7 +1514,7 @@ export class TaskExecutor {
               result.commitBeforeSha = prResult.commitBeforeSha;
               result.commitAfterSha = prResult.commitAfterSha;
               keepBranch = true;
-              stream.text?.(`── [Git] PR created: ${prResult.prUrl}\n`);
+              stream.operational?.(`PR created: ${prResult.prUrl}`, 'git');
 
               if (prResult.autoMergeFailed) {
                 // PR was created but auto-merge failed (likely conflict).
@@ -1517,7 +1529,7 @@ export class TaskExecutor {
 
                 if (prTaskContext?.sessionId && this.isResumableAdapter(adapter) && hasProjectBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
                   for (let attempt = 1; attempt <= MAX_PR_MERGE_ATTEMPTS; attempt++) {
-                    stream.text?.(`── [Git] Auto-merge failed — agent resolving conflict (attempt ${attempt})...\n`);
+                    stream.operational?.(`Auto-merge failed — agent resolving conflict (attempt ${attempt})...`, 'git');
                     console.log(`[executor] Task ${task.id}: PR auto-merge failed (attempt ${attempt}), resuming ${adapter.name} to resolve`);
                     this.wsClient.sendTaskStatus(task.id, 'running', 97, `PR merge conflict — agent resolving (attempt ${attempt})...`);
 
@@ -1587,16 +1599,16 @@ export class TaskExecutor {
               result.deliveryStatus = 'failed';
               result.deliveryError = `PR delivery failed: ${prResult.error}`;
               keepBranch = prResult.pushed ?? false; // Keep branch if it was pushed
-              stream.text?.(`── [Git] PR delivery failed: ${prResult.error}\n`);
+              stream.operational?.(`PR delivery failed: ${prResult.error}`, 'git');
               console.error(`[executor] Task ${task.id}: PR delivery failed: ${prResult.error}`);
             } else {
-              stream.text?.(`── [Git] No changes to deliver\n`);
+              stream.operational?.('No changes to deliver', 'git');
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           }
         } catch (prError) {
           const prMsg = prError instanceof Error ? prError.message : String(prError);
-          stream.text?.(`── [Delivery] Failed: ${prMsg}\n`);
+          stream.operational?.(`Failed: ${prMsg}`, 'delivery');
           console.error(`[executor] Task ${task.id}: delivery (${deliveryMode}) failed: ${prMsg}`);
           // Delivery failure — don't override execution status
           result.deliveryStatus = 'failed';
@@ -1658,7 +1670,7 @@ export class TaskExecutor {
       // remove the working copy — the branch lives on remote/local refs,
       // and re-execution will create a fresh worktree if needed.
       if (prepared.branchName) {
-        stream.text?.(`\n── [Astro] Cleaning up worktree (branch: ${prepared.branchName})...\n`);
+        stream.operational?.(`Cleaning up worktree (branch: ${prepared.branchName})...`, 'astro');
       }
       if (this.preserveWorktrees) {
         console.log(`[executor] Task ${task.id}: worktree preserved (debug mode)`);
@@ -1722,7 +1734,7 @@ export class TaskExecutor {
 
   private async prepareTaskWorkspace(
     task: Task & { workingDirectory: string },
-    stream: { stdout: (data: string) => void; stderr: (data: string) => void; text?: (data: string) => void },
+    stream: { stdout: (data: string) => void; stderr: (data: string) => void; operational?: (message: string, source: 'astro' | 'git' | 'delivery') => void },
     signal?: AbortSignal,
   ): Promise<{
     workingDirectory: string;
@@ -1841,7 +1853,7 @@ export class TaskExecutor {
         projectBranch: task.projectBranch,
         stdout: stream.stdout,
         stderr: stream.stderr,
-        text: stream.text,
+        operational: stream.operational,
         signal,
       });
       if (!worktree) {

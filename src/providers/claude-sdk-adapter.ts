@@ -40,7 +40,7 @@ function resolveClaudeExecutable(): string | undefined {
 const claudeExecutablePath = resolveClaudeExecutable();
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
-import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse } from './base-adapter.js';
+import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, getAugmentedPath } from './base-adapter.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
 import { config } from '../lib/config.js';
@@ -375,7 +375,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           // Inject Astro auth so astro-cli works inside the session without
           // a separate login step (works on local and remote machines).
           ...(config.getAccessToken() ? { ASTRO_AUTH_TOKEN: config.getAccessToken()! } : {}),
-          ASTRO_SERVER_URL: config.getConfig().apiUrl,
+          ASTRO_SERVER_URL: config.getApiUrl(),
         },
       };
 
@@ -405,7 +405,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
       // Restrict tools based on whether we have a working directory
       if (!hasWorkdir) {
-        (options as Record<string, unknown>).allowedTools = ['WebSearch', 'WebFetch', ...mcpAllowedTools];
+        (options as Record<string, unknown>).allowedTools = ['Bash', 'WebSearch', 'WebFetch', ...mcpAllowedTools];
       } else if (mcpAllowedTools.length > 0) {
         (options as Record<string, unknown>).allowedTools = [
           'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
@@ -607,12 +607,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
   }
 
   /**
-   * Fast path for text-only tasks (chat, summarize).
+   * Fast path for summarize tasks.
    * Skips HPC context, MCP servers, tool infrastructure, canUseTool handler,
    * sandbox, and image handling to minimize time-to-first-token.
-   *
-   * Chat tasks load settingSources so user skills (~/.claude/skills/) are available.
-   * Summarize tasks skip settingSources (no skills needed for structured extraction).
+   * Uses no tools — pure structured text extraction.
    */
   private async runTextOnlyQuery(
     task: NormalizedTask,
@@ -626,20 +624,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     artifacts?: TaskArtifact[];
     metrics?: TaskResult['metrics'];
   }> {
-    // Chat tasks get read-only tools + Skill for user skill invocation;
-    // summarize tasks stay text-only
-    const isChatTask = task.type === 'chat';
-    const chatAllowedTools = hasWorkdir
-      ? ['Read', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Skill']
-      : ['WebSearch', 'WebFetch', 'Skill'];
-
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
       ...(task.maxTurns != null ? { maxTurns: task.maxTurns } : {}),
-      permissionMode: isChatTask ? 'bypassPermissions' : 'plan',
-      ...(isChatTask ? {} : { tools: [] }),
-      // Chat tasks load user skills via settingSources; summarize tasks skip for speed
-      ...(isChatTask ? { settingSources: ['user', 'project', 'local'] as const } : {}),
+      permissionMode: 'plan',
+      tools: [],
       persistSession: true,
       ...(hasWorkdir ? { cwd: task.workingDirectory } : {}),
       ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
@@ -652,14 +641,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       env: {
         ...process.env,
         ...task.environment,
-        // Enable ~/.claude/skills/ discovery so user-defined skills are available in chat
-        ...(isChatTask ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' } : {}),
+        // Ensure bundled astro-cli version is found before any global/outdated install
+        PATH: getAugmentedPath(),
       },
     };
-
-    if (isChatTask) {
-      (options as Record<string, unknown>).allowedTools = chatAllowedTools;
-    }
 
     if (task.systemPrompt) {
       (options as Record<string, unknown>).systemPrompt = task.systemPrompt;
@@ -679,7 +664,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         : conversationContext;
     }
 
-    console.log(`[claude-sdk] Fast path: text-only task (type=${task.type}, model=${task.model ?? 'default'})`);
+    console.log(`[claude-sdk] Fast path: summarize task (model=${task.model ?? 'default'})`);
 
     // Wrap prompt in async iterable so isSingleUserTurn=false and stdin stays open for steering
     const promptIterable = {
@@ -776,28 +761,27 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // starting a new session.
     delete process.env.CLAUDECODE;
 
-    const isTextOnlyTask = task.type === 'chat' || task.type === 'summarize';
+    const isTextOnlyTask = task.type === 'summarize';
 
-    // Plan/chat/summarize tasks without a working directory run without cwd context
     const workdir: string | undefined = task.workingDirectory || undefined;
     const hasWorkdir = !!workdir;
 
-    // ── Fast path for text-only tasks (chat, summarize) ──
-    // These tasks use structured text blocks (not tools/MCP) for plan mutations.
-    // Skip HPC context, MCP servers, tool infrastructure, and CLAUDE.md loading
-    // to minimize time-to-first-token.
+    // ── Fast path for summarize tasks (no tools, no MCP) ──
+    // Skip everything to minimize time-to-first-token.
     if (isTextOnlyTask) {
       return this.runTextOnlyQuery(task, stream, abortController, hasWorkdir);
     }
 
-    // ── Standard path for execution tasks ──
-    // After the text-only fast path, workdir is always defined for execution tasks.
+    // ── Standard path for all other task types (plan/chat/playground/execution) ──
+    // All get full tool access; the prompt controls behavior.
 
     // Build options for the query
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
       ...(task.maxTurns != null ? { maxTurns: task.maxTurns } : {}),
-      permissionMode: 'bypassPermissions', // Auto-accept all tool calls
+      // All task types use bypassPermissions. The prompt controls behavior
+      // (plan vs execute), not tool-level permission enforcement.
+      permissionMode: 'bypassPermissions',
       // Enable sandbox for standard Claude models (skip for Bedrock/custom models which crash with sandbox option)
       ...getSandboxOption(task.model),
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
@@ -815,11 +799,14 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       env: {
         ...process.env,
         ...task.environment,
+        PATH: getAugmentedPath(),
         CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1', // Enable additional directories for CLAUDE.md loading
-        // Inject Astro auth so astro-cli works inside the session without
-        // a separate login step (works on local and remote machines).
+        // Inject Astro auth + execution context so astro-cli works inside
+        // the session without a separate login step. ASTRO_EXECUTION_ID
+        // enables the CLI to link plan mutations back to the streaming pipeline.
         ...(config.getAccessToken() ? { ASTRO_AUTH_TOKEN: config.getAccessToken()! } : {}),
-        ASTRO_SERVER_URL: config.getConfig().apiUrl,
+        ASTRO_SERVER_URL: config.getApiUrl(),
+        ASTRO_EXECUTION_ID: task.id,
       },
       // Intercept built-in AskUserQuestion to handle approvals (following Cyrus pattern)
       canUseTool: async (toolName: string, input: Record<string, unknown>, options: { toolUseID: string; signal: AbortSignal }) => {
@@ -982,20 +969,15 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       }
     }
 
-    // Plan tasks are read-only: no file writes, edits, or shell access regardless
-    // of workdir/MCP configuration. Only allow codebase exploration + web search.
-    if (task.type === 'plan') {
-      const planTools = [
-        ...(hasWorkdir ? ['Read', 'Glob', 'Grep'] : []),
-        'WebSearch', 'WebFetch',
-        ...mcpAllowedTools,
-      ];
-      (options as Record<string, unknown>).allowedTools = planTools;
-      console.log(`[claude-sdk] Plan task — read-only tools: [${planTools.join(', ')}]`);
-    } else if (!hasWorkdir) {
-      // For tasks without a working directory, disable file system and shell tools
-      // but keep web search so the agent can research. MCP tools are also allowed.
-      const noWorkdirTools = ['WebSearch', 'WebFetch', ...mcpAllowedTools];
+    // All task types (including plan) get the same tool set. Plan tasks
+    // were previously restricted to read-only tools (Read/Glob/Grep/WebSearch/
+    // WebFetch), but now need Bash for astro-cli plan mutations and full MCP
+    // access. The system prompt constrains plan agent behavior, not tool-level
+    // restrictions.
+    if (!hasWorkdir) {
+      // For tasks without a working directory, disable file system tools but keep
+      // Bash + web search so the agent can run CLI tools (e.g. astro-cli plan create).
+      const noWorkdirTools = ['Bash', 'WebSearch', 'WebFetch', ...mcpAllowedTools];
       (options as Record<string, unknown>).allowedTools = noWorkdirTools;
       console.log(`[claude-sdk] No workdir — allowed tools: [${noWorkdirTools.join(', ')}]`);
     } else if (mcpAllowedTools.length > 0) {
