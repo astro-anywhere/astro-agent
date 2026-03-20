@@ -212,6 +212,8 @@ export interface Task {
     timestamp: string;
     nonce: string;
   };
+  /** Additional trusted browser public keys for shared-machine dispatch verification */
+  dispatchTrustedKeys?: JsonWebKey[];
 
   /** Resume an existing Claude Code session by ID (provider session ID from session_init) */
   resumeSessionId?: string;
@@ -287,6 +289,7 @@ export type WSMessageType =
   | 'task_result'
   | 'task_tool_trace'
   | 'task_text'
+  | 'task_operational'
   | 'task_tool_use'
   | 'task_tool_result'
   | 'task_file_change'
@@ -412,6 +415,15 @@ export interface TaskTextMessage extends WSMessage {
     taskId: string;
     text: string;
     sequence: number;
+  };
+}
+
+export interface TaskOperationalMessage extends WSMessage {
+  type: 'task_operational';
+  payload: {
+    taskId: string;
+    message: string;
+    source: 'astro' | 'git' | 'delivery';
   };
 }
 

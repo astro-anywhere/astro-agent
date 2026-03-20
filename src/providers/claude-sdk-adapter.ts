@@ -40,7 +40,7 @@ function resolveClaudeExecutable(): string | undefined {
 const claudeExecutablePath = resolveClaudeExecutable();
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
-import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse } from './base-adapter.js';
+import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, getAugmentedPath } from './base-adapter.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
 import { config } from '../lib/config.js';
@@ -375,7 +375,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           // Inject Astro auth so astro-cli works inside the session without
           // a separate login step (works on local and remote machines).
           ...(config.getAccessToken() ? { ASTRO_AUTH_TOKEN: config.getAccessToken()! } : {}),
-          ASTRO_SERVER_URL: config.getConfig().apiUrl,
+          ASTRO_SERVER_URL: config.getApiUrl(),
         },
       };
 
@@ -405,7 +405,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
       // Restrict tools based on whether we have a working directory
       if (!hasWorkdir) {
-        (options as Record<string, unknown>).allowedTools = ['WebSearch', 'WebFetch', ...mcpAllowedTools];
+        (options as Record<string, unknown>).allowedTools = ['Bash', 'WebSearch', 'WebFetch', ...mcpAllowedTools];
       } else if (mcpAllowedTools.length > 0) {
         (options as Record<string, unknown>).allowedTools = [
           'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep', 'WebSearch', 'WebFetch',
@@ -641,6 +641,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       env: {
         ...process.env,
         ...task.environment,
+        // Ensure bundled astro-cli version is found before any global/outdated install
+        PATH: getAugmentedPath(),
       },
     };
 
@@ -797,12 +799,13 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       env: {
         ...process.env,
         ...task.environment,
+        PATH: getAugmentedPath(),
         CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1', // Enable additional directories for CLAUDE.md loading
         // Inject Astro auth + execution context so astro-cli works inside
         // the session without a separate login step. ASTRO_EXECUTION_ID
         // enables the CLI to link plan mutations back to the streaming pipeline.
         ...(config.getAccessToken() ? { ASTRO_AUTH_TOKEN: config.getAccessToken()! } : {}),
-        ASTRO_SERVER_URL: config.getConfig().apiUrl,
+        ASTRO_SERVER_URL: config.getApiUrl(),
         ASTRO_EXECUTION_ID: task.id,
       },
       // Intercept built-in AskUserQuestion to handle approvals (following Cyrus pattern)
@@ -972,9 +975,9 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // access. The system prompt constrains plan agent behavior, not tool-level
     // restrictions.
     if (!hasWorkdir) {
-      // For tasks without a working directory, disable file system and shell tools
-      // but keep web search so the agent can research. MCP tools are also allowed.
-      const noWorkdirTools = ['WebSearch', 'WebFetch', ...mcpAllowedTools];
+      // For tasks without a working directory, disable file system tools but keep
+      // Bash + web search so the agent can run CLI tools (e.g. astro-cli plan create).
+      const noWorkdirTools = ['Bash', 'WebSearch', 'WebFetch', ...mcpAllowedTools];
       (options as Record<string, unknown>).allowedTools = noWorkdirTools;
       console.log(`[claude-sdk] No workdir — allowed tools: [${noWorkdirTools.join(', ')}]`);
     } else if (mcpAllowedTools.length > 0) {

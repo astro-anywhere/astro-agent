@@ -3,7 +3,7 @@
  */
 
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { Task, TaskResult, TaskStatus, ExecutionSummary } from '../types.js';
 
 /**
@@ -19,6 +19,8 @@ export interface TaskOutputStream {
   toolTrace: (toolName: string, toolInput?: unknown, toolResult?: unknown, success?: boolean) => void;
   /** Structured text output (bypasses stdout throttle) */
   text: (data: string) => void;
+  /** Structured operational status line (Astro/Git/Delivery) */
+  operational: (message: string, source: 'astro' | 'git' | 'delivery') => void;
   /** Structured tool use event */
   toolUse: (toolName: string, toolInput: unknown, toolUseId?: string) => void;
   /** Structured tool result event */
@@ -135,6 +137,7 @@ export function createNoopStream(): TaskOutputStream {
     status: () => {},
     toolTrace: () => {},
     text: () => {},
+    operational: () => {},
     toolUse: () => {},
     toolResult: () => {},
     fileChange: () => {},
@@ -192,4 +195,41 @@ export function getApprovalServerPath(): string {
   const thisFile = fileURLToPath(import.meta.url);
   // From dist/providers/base-adapter.js → dist/mcp/approval-server.js
   return join(dirname(thisFile), '..', 'mcp', 'approval-server.js');
+}
+
+/**
+ * Returns the system PATH augmented with node_modules/.bin directories that
+ * contain the `astro-cli` binary.
+ *
+ * Two locations are prepended, in priority order:
+ *
+ * 1. Monorepo root node_modules/.bin (../../../../node_modules/.bin relative to
+ *    dist/providers/base-adapter.js). In a workspace checkout this is the
+ *    workspace-linked binary pointing at packages/cli/dist/index.js — always
+ *    up-to-date with the latest build. In a standalone install this path does
+ *    not contain astro-cli, so the lookup falls through to (2).
+ *
+ * 2. This package's own node_modules/.bin (../../node_modules/.bin). When
+ *    @astroanywhere/agent is installed globally or via the SSH installer,
+ *    @astroanywhere/cli is bundled here as a dependency. This is the correct
+ *    pinned version for production use.
+ *
+ * Prepending both guarantees that:
+ * - In local dev, CLI source changes are picked up immediately after `tsup`.
+ * - In production, the pinned bundled CLI is used regardless of global installs.
+ * - astro-cli is accessible even when the agent runs as a daemon or via cron.
+ *
+ * Falls back gracefully if the directory cannot be resolved.
+ */
+export function getAugmentedPath(): string {
+  try {
+    const base = dirname(fileURLToPath(import.meta.url));
+    // dist/providers/ → ../../ = package root → node_modules/.bin (bundled, production)
+    const pkgBinDir = resolve(base, '..', '..', 'node_modules', '.bin');
+    // dist/providers/ → ../../../../ = monorepo root → node_modules/.bin (workspace-linked, dev)
+    const monorepoRootBinDir = resolve(base, '..', '..', '..', '..', 'node_modules', '.bin');
+    return [monorepoRootBinDir, pkgBinDir, process.env.PATH ?? ''].filter(Boolean).join(':');
+  } catch {
+    return process.env.PATH ?? '';
+  }
 }
