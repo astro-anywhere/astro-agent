@@ -761,18 +761,17 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     const isTextOnlyTask = task.type === 'summarize';
 
-    // Plan/chat/summarize tasks without a working directory run without cwd context
     const workdir: string | undefined = task.workingDirectory || undefined;
     const hasWorkdir = !!workdir;
 
-    // ── Fast path for text-only tasks (summarize) ──
-    // Summarize tasks use no tools/MCP. Skip everything to minimize time-to-first-token.
+    // ── Fast path for summarize tasks (no tools, no MCP) ──
+    // Skip everything to minimize time-to-first-token.
     if (isTextOnlyTask) {
       return this.runTextOnlyQuery(task, stream, abortController, hasWorkdir);
     }
 
-    // ── Standard path for execution tasks ──
-    // After the text-only fast path, workdir is always defined for execution tasks.
+    // ── Standard path for all other task types (plan/chat/playground/execution) ──
+    // All get full tool access; the prompt controls behavior.
 
     // Build options for the query
     const options: Parameters<typeof query>[0]['options'] = {
