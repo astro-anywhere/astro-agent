@@ -198,26 +198,37 @@ export function getApprovalServerPath(): string {
 }
 
 /**
- * Returns the system PATH augmented with this package's own node_modules/.bin.
+ * Returns the system PATH augmented with node_modules/.bin directories that
+ * contain the `astro-cli` binary.
  *
- * When `@astroanywhere/agent` is installed globally (or via the SSH installer
- * into `$HOME/.local`), `@astroanywhere/cli` is installed as a dependency and
- * its `astro-cli` binary lands in the same package's `node_modules/.bin/`.
+ * Two locations are prepended, in priority order:
  *
- * Prepending that directory guarantees:
- * - The version of `astro-cli` that ships with this agent-runner is used,
- *   not an outdated globally-installed one (e.g. v0.2.x vs the required v0.3+).
- * - `astro-cli` is accessible even if the user's global npm bin dir is not on
- *   PATH (e.g. when astro-agent is started as a daemon or via cron).
+ * 1. Monorepo root node_modules/.bin (../../../../node_modules/.bin relative to
+ *    dist/providers/base-adapter.js). In a workspace checkout this is the
+ *    workspace-linked binary pointing at packages/cli/dist/index.js — always
+ *    up-to-date with the latest build. In a standalone install this path does
+ *    not contain astro-cli, so the lookup falls through to (2).
+ *
+ * 2. This package's own node_modules/.bin (../../node_modules/.bin). When
+ *    @astroanywhere/agent is installed globally or via the SSH installer,
+ *    @astroanywhere/cli is bundled here as a dependency. This is the correct
+ *    pinned version for production use.
+ *
+ * Prepending both guarantees that:
+ * - In local dev, CLI source changes are picked up immediately after `tsup`.
+ * - In production, the pinned bundled CLI is used regardless of global installs.
+ * - astro-cli is accessible even when the agent runs as a daemon or via cron.
  *
  * Falls back gracefully if the directory cannot be resolved.
  */
 export function getAugmentedPath(): string {
   try {
-    // This file compiles to dist/providers/base-adapter.js.
-    // ../../node_modules/.bin resolves to the package root's node_modules/.bin.
-    const pkgBinDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'node_modules', '.bin');
-    return [pkgBinDir, process.env.PATH ?? ''].filter(Boolean).join(':');
+    const base = dirname(fileURLToPath(import.meta.url));
+    // dist/providers/ → ../../ = package root → node_modules/.bin (bundled, production)
+    const pkgBinDir = resolve(base, '..', '..', 'node_modules', '.bin');
+    // dist/providers/ → ../../../../ = monorepo root → node_modules/.bin (workspace-linked, dev)
+    const monorepoRootBinDir = resolve(base, '..', '..', '..', '..', 'node_modules', '.bin');
+    return [monorepoRootBinDir, pkgBinDir, process.env.PATH ?? ''].filter(Boolean).join(':');
   } catch {
     return process.env.PATH ?? '';
   }

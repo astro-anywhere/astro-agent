@@ -322,16 +322,16 @@ export class TaskExecutor {
     this.claimedTasks.add(task.id);
     try {
 
-    // Lightweight tasks (plan/chat/summarize/playground) skip executor overhead:
-    // safety checks, git diff, and summary generation. They can still get full tool
-    // access (including Write/Edit/Bash) when they have a working directory — the
-    // "lightweight" label refers to executor overhead, not tool restrictions.
-    const isLightweightTask = task.type === 'summarize' || task.type === 'chat' || task.type === 'plan' || task.type === 'playground';
+    // Only execution tasks need workingDirectory resolution, safety checks,
+    // git diff, and summary generation. All other types (plan/chat/summarize/
+    // playground) skip this overhead but still get full tool access when they
+    // have a working directory.
+    const isExecutionTask = !task.type || task.type === 'execution';
 
-    // Lightweight tasks can run without a working directory.
-    // For all others, resolve the directory or auto-provision one.
+    // Non-execution tasks can run without a working directory.
+    // For execution tasks, resolve the directory or auto-provision one.
     let resolvedWorkDir: string | undefined;
-    if (isLightweightTask && !task.workingDirectory) {
+    if (!isExecutionTask && !task.workingDirectory) {
       resolvedWorkDir = undefined;
     } else {
       try {
@@ -363,7 +363,7 @@ export class TaskExecutor {
     // thinks worktree isolation is active and allows parallel execution, but
     // prepareTaskWorkspace() later falls back to direct in-place execution —
     // causing file conflicts when multiple tasks run on the same non-git directory.
-    const isGitDir = !isLightweightTask && normalizedTask.workingDirectory && this.gitAvailable
+    const isGitDir = isExecutionTask && normalizedTask.workingDirectory && this.gitAvailable
       ? await isGitRepo(normalizedTask.workingDirectory)
       : false;
     const willUseWorktree = this.useWorktree
@@ -371,7 +371,7 @@ export class TaskExecutor {
       && normalizedTask.deliveryMode !== 'direct'
       && (isGitDir || normalizedTask.deliveryMode === 'copy');
 
-    if (!isLightweightTask && task.skipSafetyCheck) {
+    if (isExecutionTask && task.skipSafetyCheck) {
       // Server already approved safety for this directory — skip the prompt.
       // Only init git when the original safety decision was 'init-git'.
       // When safetyDecision is 'proceed' (user chose non-git direct execution)
@@ -392,7 +392,7 @@ export class TaskExecutor {
       return;
     }
 
-    if (!isLightweightTask) {
+    if (isExecutionTask) {
       // Perform safety check (worktree flag affects tier assignment)
       const safetyCheck = await this.performSafetyCheck(normalizedTask, willUseWorktree);
 
@@ -1148,11 +1148,12 @@ export class TaskExecutor {
       );
     }, TASK_HEARTBEAT_INTERVAL_MS);
 
-    // Lightweight tasks without a working directory skip workspace prep
-    const isLightweight = normalizedTask.type === 'summarize' || normalizedTask.type === 'chat' || normalizedTask.type === 'plan' || normalizedTask.type === 'playground';
+    // Only execution tasks get git diff, delivery, and summary — all other types (chat, plan, playground, summarize) skip them.
+    // These non-execution types still get full tool access when they have a working directory.
+    const isExecutionTask = !normalizedTask.type || normalizedTask.type === 'execution';
     let prepared: Awaited<ReturnType<typeof this.prepareTaskWorkspace>>;
     try {
-      prepared = isLightweight && !normalizedTask.workingDirectory
+      prepared = !isExecutionTask && !normalizedTask.workingDirectory
         ? { workingDirectory: '', cleanup: async () => {} }
         : await this.prepareTaskWorkspace(normalizedTask, stream, abortController.signal);
     } catch (prepErr) {
@@ -1192,7 +1193,7 @@ export class TaskExecutor {
       // Resume existing session if resumeSessionId is provided
       const canResume = taskWithWorkspace.resumeSessionId
         && this.isResumableAdapter(adapter)
-        && isLightweight;
+        && !isExecutionTask;
 
       let result: Awaited<ReturnType<typeof adapter.execute>>;
       if (canResume) {
@@ -1252,7 +1253,7 @@ export class TaskExecutor {
       }
 
       // Emit accurate file change events via git diff (covers all change methods)
-      if (!isLightweight && prepared.workingDirectory) {
+      if (isExecutionTask && prepared.workingDirectory) {
         await this.emitGitDiffFileChanges(task.id, prepared.workingDirectory, prepared.commitBeforeSha, stream);
       }
 
@@ -1270,7 +1271,7 @@ export class TaskExecutor {
       const summary = result.summary;
       if (summary) {
         console.log(`[executor] Task ${task.id}: summary available — status=${summary.status}, workCompleted=${!!summary.workCompleted}, executiveSummary=${!!summary.executiveSummary}, keyFindings=${summary.keyFindings?.length ?? 0}, filesChanged=${summary.filesChanged?.length ?? 0}`);
-      } else if (!isLightweight) {
+      } else if (isExecutionTask) {
         console.warn(`[executor] Task ${task.id}: no summary available for PR body`);
       }
       const rawTitle = summary?.workCompleted || task.title || task.prompt.slice(0, 100);
@@ -1733,7 +1734,7 @@ export class TaskExecutor {
 
   private async prepareTaskWorkspace(
     task: Task & { workingDirectory: string },
-    stream: { stdout: (data: string) => void; stderr: (data: string) => void; text?: (data: string) => void; operational?: (message: string, source: 'astro' | 'git' | 'delivery') => void },
+    stream: { stdout: (data: string) => void; stderr: (data: string) => void; operational?: (message: string, source: 'astro' | 'git' | 'delivery') => void },
     signal?: AbortSignal,
   ): Promise<{
     workingDirectory: string;
@@ -1852,7 +1853,6 @@ export class TaskExecutor {
         projectBranch: task.projectBranch,
         stdout: stream.stdout,
         stderr: stream.stderr,
-        text: stream.text,
         operational: stream.operational,
         signal,
       });

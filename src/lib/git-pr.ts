@@ -341,48 +341,48 @@ export async function pushBranchToRemote(
   gitRoot: string,
   branchName: string,
   options?: {
-    /** Log visible activity text (task activity stream) */
-    text?: (data: string) => void;
+    /** Structured operational status line */
+    operational?: (message: string, source: 'astro' | 'git' | 'delivery') => void;
     /** Label for log messages (default: 'push') */
     label?: string;
   },
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const text = options?.text;
+  const operational = options?.operational;
   const label = options?.label ?? 'push';
   const MAX_ATTEMPTS = 2;
   let lastError: string | undefined;
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      text?.(`── [Git] Pushing ${branchName} to origin (${label} attempt ${attempt}/${MAX_ATTEMPTS})...\n`);
+      operational?.(`Pushing ${branchName} to origin (${label} attempt ${attempt}/${MAX_ATTEMPTS})...`, 'git');
       await execFileAsync(
         'git',
         ['-C', gitRoot, 'push', '-u', 'origin', branchName],
         { env: withGitEnv(), timeout: 30_000 }
       );
       lastError = undefined;
-      text?.(`── [Git] ${branchName} pushed to origin\n`);
+      operational?.(`${branchName} pushed to origin`, 'git');
       console.log(`[git-pr] Pushed ${branchName} to origin (${label} attempt ${attempt})`);
       break;
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
       // "everything up-to-date" is not an error
       if (lastError.includes('Everything up-to-date') || lastError.includes('up to date')) {
-        text?.(`── [Git] ${branchName} already up-to-date on origin\n`);
+        operational?.(`${branchName} already up-to-date on origin`, 'git');
         console.log(`[git-pr] ${branchName} already up-to-date on origin`);
         lastError = undefined;
         break;
       }
       console.error(`[git-pr] ${label} attempt ${attempt} failed: ${lastError}`);
       if (attempt < MAX_ATTEMPTS) {
-        text?.(`── [Git] Push failed (attempt ${attempt}): ${lastError}\n── [Git] Retrying in 2s...\n`);
+        operational?.(`Push failed (attempt ${attempt}): ${lastError} — retrying in 2s...`, 'git');
         await new Promise(resolve => setTimeout(resolve, 2_000));
       }
     }
   }
 
   if (lastError) {
-    text?.(`── [Git] ERROR: Failed to push ${branchName} to origin: ${lastError}\n`);
+    operational?.(`ERROR: Failed to push ${branchName} to origin: ${lastError}`, 'git');
     return { ok: false, error: `Failed to push ${branchName} to origin after ${MAX_ATTEMPTS} attempts: ${lastError}` };
   }
 
@@ -390,12 +390,12 @@ export async function pushBranchToRemote(
   const remoteSha = await getRemoteBranchSha(gitRoot, branchName);
   if (!remoteSha) {
     const msg = `Push reported success but ${branchName} not visible on origin (fetch + rev-parse failed)`;
-    text?.(`── [Git] ERROR: ${msg}\n`);
+    operational?.(`ERROR: ${msg}`, 'git');
     console.error(`[git-pr] ${msg}`);
     return { ok: false, error: msg };
   }
 
-  text?.(`── [Git] Verified: ${branchName} on origin (${remoteSha.slice(0, 8)})\n`);
+  operational?.(`Verified: ${branchName} on origin (${remoteSha.slice(0, 8)})`, 'git');
   console.log(`[git-pr] Verified ${branchName} on origin (sha: ${remoteSha.slice(0, 8)})`);
   return { ok: true };
 }
