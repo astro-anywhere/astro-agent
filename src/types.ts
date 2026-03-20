@@ -174,10 +174,10 @@ export interface Task {
   /** Human-readable task description — used for PR body instead of raw prompt */
   description?: string;
 
-  /** Short hex ID derived from nodeId (first 6 hex chars of UUID) for branch names and PR titles */
+  /** Compact node ID token used for branch names and PR titles */
   shortNodeId?: string;
 
-  /** Short hex ID derived from projectId (first 6 hex chars of UUID) for PR titles */
+  /** Compact project ID token used for branch names and PR titles */
   shortProjectId?: string;
 
   /** Images embedded in task content, sent as base64 for multimodal prompts */

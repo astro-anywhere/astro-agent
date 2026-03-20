@@ -17,9 +17,9 @@ export interface WorktreeOptions {
   rootOverride?: string;
   projectId?: string;
   nodeId?: string;
-  /** Short hex ID from projectId (6 chars) — used for readable branch/worktree names */
+  /** Compact project ID token used for readable branch/worktree names */
   shortProjectId?: string;
-  /** Short hex ID from nodeId (6 chars) — used for readable branch/worktree names */
+  /** Compact node ID token used for readable branch/worktree names */
   shortNodeId?: string;
   agentDir?: string;
   /** Target branch from dispatch — takes priority over .astro/config.json and auto-detection */
