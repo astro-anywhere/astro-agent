@@ -364,11 +364,9 @@ export class WebSocketClient {
           console.log('[ws-client] Proactively refreshing token before expiry...');
           const newToken = await this.refreshAccessToken();
           this.wsToken = newToken;
-          console.log('[ws-client] ✅ Token refreshed, reconnecting with new token');
-          // Close gracefully — handleClose will trigger reconnect with the new token
-          if (this.ws?.readyState === WebSocket.OPEN) {
-            this.ws.close(1000, 'Token refresh');
-          }
+          console.log('[ws-client] ✅ Token refreshed (connection stays open, new token used on next reconnect)');
+          // Re-schedule for the next refresh cycle
+          this.scheduleTokenRefresh();
         } catch (error) {
           console.error('[ws-client] ❌ Proactive token refresh failed:', error instanceof Error ? error.message : String(error));
           // Retry in 5 minutes
