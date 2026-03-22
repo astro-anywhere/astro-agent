@@ -247,6 +247,9 @@ export class TaskExecutor {
   private claimedTasks: Set<string> = new Set();
   private openclawBridge: OpenClawBridge | null = null;
 
+  /** Branch names that are singleton delivery branches — must not be deleted by cleanupTask. */
+  private singletonBranches: Set<string> = new Set();
+
   // Safety tracking
   private tasksByDirectory: Map<string, Set<string>> = new Map(); // workdir -> taskIds
   private pendingSafetyChecks: Map<string, PendingSafetyCheck> = new Map(); // taskId -> pending check
@@ -546,20 +549,27 @@ export class TaskExecutor {
           console.log(`[executor] Task ${taskId}: worktree removed`);
         }
 
-        // Delete local branch
-        try {
-          execSync(`git branch -D "${branchName}"`, { encoding: 'utf-8', timeout: 10_000 });
-          console.log(`[executor] Task ${taskId}: local branch ${branchName} deleted`);
-        } catch {
-          console.log(`[executor] Task ${taskId}: local branch ${branchName} not found or already deleted`);
-        }
+        // Skip branch deletion for singleton delivery branches — these are shared
+        // accumulation branches that outlive individual tasks and will be used for
+        // the component's final PR to the base branch.
+        if (this.singletonBranches.has(branchName)) {
+          console.log(`[executor] Task ${taskId}: skipping branch deletion — ${branchName} is a singleton delivery branch`);
+        } else {
+          // Delete local branch
+          try {
+            execSync(`git branch -D "${branchName}"`, { encoding: 'utf-8', timeout: 10_000 });
+            console.log(`[executor] Task ${taskId}: local branch ${branchName} deleted`);
+          } catch {
+            console.log(`[executor] Task ${taskId}: local branch ${branchName} not found or already deleted`);
+          }
 
-        // Delete remote branch
-        try {
-          execSync(`git push origin --delete "${branchName}"`, { encoding: 'utf-8', timeout: 30_000 });
-          console.log(`[executor] Task ${taskId}: remote branch ${branchName} deleted`);
-        } catch {
-          console.log(`[executor] Task ${taskId}: remote branch ${branchName} not found or already deleted`);
+          // Delete remote branch
+          try {
+            execSync(`git push origin --delete "${branchName}"`, { encoding: 'utf-8', timeout: 30_000 });
+            console.log(`[executor] Task ${taskId}: remote branch ${branchName} deleted`);
+          } catch {
+            console.log(`[executor] Task ${taskId}: remote branch ${branchName} not found or already deleted`);
+          }
         }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
@@ -1884,6 +1894,14 @@ export class TaskExecutor {
         throw new Error(`Worktree creation returned null for ${task.workingDirectory}. Cannot proceed without isolation.`);
       }
       console.log(`[executor] Task ${task.id}: worktree created at ${worktree.workingDirectory} (branch: ${worktree.branchName})`);
+
+      // Track singleton delivery branches so cleanupTask won't destroy them.
+      // Singleton branches are shared across the delivery lifecycle — deleting
+      // them would orphan the delivery branch and its eventual PR.
+      if (task.deliveryBranchIsSingleton && worktree.branchName) {
+        this.singletonBranches.add(worktree.branchName);
+      }
+
       return worktree;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
