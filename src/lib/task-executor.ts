@@ -260,6 +260,7 @@ export class TaskExecutor {
     shortProjectId?: string;
     shortNodeId?: string;
     projectId?: string;
+    deliveryBranchIsSingleton?: boolean;
     storedAt: number;
   }> = new Map();
 
@@ -760,6 +761,7 @@ export class TaskExecutor {
             agentDir: meta.agentDir,
             baseBranch: meta.baseBranch,
             projectBranch: meta.projectBranch,
+            deliveryBranchIsSingleton: meta.deliveryBranchIsSingleton,
             stdout: stream.stdout,
             stderr: stream.stderr,
             operational: stream.operational,
@@ -1248,6 +1250,7 @@ export class TaskExecutor {
           shortProjectId: normalizedTask.shortProjectId,
           shortNodeId: normalizedTask.shortNodeId,
           projectId: normalizedTask.projectId,
+          deliveryBranchIsSingleton: normalizedTask.deliveryBranchIsSingleton,
           storedAt: Date.now(),
         });
       }

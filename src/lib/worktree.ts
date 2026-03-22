@@ -109,13 +109,14 @@ export async function createWorktree(
   }
   const projectBranchName = dispatchProjectBranch
     ?? (shortProjectId ? `${branchPrefix}${sanitize(shortProjectId)}` : undefined);
+  // Validate singleton prerequisite before computing isSingleton
+  if (deliveryBranchIsSingleton && !projectBranchName) {
+    throw new Error('Singleton delivery branch requires projectBranchName');
+  }
   const isSingleton = deliveryBranchIsSingleton && !!projectBranchName;
   const branchSuffix = shortProjectId && shortNodeId
     ? `${sanitize(shortProjectId)}-${sanitize(shortNodeId)}`
     : sanitize(taskId);
-  if (isSingleton && !projectBranchName) {
-    throw new Error('Singleton delivery branch requires projectBranchName');
-  }
   const taskBranchName = isSingleton
     ? projectBranchName  // Singleton: work directly on delivery branch
     : `${branchPrefix}${branchSuffix}`;
