@@ -1869,8 +1869,14 @@ export class TaskExecutor {
         // dispatched to different subdirectories of the same repo (e.g., repo/
         // and repo/subdir/) share the same lock for the same branch.
         const gitRoot = await getGitRoot(task.workingDirectory);
+        if (!gitRoot) {
+          throw new Error(
+            `Cannot resolve git root for singleton branch lock (workdir: ${task.workingDirectory}). ` +
+            `Singleton worktrees require a valid git repository.`
+          );
+        }
         const lockKey = BranchLockManager.computeLockKey(
-          gitRoot ?? task.workingDirectory,
+          gitRoot,
           undefined,
           undefined,
           `singleton::${task.deliveryBranch ?? task.projectBranch}`,
