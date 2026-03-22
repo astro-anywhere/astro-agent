@@ -100,6 +100,13 @@ export async function createWorktree(
   // Delivery branch: per-connected-component accumulation branch (e.g., 'astro/7b19a9-e4f1a2').
   // Task branch: per-task worktree branch (e.g., 'astro/7b19a9-a1b2c3').
   // Singleton mode: delivery branch IS the working branch (no task sub-branch).
+  //
+  // Validate dispatch-provided branch name: while execFileAsync prevents shell
+  // injection, we still reject names with unexpected characters to prevent
+  // path traversal or git ref manipulation.
+  if (dispatchProjectBranch) {
+    validateBranchName(dispatchProjectBranch);
+  }
   const projectBranchName = dispatchProjectBranch
     ?? (shortProjectId ? `${branchPrefix}${sanitize(shortProjectId)}` : undefined);
   const isSingleton = deliveryBranchIsSingleton && !!projectBranchName;
@@ -215,6 +222,9 @@ export async function createWorktree(
   if (isSingleton) {
     // Singleton: checkout the existing delivery branch in the worktree.
     // No new branch is created — the agent works directly on the delivery branch.
+    // INVARIANT: The server guarantees at most one task dispatched per singleton
+    // delivery branch. Concurrent dispatches to the same branch are prevented
+    // by the dispatch engine's node-level locking.
     operational?.(`Creating singleton worktree on delivery branch ${taskBranchName}...`, 'astro');
     try {
       await execFileAsync(
@@ -1079,6 +1089,19 @@ function validateTaskId(taskId: string): void {
   const safePattern = /^[a-zA-Z0-9._-]+$/;
   if (!safePattern.test(taskId) || taskId.length > 200) {
     throw new Error(`Invalid taskId format: ${taskId}. Must be alphanumeric with hyphens/underscores/dots, max 200 chars.`);
+  }
+}
+
+/**
+ * Validate that a dispatch-provided branch name is safe for git operations.
+ * Allows alphanumeric, hyphens, underscores, dots, and forward slashes
+ * (valid in git refs like 'astro/7b19a9-e4f1a2'). Rejects path traversal
+ * sequences (../) and control characters.
+ */
+function validateBranchName(name: string): void {
+  const safePattern = /^[a-zA-Z0-9/_.-]+$/;
+  if (!safePattern.test(name) || name.length > 200 || name.includes('..')) {
+    throw new Error(`Invalid branch name from dispatch: ${name}. Must contain only alphanumeric/hyphens/underscores/dots/slashes, no "..", max 200 chars.`);
   }
 }
 
