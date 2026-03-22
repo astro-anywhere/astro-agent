@@ -1,5 +1,5 @@
 /**
- * Tests for local-merge — squash-merge task branches into project branches locally.
+ * Tests for local-merge — squash-merge task branches into delivery branches locally.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -53,9 +53,9 @@ vi.mock('node:fs/promises', () => ({
   rm: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { localMergeIntoProjectBranch } from '../local-merge.js';
+import { localMergeIntoDeliveryBranch } from '../local-merge.js';
 
-describe('localMergeIntoProjectBranch', () => {
+describe('localMergeIntoDeliveryBranch', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (globalThis as unknown as Record<string, unknown>).__gitResponses = {};
@@ -70,7 +70,7 @@ describe('localMergeIntoProjectBranch', () => {
       'diff --stat': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo',
       'astro/abc123-def456',
       'astro/abc123',
@@ -92,7 +92,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo',
       'astro/abc123-def456',
       'astro/abc123',
@@ -113,7 +113,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo',
       'astro/abc123-def456',
       'astro/abc123',
@@ -131,7 +131,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree add': { error: new Error('worktree already exists') },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo',
       'astro/abc123-def456',
       'astro/abc123',
@@ -151,7 +151,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo',
       'astro/abc123-def456',
       'astro/abc123',
@@ -171,7 +171,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo',
       'astro/abc123-def456',
       'astro/abc123',
@@ -193,7 +193,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo',
       'astro/abc123-def456',
       'astro/abc123',
@@ -216,7 +216,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo', 'task-branch', 'project-branch', 'msg',
     );
 
@@ -236,7 +236,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch('/repo', 'task', 'proj', 'msg');
+    const result = await localMergeIntoDeliveryBranch('/repo', 'task', 'proj', 'msg');
     expect(result.merged).toBe(false);
     expect(result.error).toContain('failed to capture SHA');
   });
@@ -254,7 +254,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree prune': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo', 'task', 'proj', 'msg',
     );
 
@@ -279,7 +279,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo', 'task', 'proj', 'msg',
     );
 
@@ -302,7 +302,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo', 'task', 'proj', 'msg',
     );
 
@@ -330,7 +330,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo', 'task', 'proj', 'msg',
     );
 
@@ -354,7 +354,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo', 'task', 'proj', 'msg',
     );
 
@@ -370,7 +370,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo', 'task', 'proj', 'msg',
     );
 
@@ -384,7 +384,7 @@ describe('localMergeIntoProjectBranch', () => {
       'diff --stat': { stdout: '   \n  \n' },
     });
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       '/repo', 'task', 'proj', 'msg',
     );
 
@@ -407,7 +407,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch('/repo', 'task', 'proj', 'msg');
+    const result = await localMergeIntoDeliveryBranch('/repo', 'task', 'proj', 'msg');
     expect(result.merged).toBe(false);
     // Should NOT have an error — this is the "nothing to commit" case
     expect(result.error).toBeUndefined();
@@ -426,7 +426,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch('/repo', 'task', 'proj', 'msg');
+    const result = await localMergeIntoDeliveryBranch('/repo', 'task', 'proj', 'msg');
     expect(result.merged).toBe(false);
     expect(result.error).toBeUndefined();
   });
@@ -444,7 +444,7 @@ describe('localMergeIntoProjectBranch', () => {
       'worktree remove': { stdout: '' },
     });
 
-    const result = await localMergeIntoProjectBranch('/repo', 'task', 'proj', 'msg');
+    const result = await localMergeIntoDeliveryBranch('/repo', 'task', 'proj', 'msg');
     expect(result.merged).toBe(false);
     expect(result.error).toContain('Commit failed');
   });

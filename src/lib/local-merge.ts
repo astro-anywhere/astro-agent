@@ -1,5 +1,5 @@
 /**
- * Local Merge — squash-merge a task branch into a project branch locally.
+ * Local Merge — squash-merge a task branch into a delivery branch locally.
  *
  * Used for git repos with no remote (remoteType='none'). Provides the same
  * accumulative branch model as the GitHub PR flow, but using local git
@@ -29,15 +29,15 @@ export interface LocalMergeResult {
 }
 
 /**
- * Squash-merge a task branch into a project branch using a temporary worktree.
+ * Squash-merge a task branch into a delivery branch using a temporary worktree.
  *
  * This never disturbs the user's main checkout or any existing worktrees.
  * A temporary worktree is created for the merge, used, then cleaned up.
  */
-export async function localMergeIntoProjectBranch(
+export async function localMergeIntoDeliveryBranch(
   gitRoot: string,
   taskBranch: string,
-  projectBranch: string,
+  deliveryBranch: string,
   commitMessage: string,
   /** Optional logging callback for user-visible messages */
   log?: (msg: string) => void,
@@ -45,15 +45,15 @@ export async function localMergeIntoProjectBranch(
   const emit = log ?? (() => {});
 
   // 1. Check if there are actual changes between the branches
-  console.log(`[local-merge] diff --stat ${projectBranch}...${taskBranch} (gitRoot: ${gitRoot})`);
+  console.log(`[local-merge] diff --stat ${deliveryBranch}...${taskBranch} (gitRoot: ${gitRoot})`);
   try {
     const { stdout: diff } = await execFileAsync(
       'git',
-      ['-C', gitRoot, 'diff', '--stat', `${projectBranch}...${taskBranch}`],
+      ['-C', gitRoot, 'diff', '--stat', `${deliveryBranch}...${taskBranch}`],
       { env: withGitEnv(), timeout: 10_000 },
     );
     if (!diff.trim()) {
-      console.log(`[local-merge] No changes between ${projectBranch} and ${taskBranch}`);
+      console.log(`[local-merge] No changes between ${deliveryBranch} and ${taskBranch}`);
       emit('No changes to merge');
       return { merged: false };
     }
@@ -65,11 +65,11 @@ export async function localMergeIntoProjectBranch(
   // 2. Create a temporary worktree for the merge operation
   const suffix = `${Date.now()}-${randomBytes(4).toString('hex')}`;
   const tmpMergeDir = join(gitRoot, '.astro', 'tmp-merge', `merge-${suffix}`);
-  console.log(`[local-merge] worktree add ${tmpMergeDir} ${projectBranch}`);
+  console.log(`[local-merge] worktree add ${tmpMergeDir} ${deliveryBranch}`);
   try {
     await execFileAsync(
       'git',
-      ['-C', gitRoot, 'worktree', 'add', tmpMergeDir, projectBranch],
+      ['-C', gitRoot, 'worktree', 'add', tmpMergeDir, deliveryBranch],
       { env: withGitEnv(), timeout: 15_000 },
     );
     console.log(`[local-merge] Merge worktree created at ${tmpMergeDir}`);
@@ -82,7 +82,7 @@ export async function localMergeIntoProjectBranch(
   try {
     // 3. Squash-merge the task branch
     console.log(`[local-merge] merge --squash ${taskBranch} (cwd: ${tmpMergeDir})`);
-    emit(`Squash-merging ${taskBranch} into ${projectBranch}`);
+    emit(`Squash-merging ${taskBranch} into ${deliveryBranch}`);
     try {
       await execFileAsync(
         'git',
