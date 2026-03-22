@@ -1844,7 +1844,19 @@ export class TaskExecutor {
     // Git worktree path — worktree creation must succeed or fail the task.
     // Running in the raw workdir without isolation risks cross-task commit
     // contamination and breaks PR creation.
+    //
+    // Singleton delivery branches: acquire a branch-level lock during worktree
+    // creation to prevent concurrent dispatches (if server-side invariant fails)
+    // from fighting over the same branch. The lock is held only during worktree
+    // setup (seconds), not the entire task execution.
+    let singletonLock: { release: () => void } | undefined;
     try {
+      if (task.deliveryBranchIsSingleton && task.projectBranch) {
+        const lockKey = `singleton::${task.projectBranch}`;
+        console.log(`[executor] Task ${task.id}: acquiring singleton branch lock for ${task.projectBranch}`);
+        singletonLock = await this.branchLockManager.acquire(lockKey, task.id);
+      }
+
       console.log(`[executor] Task ${task.id}: creating worktree for workdir=${task.workingDirectory}`);
       const worktree = await createWorktree({
         workingDirectory: task.workingDirectory,
@@ -1873,6 +1885,8 @@ export class TaskExecutor {
       console.error(`[executor] Task ${task.id}: worktree creation FAILED: ${errorMsg}`);
       this.wsClient.sendTaskStatus(task.id, 'failed', 0, `Worktree setup failed: ${errorMsg}`);
       throw error;
+    } finally {
+      singletonLock?.release();
     }
   }
 
