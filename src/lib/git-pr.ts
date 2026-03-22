@@ -1,7 +1,7 @@
 /**
  * Git PR utilities for creating pull requests after task execution.
  *
- * GitHub workflow: task branch → PR → project branch (auto-merge).
+ * GitHub workflow: task branch → PR → delivery branch (auto-merge).
  * Task branches NEVER create PRs directly to the base branch (main).
  * The only PR to main comes from the "Push to GitHub" task node.
  *
@@ -260,7 +260,7 @@ async function findExistingPR(
 
 /**
  * Merge a pull request using the `gh` CLI.
- * Used to auto-merge per-task PRs into the project branch.
+ * Used to auto-merge per-task PRs into the delivery branch.
  *
  * Uses --repo OWNER/REPO when provided so the command doesn't depend on
  * the local git directory being valid.
@@ -330,7 +330,7 @@ export async function getRemoteBranchSha(
 /**
  * Push a branch to origin with retry, delay, and post-push verification.
  *
- * Shared by ensureProjectBranch() and the safety net in pushAndCreatePR().
+ * Shared by ensureDeliveryBranch() and the safety net in pushAndCreatePR().
  * Returns { ok: true } on success, { ok: false, error } on failure.
  *
  * - 2-attempt retry with 2s delay between attempts
@@ -506,9 +506,9 @@ async function readBaseBranchFromConfig(gitRoot: string): Promise<string | null>
 }
 
 /**
- * Full PR delivery following the accumulative project branch workflow:
+ * Full PR delivery following the accumulative delivery branch workflow:
  *
- *   task branch → push → PR → auto-merge → project branch
+ *   task branch → push → PR → auto-merge → delivery branch
  *
  * When the worktree has been cleaned up (agent removed it during execution):
  * - git operations (push, rev-list) use gitRoot — the task branch lives in
@@ -517,10 +517,10 @@ async function readBaseBranchFromConfig(gitRoot: string): Promise<string | null>
  *   targets the GitHub repo without depending on local filesystem state
  * - auto-commit is skipped (nothing to stage if the worktree is gone)
  *
- * baseBranch MUST be provided by the caller. It is the project branch
- * (e.g., astro/7b19a9), never auto-detected. Task branches must never
- * create PRs directly to the base branch (main) — that's exclusively
- * the "Push to GitHub" node's responsibility.
+ * baseBranch MUST be provided by the caller. It is the delivery branch
+ * (e.g., astro/7b19a9-e4f1a2), never auto-detected. Task branches must
+ * never create PRs directly to the base branch (main) — that's
+ * exclusively the "Push to GitHub" node's responsibility.
  */
 export async function pushAndCreatePR(
   worktreePath: string,
@@ -534,9 +534,9 @@ export async function pushAndCreatePR(
     autoCommit?: boolean;
     /** Override the default PR body */
     body?: string;
-    /** Target branch for PR base (project branch). Required for PR creation. */
+    /** Target branch for PR base (delivery branch). Required for PR creation. */
     baseBranch?: string;
-    /** If true, auto-merge the PR after creation (squash merge into project branch) */
+    /** If true, auto-merge the PR after creation (squash merge into delivery branch) */
     autoMerge?: boolean;
     /** Merge method for auto-merge (default: 'squash') */
     mergeMethod?: 'squash' | 'merge' | 'rebase';
@@ -586,9 +586,9 @@ export async function pushAndCreatePR(
     return result;
   }
 
-  // baseBranch: caller-provided (project branch) > config > auto-detect.
+  // baseBranch: caller-provided (delivery branch) > config > auto-detect.
   // For the accumulative workflow, the caller should always provide the
-  // project branch. Auto-detection is only a fallback for edge cases
+  // delivery branch. Auto-detection is only a fallback for edge cases
   // (e.g., "Push to GitHub" node targeting the default branch).
   const baseBranch = options.baseBranch ?? await readBaseBranchFromConfig(gitRoot) ?? await getDefaultBranch(gitRoot);
 
@@ -641,10 +641,10 @@ export async function pushAndCreatePR(
       ? `## Task\n\n${options.taskDescription}\n\n---\n*Created by Astro task automation*`
       : '*Created by Astro task automation*');
 
-  // Safety net: verify the project branch (base for PR) exists on the remote.
-  // ensureProjectBranch() handles this during workspace prep, but if the branch
+  // Safety net: verify the delivery branch (base for PR) exists on the remote.
+  // ensureDeliveryBranch() handles this during workspace prep, but if the branch
   // was deleted between prep and delivery, recover here as a last resort.
-  // Only runs for project branches (autoMerge=true), not for PRs to main/master.
+  // Only runs for delivery branches (autoMerge=true), not for PRs to main/master.
   if (options.autoMerge) {
     const remoteSha = await getRemoteBranchSha(gitRoot, baseBranch);
     if (!remoteSha) {
@@ -659,7 +659,7 @@ export async function pushAndCreatePR(
     }
   }
 
-  // Create PR: task branch → project branch.
+  // Create PR: task branch → delivery branch.
   // Uses --repo when available so gh doesn't depend on local git context.
   // Guard: if repoSlug is null (non-standard remote URL) and the worktree
   // was deleted between the initial check and now, gh will fail with a
@@ -683,7 +683,7 @@ export async function pushAndCreatePR(
     result.prNumber = pr.prNumber;
     result.commitBeforeSha = options.commitBeforeSha;
 
-    // Auto-merge: squash-merge the per-task PR into the project branch
+    // Auto-merge: squash-merge the per-task PR into the delivery branch
     if (options.autoMerge && pr.prNumber) {
       const mergeResult = await mergePullRequest(gitDir, pr.prNumber, {
         method: options.mergeMethod ?? 'squash',
@@ -691,7 +691,7 @@ export async function pushAndCreatePR(
         repoSlug: repoSlug ?? undefined,
       });
       if (mergeResult.ok) {
-        // Capture the project branch SHA after merge
+        // Capture the delivery branch SHA after merge
         result.commitAfterSha = await getRemoteBranchSha(gitRoot, baseBranch);
         if (!result.commitAfterSha) {
           console.warn(`[git-pr] Failed to capture commitAfterSha after merge of PR #${pr.prNumber}`);

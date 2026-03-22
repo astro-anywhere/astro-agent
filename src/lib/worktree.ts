@@ -24,8 +24,12 @@ export interface WorktreeOptions {
   agentDir?: string;
   /** Target branch from dispatch — takes priority over .astro/config.json and auto-detection */
   baseBranch?: string;
-  /** Project-level accumulation branch (e.g., 'astro/7b19a9'). Task branches from this instead of main. */
-  projectBranch?: string;
+  /** Delivery branch for this task's connected component (e.g., 'astro/7b19a9-e4f1a2').
+   *  In multi-task mode, task branches are created from this branch.
+   *  In singleton mode, the agent works directly on this branch. */
+  deliveryBranch?: string;
+  /** If true, work directly on the delivery branch (singleton component — no task sub-branch). */
+  deliveryBranchIsSingleton?: boolean;
   stdout?: (data: string) => void;
   stderr?: (data: string) => void;
   /** Emit structured operational activity lines */
@@ -37,16 +41,16 @@ export interface WorktreeOptions {
 export interface WorktreeSetup {
   workingDirectory: string;
   branchName: string;
-  /** The base branch the worktree was created from (project branch or default branch) */
+  /** The base branch the worktree was created from (delivery branch or default branch) */
   baseBranch: string;
   /** Git SHA of the start point before this task's work */
   commitBeforeSha?: string;
   /** Absolute path to the git root directory (for local merge operations) */
   gitRoot: string;
-  /** Project accumulation branch name, if applicable (e.g., 'astro/7b19a9') */
-  projectBranch?: string;
-  /** Absolute path to the persistent project worktree (detached HEAD), if created */
-  projectWorktreePath?: string;
+  /** Delivery branch name, if applicable (e.g., 'astro/7b19a9-e4f1a2') */
+  deliveryBranch?: string;
+  /** Absolute path to the persistent delivery worktree (detached HEAD), if created */
+  deliveryWorktreePath?: string;
   cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
 }
 
@@ -63,7 +67,8 @@ export async function createWorktree(
     shortNodeId,
     agentDir,
     baseBranch: dispatchBaseBranch,
-    projectBranch: dispatchProjectBranch,
+    deliveryBranch: dispatchDeliveryBranch,
+    deliveryBranchIsSingleton,
     stdout,
     stderr,
     signal,
@@ -92,15 +97,29 @@ export async function createWorktree(
 
   const branchPrefix = await readBranchPrefix(gitRoot, agentDirName);
 
-  // Separate project branch (accumulative) from task branch (per-task).
-  // Project branch: `astro/{shortProjectId}` — accumulates all task work via auto-merged PRs
-  // Task branch: `astro/{shortProjectId}-{shortNodeId}` — per-task worktree branch
-  const projectBranchName = dispatchProjectBranch
+  // Delivery branch: per-connected-component accumulation branch (e.g., 'astro/7b19a9-e4f1a2').
+  // Task branch: per-task worktree branch (e.g., 'astro/7b19a9-a1b2c3').
+  // Singleton mode: delivery branch IS the working branch (no task sub-branch).
+  //
+  // Validate dispatch-provided branch name: while execFileAsync prevents shell
+  // injection, we still reject names with unexpected characters to prevent
+  // path traversal or git ref manipulation.
+  if (dispatchDeliveryBranch) {
+    validateBranchName(dispatchDeliveryBranch);
+  }
+  const deliveryBranchName = dispatchDeliveryBranch
     ?? (shortProjectId ? `${branchPrefix}${sanitize(shortProjectId)}` : undefined);
+  // Validate singleton prerequisite before computing isSingleton
+  if (deliveryBranchIsSingleton && !deliveryBranchName) {
+    throw new Error('Singleton delivery branch requires deliveryBranchName');
+  }
+  const isSingleton = deliveryBranchIsSingleton && !!deliveryBranchName;
   const branchSuffix = shortProjectId && shortNodeId
     ? `${sanitize(shortProjectId)}-${sanitize(shortNodeId)}`
     : sanitize(taskId);
-  const taskBranchName = `${branchPrefix}${branchSuffix}`;
+  const taskBranchName = isSingleton
+    ? deliveryBranchName  // Singleton: work directly on delivery branch
+    : `${branchPrefix}${branchSuffix}`;
   const worktreePath = join(baseRoot, branchSuffix);
   // Abort-signal gate: check between every long git operation so cancellation
   // actually halts workspace prep instead of letting it run to completion.
@@ -113,16 +132,20 @@ export async function createWorktree(
   await rm(worktreePath, { recursive: true, force: true });
   await pruneWorktrees(gitRoot);
 
-  // Clean up lingering worktrees and branches for the TASK branch only.
-  // Never delete the project branch — it accumulates work across tasks.
+  // Clean up lingering worktrees for the working branch.
+  // For singletons, only clean up stale worktree checkouts — never delete
+  // the delivery branch itself (it's managed by the server).
+  // For multi-task, also delete the stale task branch and its remote.
   checkAborted();
   await removeLingeringWorktrees(gitRoot, taskBranchName);
-  await ensureBranchAvailable(gitRoot, taskBranchName);
+  if (!isSingleton) {
+    await ensureBranchAvailable(gitRoot, taskBranchName);
 
-  // Delete remote task branch if it exists — prevents non-fast-forward push
-  // failures when re-executing a task whose previous branch was already pushed
-  checkAborted();
-  await deleteRemoteBranch(gitRoot, taskBranchName);
+    // Delete remote task branch if it exists — prevents non-fast-forward push
+    // failures when re-executing a task whose previous branch was already pushed
+    checkAborted();
+    await deleteRemoteBranch(gitRoot, taskBranchName);
+  }
 
   // Fetch latest so we branch from up-to-date origin (skip for local-only repos)
   checkAborted();
@@ -154,27 +177,28 @@ export async function createWorktree(
     ?? await readBaseBranch(gitRoot, agentDirName)
     ?? await getDefaultBranch(gitRoot);
 
-  // Ensure the project branch exists on origin. If this is the first task,
+  // Ensure the delivery branch exists on origin. If this is the first task,
   // create it from origin/{defaultBranch}. Idempotent.
   checkAborted();
-  if (projectBranchName) {
-    await ensureProjectBranch(gitRoot, projectBranchName, defaultBranch, operational);
+  if (deliveryBranchName) {
+    await ensureDeliveryBranch(gitRoot, deliveryBranchName, defaultBranch, operational);
   }
 
-  // Create persistent project worktree (detached HEAD) — idempotent.
+  // Create persistent delivery worktree (detached HEAD) — idempotent.
   // This enables file browsing at .astro/worktrees/{shortProjectId}/ after
   // task worktrees are cleaned up.
-  let projectWorktreePath: string | undefined;
-  if (projectBranchName && shortProjectId) {
-    projectWorktreePath = await createProjectWorktree(
-      gitRoot, projectBranchName, baseRoot, sanitize(shortProjectId), operational,
+  // Skip for singletons — the task worktree IS the working worktree.
+  let deliveryWorktreePath: string | undefined;
+  if (!isSingleton && deliveryBranchName && shortProjectId) {
+    deliveryWorktreePath = await createDeliveryWorktree(
+      gitRoot, deliveryBranchName, baseRoot, sanitize(shortProjectId), operational,
     ) ?? undefined;
   }
 
-  // Start point: prefer project branch tip (accumulates prior task work),
-  // fall back to default branch for non-project worktrees.
+  // Start point: prefer delivery branch tip (accumulates prior task work),
+  // fall back to default branch for non-delivery worktrees.
   // Using origin/<branch> avoids stale local refs.
-  const effectiveBase = projectBranchName ?? defaultBranch;
+  const effectiveBase = deliveryBranchName ?? defaultBranch;
   const remoteRef = `origin/${effectiveBase}`;
   const hasRemoteRef = await refExists(gitRoot, remoteRef);
   const startPoint = hasRemoteRef ? remoteRef : effectiveBase;
@@ -199,41 +223,85 @@ export async function createWorktree(
   }
 
   checkAborted();
-  operational?.(`Creating worktree from ${startPoint}...`, 'astro');
-  try {
-    await execFileAsync(
-      'git',
-      ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
-      { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('already exists')) {
-      // Branch exists from a previous failed/retried execution — delete it and retry.
-      console.log(`[worktree] Branch ${taskBranchName} already exists, deleting stale branch and retrying`);
-      try {
-        await execFileAsync(
-          'git', ['-C', gitRoot, 'branch', '-D', taskBranchName],
-          { env: withGitEnv(), timeout: 5_000 }
-        );
-      } catch { /* branch might be checked out in a stale worktree — prune first */ }
-      try {
-        await execFileAsync(
-          'git', ['-C', gitRoot, 'worktree', 'prune'],
-          { env: withGitEnv(), timeout: 5_000 }
-        );
-        await execFileAsync(
-          'git', ['-C', gitRoot, 'branch', '-D', taskBranchName],
-          { env: withGitEnv(), timeout: 5_000 }
-        );
-      } catch { /* best effort — may already be deleted */ }
+  if (isSingleton) {
+    // Singleton: checkout the existing delivery branch in the worktree.
+    // No new branch is created — the agent works directly on the delivery branch.
+    // INVARIANT: The server guarantees at most one task dispatched per singleton
+    // delivery branch. Concurrent dispatches to the same branch are prevented
+    // by the dispatch engine's node-level locking.
+    operational?.(`Creating singleton worktree on delivery branch ${taskBranchName}...`, 'astro');
+    try {
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, 'worktree', 'add', worktreePath, taskBranchName],
+        { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('already checked out') || msg.includes('already registered')) {
+        // Stale worktree — prune and retry. If the branch is still locked after
+        // pruning, another task is genuinely using it (server invariant violated).
+        console.warn(`[worktree] Delivery branch ${taskBranchName} locked by existing worktree, pruning stale entries`);
+        await pruneWorktrees(gitRoot);
+        try {
+          await execFileAsync(
+            'git',
+            ['-C', gitRoot, 'worktree', 'add', worktreePath, taskBranchName],
+            { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
+          );
+        } catch (retryErr) {
+          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          if (retryMsg.includes('already checked out') || retryMsg.includes('already registered')) {
+            throw new Error(
+              `Singleton delivery branch ${taskBranchName} is still checked out after pruning. ` +
+              `Another task may be actively using this branch — server-side mutual exclusion may be broken. ` +
+              `Original error: ${retryMsg}`
+            );
+          }
+          throw retryErr;
+        }
+      } else {
+        throw err;
+      }
+    }
+  } else {
+    // Multi-task: create a new task branch from the delivery branch (or default branch).
+    operational?.(`Creating worktree from ${startPoint}...`, 'astro');
+    try {
       await execFileAsync(
         'git',
         ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
         { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
       );
-    } else {
-      throw err;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('already exists')) {
+        // Branch exists from a previous failed/retried execution — delete it and retry.
+        console.log(`[worktree] Branch ${taskBranchName} already exists, deleting stale branch and retrying`);
+        try {
+          await execFileAsync(
+            'git', ['-C', gitRoot, 'branch', '-D', taskBranchName],
+            { env: withGitEnv(), timeout: 5_000 }
+          );
+        } catch { /* branch might be checked out in a stale worktree — prune first */ }
+        try {
+          await execFileAsync(
+            'git', ['-C', gitRoot, 'worktree', 'prune'],
+            { env: withGitEnv(), timeout: 5_000 }
+          );
+          await execFileAsync(
+            'git', ['-C', gitRoot, 'branch', '-D', taskBranchName],
+            { env: withGitEnv(), timeout: 5_000 }
+          );
+        } catch { /* best effort — may already be deleted */ }
+        await execFileAsync(
+          'git',
+          ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
+          { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
+        );
+      } else {
+        throw err;
+      }
     }
   }
 
@@ -308,13 +376,17 @@ export async function createWorktree(
   return {
     workingDirectory: worktreeWorkingDirectory,
     branchName: taskBranchName,
-    baseBranch: effectiveBase,
+    // Singleton: PR targets the base branch (main) directly.
+    // Multi-task: PR targets the delivery branch (effectiveBase).
+    baseBranch: isSingleton ? defaultBranch : effectiveBase,
     commitBeforeSha,
     gitRoot,
-    projectBranch: projectBranchName,
-    projectWorktreePath,
+    // Singleton: no accumulative merge step — PR goes directly to base branch.
+    deliveryBranch: isSingleton ? undefined : deliveryBranchName,
+    deliveryWorktreePath: isSingleton ? undefined : deliveryWorktreePath,
     cleanup: async (options?: { keepBranch?: boolean }) => {
-      await cleanupWorktree(gitRoot, worktreePath, taskBranchName, options?.keepBranch);
+      // Singleton: always keep the delivery branch (server manages its lifecycle).
+      await cleanupWorktree(gitRoot, worktreePath, taskBranchName, isSingleton || options?.keepBranch);
     },
   };
 }
@@ -374,7 +446,7 @@ export async function removeLingeringWorktrees(gitRoot: string, branchName: stri
 }
 
 /**
- * Ensure the project-level accumulation branch exists.
+ * Ensure the delivery branch exists.
  *
  * For repos WITH a remote: create on origin and push.
  * For repos WITHOUT a remote: create locally only (no push).
@@ -386,9 +458,9 @@ export async function removeLingeringWorktrees(gitRoot: string, branchName: stri
  * It is internally idempotent: if a parallel task already created the branch,
  * the "already exists" error is caught and handled gracefully.
  */
-async function ensureProjectBranch(
+async function ensureDeliveryBranch(
   gitRoot: string,
-  projectBranch: string,
+  deliveryBranch: string,
   defaultBranch: string,
   operational?: (message: string, source: 'astro' | 'git' | 'delivery') => void,
 ): Promise<void> {
@@ -396,162 +468,162 @@ async function ensureProjectBranch(
 
   if (hasRemote) {
     // --- Remote mode: check origin, push if needed ---
-    const remoteRef = `origin/${projectBranch}`;
+    const remoteRef = `origin/${deliveryBranch}`;
     if (await refExists(gitRoot, remoteRef)) {
-      operational?.(`Project branch ${projectBranch} exists on origin`, 'git');
-      console.log(`[worktree] Project branch ${projectBranch} exists on origin`);
+      operational?.(`Delivery branch ${deliveryBranch} exists on origin`, 'git');
+      console.log(`[worktree] Delivery branch ${deliveryBranch} exists on origin`);
       return;
     }
 
     // Branch not on origin — either create it or push an existing local branch.
-    const localExists = await refExists(gitRoot, `refs/heads/${projectBranch}`);
+    const localExists = await refExists(gitRoot, `refs/heads/${deliveryBranch}`);
 
     if (!localExists) {
-      // First-ever task for this project — create the branch locally.
+      // First-ever task for this component — create the branch locally.
       const defaultRemoteRef = `origin/${defaultBranch}`;
       const hasDefaultRemote = await refExists(gitRoot, defaultRemoteRef);
       const startPoint = hasDefaultRemote ? defaultRemoteRef : defaultBranch;
 
-      operational?.(`Creating project branch ${projectBranch} from ${startPoint}...`, 'git');
-      console.log(`[worktree] Creating project branch ${projectBranch} from ${startPoint}`);
+      operational?.(`Creating delivery branch ${deliveryBranch} from ${startPoint}...`, 'git');
+      console.log(`[worktree] Creating delivery branch ${deliveryBranch} from ${startPoint}`);
       try {
         await execFileAsync(
           'git',
-          ['-C', gitRoot, 'branch', projectBranch, startPoint],
+          ['-C', gitRoot, 'branch', deliveryBranch, startPoint],
           { env: withGitEnv(), timeout: 10_000 }
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         // Handle race condition: parallel task already created the branch locally.
         if (msg.includes('already exists')) {
-          operational?.(`Project branch ${projectBranch} already created (race OK)`, 'git');
-          console.log(`[worktree] Project branch ${projectBranch} created by another task (race OK)`);
+          operational?.(`Delivery branch ${deliveryBranch} already created (race OK)`, 'git');
+          console.log(`[worktree] Delivery branch ${deliveryBranch} created by another task (race OK)`);
         } else {
-          throw new Error(`Failed to create project branch ${projectBranch}: ${msg}`);
+          throw new Error(`Failed to create delivery branch ${deliveryBranch}: ${msg}`);
         }
       }
     } else {
-      operational?.(`Project branch ${projectBranch} exists locally but not on origin`, 'git');
-      console.log(`[worktree] Project branch ${projectBranch} exists locally, not on origin — pushing`);
+      operational?.(`Delivery branch ${deliveryBranch} exists locally but not on origin`, 'git');
+      console.log(`[worktree] Delivery branch ${deliveryBranch} exists locally, not on origin — pushing`);
     }
 
-    // Push the project branch to origin — required for PR mode to work.
+    // Push the delivery branch to origin — required for PR mode to work.
     // Uses shared helper: 2-attempt retry with 2s delay + post-push verification.
-    const pushResult = await pushBranchToRemote(gitRoot, projectBranch, {
+    const pushResult = await pushBranchToRemote(gitRoot, deliveryBranch, {
       operational,
-      label: 'ensureProjectBranch',
+      label: 'ensureDeliveryBranch',
     });
     if (!pushResult.ok) {
       operational?.('PR delivery will fail — the base branch must exist on GitHub for PRs.', 'git');
       throw new Error(
-        `${pushResult.error}. PR delivery requires the project branch to exist on the remote. `
+        `${pushResult.error}. PR delivery requires the delivery branch to exist on the remote. `
         + `Check: git remote permissions, SSH keys, network connectivity.`
       );
     }
   } else {
     // --- Local mode (no remote): create branch locally only ---
-    if (await refExists(gitRoot, `refs/heads/${projectBranch}`)) {
-      operational?.(`Project branch ${projectBranch} exists locally (no remote)`, 'git');
-      console.log(`[worktree] Project branch ${projectBranch} exists locally (no remote)`);
+    if (await refExists(gitRoot, `refs/heads/${deliveryBranch}`)) {
+      operational?.(`Delivery branch ${deliveryBranch} exists locally (no remote)`, 'git');
+      console.log(`[worktree] Delivery branch ${deliveryBranch} exists locally (no remote)`);
       return;
     }
 
-    operational?.(`Creating local project branch ${projectBranch} from ${defaultBranch}...`, 'git');
-    console.log(`[worktree] Creating local project branch ${projectBranch} from ${defaultBranch}`);
+    operational?.(`Creating local delivery branch ${deliveryBranch} from ${defaultBranch}...`, 'git');
+    console.log(`[worktree] Creating local delivery branch ${deliveryBranch} from ${defaultBranch}`);
     try {
       await execFileAsync(
         'git',
-        ['-C', gitRoot, 'branch', projectBranch, defaultBranch],
+        ['-C', gitRoot, 'branch', deliveryBranch, defaultBranch],
         { env: withGitEnv(), timeout: 10_000 }
       );
-      operational?.(`Created local project branch ${projectBranch}`, 'git');
-      console.log(`[worktree] Created local project branch ${projectBranch}`);
+      operational?.(`Created local delivery branch ${deliveryBranch}`, 'git');
+      console.log(`[worktree] Created local delivery branch ${deliveryBranch}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('already exists')) {
-        operational?.(`Project branch ${projectBranch} already created (race OK)`, 'git');
-        console.log(`[worktree] Project branch ${projectBranch} created by another task (race OK)`);
+        operational?.(`Delivery branch ${deliveryBranch} already created (race OK)`, 'git');
+        console.log(`[worktree] Delivery branch ${deliveryBranch} created by another task (race OK)`);
         return;
       }
-      throw new Error(`Failed to create local project branch ${projectBranch}: ${msg}`);
+      throw new Error(`Failed to create local delivery branch ${deliveryBranch}: ${msg}`);
     }
   }
 }
 
 /**
- * Create a persistent project-level worktree using detached HEAD.
+ * Create a persistent delivery worktree using detached HEAD.
  *
- * The project worktree lives at {baseRoot}/{shortProjectId}/ and mirrors
- * the project branch on disk. It uses `--detach` so the project branch
- * ref remains free for temporary merge worktrees (localMergeIntoProjectBranch
- * checks out the project branch — git prevents the same branch in two worktrees).
+ * The delivery worktree lives at {baseRoot}/{shortProjectId}/ and mirrors
+ * the delivery branch on disk. It uses `--detach` so the delivery branch
+ * ref remains free for temporary merge worktrees (localMergeIntoDeliveryBranch
+ * checks out the delivery branch — git prevents the same branch in two worktrees).
  *
  * Idempotent — safe to call on every task dispatch. If the worktree
  * already exists, returns the existing path.
  */
-export async function createProjectWorktree(
+export async function createDeliveryWorktree(
   gitRoot: string,
-  projectBranch: string,
+  deliveryBranch: string,
   baseRoot: string,
   shortProjectId: string,
   operational?: (message: string, source: 'astro' | 'git' | 'delivery') => void,
 ): Promise<string | null> {
-  const projectWorktreePath = join(baseRoot, shortProjectId);
+  const deliveryWorktreePath = join(baseRoot, shortProjectId);
 
   // Already exists — no-op
-  if (existsSync(projectWorktreePath)) {
-    console.log(`[worktree] Project worktree already exists at ${projectWorktreePath}`);
-    return projectWorktreePath;
+  if (existsSync(deliveryWorktreePath)) {
+    console.log(`[worktree] Delivery worktree already exists at ${deliveryWorktreePath}`);
+    return deliveryWorktreePath;
   }
 
   // Determine start point: prefer local ref, fall back to remote
-  const localRef = `refs/heads/${projectBranch}`;
-  const remoteRef = `origin/${projectBranch}`;
+  const localRef = `refs/heads/${deliveryBranch}`;
+  const remoteRef = `origin/${deliveryBranch}`;
   const hasLocal = await refExists(gitRoot, localRef);
   const startPoint = hasLocal ? localRef : remoteRef;
 
   try {
     await execFileAsync(
       'git',
-      ['-C', gitRoot, 'worktree', 'add', '--detach', projectWorktreePath, startPoint],
+      ['-C', gitRoot, 'worktree', 'add', '--detach', deliveryWorktreePath, startPoint],
       { env: withGitEnv(), timeout: 30_000 }
     );
-    console.log(`[worktree] Created persistent project worktree at ${projectWorktreePath} (detached HEAD at ${projectBranch})`);
-    return projectWorktreePath;
+    console.log(`[worktree] Created persistent delivery worktree at ${deliveryWorktreePath} (detached HEAD at ${deliveryBranch})`);
+    return deliveryWorktreePath;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     // Handle race: another parallel task created it between our check and git worktree add
     if (msg.includes('already registered') || msg.includes('already exists')) {
-      console.log(`[worktree] Project worktree created by another task (race OK): ${projectWorktreePath}`);
-      return projectWorktreePath;
+      console.log(`[worktree] Delivery worktree created by another task (race OK): ${deliveryWorktreePath}`);
+      return deliveryWorktreePath;
     }
-    console.warn(`[worktree] Failed to create project worktree: ${msg}`);
-    operational?.(`WARNING: Could not create project worktree (file browsing between tasks may be unavailable): ${msg}`, 'git');
+    console.warn(`[worktree] Failed to create delivery worktree: ${msg}`);
+    operational?.(`WARNING: Could not create delivery worktree (file browsing between tasks may be unavailable): ${msg}`, 'git');
     return null;
   }
 }
 
 /**
- * Sync the persistent project worktree to the latest project branch tip.
+ * Sync the persistent delivery worktree to the latest delivery branch tip.
  *
- * After each successful merge (branch or PR mode), the project branch moves
- * forward. This updates the detached HEAD in the project worktree so the
+ * After each successful merge (branch or PR mode), the delivery branch moves
+ * forward. This updates the detached HEAD in the delivery worktree so the
  * files on disk reflect the latest state.
  *
  * Ref selection:
- * - Branch mode (no remote): localMergeIntoProjectBranch() advances
- *   refs/heads/{projectBranch} directly → use the local ref.
- * - PR mode (has remote): GitHub merge advances origin/{projectBranch},
+ * - Branch mode (no remote): localMergeIntoDeliveryBranch() advances
+ *   refs/heads/{deliveryBranch} directly → use the local ref.
+ * - PR mode (has remote): GitHub merge advances origin/{deliveryBranch},
  *   but refs/heads/ is stale (no local commit) → fetch then use remote ref.
  *
  * Non-fatal — sync failure doesn't affect task completion.
  */
-export async function syncProjectWorktree(
-  projectWorktreePath: string,
-  projectBranch: string,
+export async function syncDeliveryWorktree(
+  deliveryWorktreePath: string,
+  deliveryBranch: string,
   gitRoot: string,
 ): Promise<void> {
-  if (!existsSync(projectWorktreePath)) {
+  if (!existsSync(deliveryWorktreePath)) {
     return;
   }
 
@@ -559,19 +631,19 @@ export async function syncProjectWorktree(
   // - Remote repos (PR mode): fetch, then use origin/ (remote has the merged state)
   // - Local repos (branch mode): use refs/heads/ (local merge updated it directly)
   const hasRemote = await repoHasRemote(gitRoot);
-  let checkoutRef = `refs/heads/${projectBranch}`;
+  let checkoutRef = `refs/heads/${deliveryBranch}`;
 
   if (hasRemote) {
     try {
       await execFileAsync(
         'git',
-        ['-C', gitRoot, 'fetch', 'origin', projectBranch],
+        ['-C', gitRoot, 'fetch', 'origin', deliveryBranch],
         { env: withGitEnv(), timeout: 15_000 }
       );
-      checkoutRef = `origin/${projectBranch}`;
+      checkoutRef = `origin/${deliveryBranch}`;
     } catch (fetchErr) {
       const fetchMsg = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
-      console.warn(`[worktree] syncProjectWorktree: fetch origin/${projectBranch} failed: ${fetchMsg}`);
+      console.warn(`[worktree] syncDeliveryWorktree: fetch origin/${deliveryBranch} failed: ${fetchMsg}`);
       // Fall back to local ref (best effort)
     }
   }
@@ -579,44 +651,44 @@ export async function syncProjectWorktree(
   try {
     await execFileAsync(
       'git',
-      ['-C', projectWorktreePath, 'checkout', '--detach', checkoutRef],
+      ['-C', deliveryWorktreePath, 'checkout', '--detach', checkoutRef],
       { env: withGitEnv(), timeout: 10_000 }
     );
-    console.log(`[worktree] Synced project worktree at ${projectWorktreePath} to ${checkoutRef}`);
+    console.log(`[worktree] Synced delivery worktree at ${deliveryWorktreePath} to ${checkoutRef}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[worktree] Failed to sync project worktree: ${msg}`);
+    console.warn(`[worktree] Failed to sync delivery worktree: ${msg}`);
   }
 }
 
 /**
- * Remove the persistent project worktree.
+ * Remove the persistent delivery worktree.
  *
  * This is an exported utility for the astro platform to call when a project
  * is deleted. The agent-runner does not manage project lifecycles — it only
  * provides the building blocks. The integration point (calling this on
  * project deletion) lives in the astro server, not here.
  */
-export async function cleanupProjectWorktree(
+export async function cleanupDeliveryWorktree(
   gitRoot: string,
-  projectWorktreePath: string,
+  deliveryWorktreePath: string,
 ): Promise<void> {
-  if (!existsSync(projectWorktreePath)) {
+  if (!existsSync(deliveryWorktreePath)) {
     return;
   }
 
   try {
     await execFileAsync(
       'git',
-      ['-C', gitRoot, 'worktree', 'remove', '--force', projectWorktreePath],
+      ['-C', gitRoot, 'worktree', 'remove', '--force', deliveryWorktreePath],
       { env: withGitEnv(), timeout: 30_000 }
     );
   } catch {
-    await rm(projectWorktreePath, { recursive: true, force: true });
+    await rm(deliveryWorktreePath, { recursive: true, force: true });
   }
 
   await pruneWorktrees(gitRoot);
-  console.log(`[worktree] Cleaned up project worktree at ${projectWorktreePath}`);
+  console.log(`[worktree] Cleaned up delivery worktree at ${deliveryWorktreePath}`);
 }
 
 /**
@@ -904,7 +976,7 @@ async function initSubmodules(
   }
 }
 
-async function getGitRoot(workingDirectory: string): Promise<string | null> {
+export async function getGitRoot(workingDirectory: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
       'git',
@@ -1034,6 +1106,31 @@ function validateTaskId(taskId: string): void {
   const safePattern = /^[a-zA-Z0-9._-]+$/;
   if (!safePattern.test(taskId) || taskId.length > 200) {
     throw new Error(`Invalid taskId format: ${taskId}. Must be alphanumeric with hyphens/underscores/dots, max 200 chars.`);
+  }
+}
+
+/**
+ * Validate that a dispatch-provided branch name is safe for git operations.
+ * Enforces git check-ref-format rules:
+ * - Only alphanumeric, hyphens, underscores, dots, forward slashes
+ * - No ".." (path traversal), no "//", no leading/trailing "/"
+ * - No ".lock" suffix, no dot-prefixed path components (e.g., ".hidden", "foo/.bar")
+ * - Max 200 chars
+ */
+function validateBranchName(name: string): void {
+  const safePattern = /^[a-zA-Z0-9/_.-]+$/;
+  if (
+    !safePattern.test(name) ||
+    name.length > 200 ||
+    name.includes('..') ||
+    name.includes('//') ||
+    name.startsWith('/') ||
+    name.endsWith('/') ||
+    name.endsWith('.lock') ||
+    name === '.' ||
+    /(?:^|\/)\./.test(name) // dot-prefixed path components
+  ) {
+    throw new Error(`Invalid branch name from dispatch: ${name.slice(0, 100)}. Must be a valid git ref name, max 200 chars.`);
   }
 }
 

@@ -26,25 +26,25 @@ function sanitizeGitRef(ref: string): string {
  */
 function buildConflictResolutionPrompt(
   conflictFiles: string[],
-  projectBranch: string,
+  deliveryBranch: string,
   attempt: number,
   maxAttempts: number,
 ): string {
-  const safeBranch = sanitizeGitRef(projectBranch);
+  const safeBranch = sanitizeGitRef(deliveryBranch);
   const fileList = conflictFiles.map(f => `- ${f}`).join('\n');
   return `MERGE CONFLICT DETECTED (attempt ${attempt}/${maxAttempts})
 
-Your task branch cannot be cleanly merged into the project branch because
+Your task branch cannot be cleanly merged into the delivery branch because
 parallel tasks have modified overlapping files since you branched.
 
 Conflicting files:
 ${fileList}
 
-The project branch is: ${safeBranch}
+The delivery branch is: ${safeBranch}
 
 Please resolve this:
-1. Fetch the latest project branch: git fetch origin 2>/dev/null; git fetch . ${safeBranch}:${safeBranch} 2>/dev/null || true
-2. Rebase onto the project branch: git rebase ${safeBranch}
+1. Fetch the latest delivery branch: git fetch origin 2>/dev/null; git fetch . ${safeBranch}:${safeBranch} 2>/dev/null || true
+2. Rebase onto the delivery branch: git rebase ${safeBranch}
 3. For each conflict, open the file, resolve the conflict markers (<<<<<<< / ======= / >>>>>>>), keeping the correct combination of both changes
 4. Stage resolved files: git add <resolved-files>
 5. Continue the rebase: git rebase --continue
@@ -58,16 +58,16 @@ After you finish resolving, I will automatically retry the merge.`;
  * Mirror of buildPRConflictResolutionPrompt from task-executor.ts.
  */
 function buildPRConflictResolutionPrompt(
-  projectBranch: string,
+  deliveryBranch: string,
   branchName: string,
   attempt: number,
   maxAttempts: number,
 ): string {
-  const safeBranch = sanitizeGitRef(projectBranch);
+  const safeBranch = sanitizeGitRef(deliveryBranch);
   const safeTaskBranch = sanitizeGitRef(branchName);
   return `MERGE CONFLICT DETECTED ON GITHUB (attempt ${attempt}/${maxAttempts})
 
-Your pull request cannot be automatically merged into the project branch because
+Your pull request cannot be automatically merged into the delivery branch because
 parallel tasks have modified overlapping files.
 
 Your task branch is: ${safeTaskBranch}
@@ -128,7 +128,7 @@ async function simulateBranchMergeRetry(opts: {
   acquireLock: () => Promise<MockLock>;
   adapter: MockAdapter;
   taskId: string;
-  projectBranch: string;
+  deliveryBranch: string;
   isResumable: boolean;
   maxAttempts?: number;
 }): Promise<DeliveryResult> {
@@ -158,7 +158,7 @@ async function simulateBranchMergeRetry(opts: {
         try {
           await adapter.resumeTask(
             taskId,
-            buildConflictResolutionPrompt(mergeResult.conflictFiles ?? [], opts.projectBranch, attempt, MAX_MERGE_ATTEMPTS),
+            buildConflictResolutionPrompt(mergeResult.conflictFiles ?? [], opts.deliveryBranch, attempt, MAX_MERGE_ATTEMPTS),
             '/tmp/workdir',
             context.sessionId,
           );
@@ -245,7 +245,7 @@ async function simulatePRMergeRetry(opts: {
 
   if (!prMergeResolved && !result.deliveryError) {
     result.deliveryStatus = 'failed';
-    result.deliveryError = 'PR created but auto-merge into project branch failed';
+    result.deliveryError = 'PR created but auto-merge into delivery branch failed';
   }
 
   return result;
@@ -275,7 +275,7 @@ describe('buildConflictResolutionPrompt (branch mode)', () => {
     expect(prompt).toContain('- package.json');
   });
 
-  it('includes project branch name in rebase instructions', () => {
+  it('includes delivery branch name in rebase instructions', () => {
     const prompt = buildConflictResolutionPrompt(['a.ts'], 'astro/7b19a9', 1, 3);
     expect(prompt).toContain('git rebase astro/7b19a9');
     expect(prompt).toContain('git fetch . astro/7b19a9:astro/7b19a9');
@@ -429,7 +429,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
     });
 
@@ -446,7 +446,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
     });
 
@@ -461,7 +461,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
     });
 
@@ -480,7 +480,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
     });
 
@@ -507,7 +507,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
     });
 
@@ -531,7 +531,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
     });
 
@@ -549,7 +549,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
       maxAttempts: 3,
     });
@@ -572,7 +572,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: false,
     });
 
@@ -593,7 +593,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
     });
 
@@ -613,7 +613,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
     });
 
@@ -633,7 +633,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
     });
 
@@ -654,7 +654,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: true,
     });
 
@@ -670,7 +670,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/7b19a9',
+      deliveryBranch: 'astro/7b19a9',
       isResumable: true,
     })).rejects.toThrow('git crashed');
 
@@ -686,7 +686,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: false,
     });
 
@@ -704,7 +704,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: false,
     });
 
@@ -721,7 +721,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: true,
       maxAttempts: 1,
     });
@@ -744,7 +744,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: true,
       maxAttempts: 2,
     });
@@ -766,7 +766,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: true,
     });
 
@@ -784,7 +784,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: true,
     });
 
@@ -804,7 +804,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: true,
     });
 
@@ -823,7 +823,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: true,
     });
 
@@ -842,7 +842,7 @@ describe('Branch mode merge conflict resolution', () => {
       acquireLock,
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: true,
     });
 
@@ -956,7 +956,7 @@ describe('PR mode merge conflict resolution', () => {
     });
 
     expect(result.deliveryStatus).toBe('failed');
-    expect(result.deliveryError).toBe('PR created but auto-merge into project branch failed');
+    expect(result.deliveryError).toBe('PR created but auto-merge into delivery branch failed');
     expect(adapter.resumeTask).not.toHaveBeenCalled();
     expect(mergePR).not.toHaveBeenCalled();
   });
@@ -976,7 +976,7 @@ describe('PR mode merge conflict resolution', () => {
     });
 
     expect(result.deliveryStatus).toBe('failed');
-    expect(result.deliveryError).toBe('PR created but auto-merge into project branch failed');
+    expect(result.deliveryError).toBe('PR created but auto-merge into delivery branch failed');
     expect(adapter.resumeTask).not.toHaveBeenCalled();
     expect(mergePR).not.toHaveBeenCalled();
   });
@@ -996,7 +996,7 @@ describe('PR mode merge conflict resolution', () => {
     });
 
     expect(result.deliveryStatus).toBe('failed');
-    expect(result.deliveryError).toBe('PR created but auto-merge into project branch failed');
+    expect(result.deliveryError).toBe('PR created but auto-merge into delivery branch failed');
     expect(adapter.resumeTask).not.toHaveBeenCalled();
     expect(mergePR).not.toHaveBeenCalled();
   });
@@ -1160,7 +1160,7 @@ describe('Output contract preservation', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: true,
     });
 
@@ -1186,7 +1186,7 @@ describe('Output contract preservation', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: true,
     });
 
@@ -1208,7 +1208,7 @@ describe('Output contract preservation', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: false,
     });
 
@@ -1258,7 +1258,7 @@ describe('Output contract preservation', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 'task-1',
-      projectBranch: 'astro/proj',
+      deliveryBranch: 'astro/proj',
       isResumable: false,
     });
 
@@ -1288,7 +1288,7 @@ describe('Output contract preservation', () => {
 
     // Pre-feature behavior: immediate failure
     expect(result.deliveryStatus).toBe('failed');
-    expect(result.deliveryError).toBe('PR created but auto-merge into project branch failed');
+    expect(result.deliveryError).toBe('PR created but auto-merge into delivery branch failed');
     expect(result.commitAfterSha).toBeUndefined();
     expect(adapter.resumeTask).not.toHaveBeenCalled();
   });
@@ -1313,7 +1313,7 @@ describe('Simulation fidelity — matches real code invariants', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 'task-1',
-      projectBranch: 'proj',
+      deliveryBranch: 'proj',
       isResumable: true,
     });
 
@@ -1351,7 +1351,7 @@ describe('Simulation fidelity — matches real code invariants', () => {
       acquireLock: vi.fn().mockResolvedValue(lock),
       adapter: { name: 'a', resumeTask: vi.fn(), getTaskContext: vi.fn().mockReturnValue({ sessionId: 's' }) },
       taskId: 't',
-      projectBranch: 'p',
+      deliveryBranch: 'p',
       isResumable: true,
     });
 
@@ -1375,7 +1375,7 @@ describe('Simulation fidelity — matches real code invariants', () => {
       acquireLock: vi.fn().mockResolvedValue(lock),
       adapter,
       taskId: 't',
-      projectBranch: 'p',
+      deliveryBranch: 'p',
       isResumable: true,
     });
 
@@ -1398,7 +1398,7 @@ describe('Simulation fidelity — matches real code invariants', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 't',
-      projectBranch: 'p',
+      deliveryBranch: 'p',
       isResumable: true,
     });
     expect(validStatuses).toContain(r1.deliveryStatus);
@@ -1409,7 +1409,7 @@ describe('Simulation fidelity — matches real code invariants', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 't',
-      projectBranch: 'p',
+      deliveryBranch: 'p',
       isResumable: true,
     });
     expect(validStatuses).toContain(r2.deliveryStatus);
@@ -1420,7 +1420,7 @@ describe('Simulation fidelity — matches real code invariants', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 't',
-      projectBranch: 'p',
+      deliveryBranch: 'p',
       isResumable: true,
     });
     expect(validStatuses).toContain(r3.deliveryStatus);
@@ -1434,8 +1434,8 @@ describe('Simulation fidelity — matches real code invariants', () => {
 describe('Prompt mirror verification', () => {
   it('branch prompt contains all 6 numbered steps', () => {
     const prompt = buildConflictResolutionPrompt(['a.ts'], 'proj', 1, 3);
-    expect(prompt).toContain('1. Fetch the latest project branch');
-    expect(prompt).toContain('2. Rebase onto the project branch');
+    expect(prompt).toContain('1. Fetch the latest delivery branch');
+    expect(prompt).toContain('2. Rebase onto the delivery branch');
     expect(prompt).toContain('3. For each conflict');
     expect(prompt).toContain('4. Stage resolved files');
     expect(prompt).toContain('5. Continue the rebase');
@@ -1453,7 +1453,7 @@ describe('Prompt mirror verification', () => {
     expect(prompt).toContain('7. Force-push the rebased branch');
   });
 
-  it('branch prompt uses local fetch (not origin) for project branch', () => {
+  it('branch prompt uses local fetch (not origin) for delivery branch', () => {
     const prompt = buildConflictResolutionPrompt(['a.ts'], 'astro/abc123', 1, 3);
     // Real code fetches locally: `git fetch . <branch>:<branch>`
     expect(prompt).toContain('git fetch . astro/abc123:astro/abc123');
@@ -1511,7 +1511,7 @@ describe('PR mode — additional edge cases', () => {
     });
 
     expect(result.deliveryStatus).toBe('failed');
-    expect(result.deliveryError).toBe('PR created but auto-merge into project branch failed');
+    expect(result.deliveryError).toBe('PR created but auto-merge into delivery branch failed');
     expect(adapter.resumeTask).not.toHaveBeenCalled();
   });
 
@@ -1625,7 +1625,7 @@ describe('Branch mode — additional edge cases', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 't1',
-      projectBranch: 'proj',
+      deliveryBranch: 'proj',
       isResumable: true,
     });
 
@@ -1641,7 +1641,7 @@ describe('Branch mode — additional edge cases', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 't1',
-      projectBranch: 'proj',
+      deliveryBranch: 'proj',
       isResumable: true,
     });
 
@@ -1657,7 +1657,7 @@ describe('Branch mode — additional edge cases', () => {
         acquireLock: vi.fn().mockResolvedValue({ release: releaseFn }),
         adapter,
         taskId: 't1',
-        projectBranch: 'proj',
+        deliveryBranch: 'proj',
         isResumable: true,
       }),
     ).rejects.toThrow('git crash');
@@ -1672,7 +1672,7 @@ describe('Branch mode — additional edge cases', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 't1',
-      projectBranch: 'proj',
+      deliveryBranch: 'proj',
       isResumable: false,
     });
 
@@ -1693,7 +1693,7 @@ describe('Branch mode — additional edge cases', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 't1',
-      projectBranch: 'proj',
+      deliveryBranch: 'proj',
       isResumable: true,
     });
 
@@ -1713,7 +1713,7 @@ describe('Branch mode — additional edge cases', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 't1',
-      projectBranch: 'proj',
+      deliveryBranch: 'proj',
       isResumable: true,
     });
 
@@ -1883,7 +1883,7 @@ describe('Pre-merge rebase (tryPreMergeRebase)', () => {
   });
 
   it('integration: pre-rebase avoids conflict in subsequent merge', async () => {
-    // Scenario: project branch moved from SHA_X to SHA_Y.
+    // Scenario: delivery branch moved from SHA_X to SHA_Y.
     // Pre-rebase succeeds → subsequent merge should be clean.
     const preRebase = await simulateTryPreMergeRebase({
       mergeBaseFn: vi.fn().mockResolvedValue('SHA_X'),
@@ -1904,7 +1904,7 @@ describe('Pre-merge rebase (tryPreMergeRebase)', () => {
         getTaskContext: vi.fn().mockReturnValue({ sessionId: 's1' }),
       },
       taskId: 't1',
-      projectBranch: 'proj',
+      deliveryBranch: 'proj',
       isResumable: true,
     });
 
@@ -1913,7 +1913,7 @@ describe('Pre-merge rebase (tryPreMergeRebase)', () => {
   });
 
   it('integration: pre-rebase fails → retry loop resolves conflict', async () => {
-    // Scenario: project branch moved AND has overlapping changes.
+    // Scenario: delivery branch moved AND has overlapping changes.
     // Pre-rebase fails (conflict) → merge also conflicts → agent resolves.
     const preRebase = await simulateTryPreMergeRebase({
       mergeBaseFn: vi.fn().mockResolvedValue('SHA_X'),
@@ -1944,7 +1944,7 @@ describe('Pre-merge rebase (tryPreMergeRebase)', () => {
       acquireLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
       adapter,
       taskId: 't1',
-      projectBranch: 'proj',
+      deliveryBranch: 'proj',
       isResumable: true,
     });
 

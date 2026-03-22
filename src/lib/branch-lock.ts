@@ -3,7 +3,7 @@
  *
  * Tasks in the same project execute in parallel but serialize at merge
  * time via this lock. The short-held merge lock ensures only one task
- * squash-merges into the project branch at a time. Tasks on different
+ * squash-merges into the delivery branch at a time. Tasks on different
  * projects run without contention.
  */
 
@@ -31,8 +31,8 @@ export class BranchLockManager {
    *
    * All tasks in the same project share one merge lock so they serialize
    * **at merge time**. Task execution runs in parallel; only the
-   * squash-merge into the project branch is serialized so each task
-   * merges onto the current project branch tip.
+   * squash-merge into the delivery branch is serialized so each task
+   * merges onto the current delivery branch tip.
    *
    * Key format: `{canonicalWorkdir}::{shortProjectId}`
    * Fallback:   `{canonicalWorkdir}::{taskId}`
