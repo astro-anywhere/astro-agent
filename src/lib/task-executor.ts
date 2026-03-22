@@ -1852,8 +1852,13 @@ export class TaskExecutor {
     let singletonLock: { release: () => void } | undefined;
     try {
       if (task.deliveryBranchIsSingleton && task.projectBranch) {
-        const lockKey = `singleton::${task.projectBranch}`;
-        console.log(`[executor] Task ${task.id}: acquiring singleton branch lock for ${task.projectBranch}`);
+        const lockKey = BranchLockManager.computeLockKey(
+          task.workingDirectory,
+          undefined,
+          undefined,
+          `singleton::${task.projectBranch}`,
+        );
+        console.log(`[executor] Task ${task.id}: acquiring singleton branch lock: ${lockKey}`);
         singletonLock = await this.branchLockManager.acquire(lockKey, task.id);
       }
 
