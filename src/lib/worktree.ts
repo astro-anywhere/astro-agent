@@ -976,7 +976,7 @@ async function initSubmodules(
   }
 }
 
-async function getGitRoot(workingDirectory: string): Promise<string | null> {
+export async function getGitRoot(workingDirectory: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
       'git',

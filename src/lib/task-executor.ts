@@ -17,7 +17,7 @@ import { ClaudeSdkAdapter } from '../providers/claude-sdk-adapter.js';
 import { OpenClawAdapter } from '../providers/openclaw-adapter.js';
 import type { OpenClawBridge } from './openclaw-bridge.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
-import { createWorktree, syncProjectWorktree } from './worktree.js';
+import { createWorktree, syncProjectWorktree, getGitRoot } from './worktree.js';
 import { ensureProjectWorkspace } from './workspace-root.js';
 import { BranchLockManager } from './branch-lock.js';
 import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha, isGhAvailable, getRepoSlug } from './git-pr.js';
@@ -1865,8 +1865,12 @@ export class TaskExecutor {
     let singletonLock: { release: () => void } | undefined;
     try {
       if (task.deliveryBranchIsSingleton && task.projectBranch) {
+        // Use git root (not workingDirectory) for the lock key so that tasks
+        // dispatched to different subdirectories of the same repo (e.g., repo/
+        // and repo/subdir/) share the same lock for the same branch.
+        const gitRoot = await getGitRoot(task.workingDirectory);
         const lockKey = BranchLockManager.computeLockKey(
-          task.workingDirectory,
+          gitRoot ?? task.workingDirectory,
           undefined,
           undefined,
           `singleton::${task.projectBranch}`,
