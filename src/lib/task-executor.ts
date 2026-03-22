@@ -622,6 +622,9 @@ export class TaskExecutor {
     this.branchLockManager.releaseAll();
     this.directoryLockManager.releaseAll();
 
+    // Clear singleton tracking — all tasks cancelled, no branches to protect
+    this.singletonBranches.clear();
+
     // Stop job monitor
     this.jobMonitor.stop();
   }
