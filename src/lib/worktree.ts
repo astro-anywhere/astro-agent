@@ -113,8 +113,11 @@ export async function createWorktree(
   const branchSuffix = shortProjectId && shortNodeId
     ? `${sanitize(shortProjectId)}-${sanitize(shortNodeId)}`
     : sanitize(taskId);
+  if (isSingleton && !projectBranchName) {
+    throw new Error('Singleton delivery branch requires projectBranchName');
+  }
   const taskBranchName = isSingleton
-    ? projectBranchName!  // Singleton: work directly on delivery branch
+    ? projectBranchName  // Singleton: work directly on delivery branch
     : `${branchPrefix}${branchSuffix}`;
   const worktreePath = join(baseRoot, branchSuffix);
   // Abort-signal gate: check between every long git operation so cancellation
@@ -235,14 +238,27 @@ export async function createWorktree(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('already checked out') || msg.includes('already registered')) {
-        // Stale worktree — prune and retry
-        console.log(`[worktree] Delivery branch ${taskBranchName} locked by stale worktree, pruning and retrying`);
+        // Stale worktree — prune and retry. If the branch is still locked after
+        // pruning, another task is genuinely using it (server invariant violated).
+        console.warn(`[worktree] Delivery branch ${taskBranchName} locked by existing worktree, pruning stale entries`);
         await pruneWorktrees(gitRoot);
-        await execFileAsync(
-          'git',
-          ['-C', gitRoot, 'worktree', 'add', worktreePath, taskBranchName],
-          { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
-        );
+        try {
+          await execFileAsync(
+            'git',
+            ['-C', gitRoot, 'worktree', 'add', worktreePath, taskBranchName],
+            { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
+          );
+        } catch (retryErr) {
+          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          if (retryMsg.includes('already checked out') || retryMsg.includes('already registered')) {
+            throw new Error(
+              `Singleton delivery branch ${taskBranchName} is still checked out after pruning. ` +
+              `Another task may be actively using this branch — server-side mutual exclusion may be broken. ` +
+              `Original error: ${retryMsg}`
+            );
+          }
+          throw retryErr;
+        }
       } else {
         throw err;
       }
@@ -1094,14 +1110,26 @@ function validateTaskId(taskId: string): void {
 
 /**
  * Validate that a dispatch-provided branch name is safe for git operations.
- * Allows alphanumeric, hyphens, underscores, dots, and forward slashes
- * (valid in git refs like 'astro/7b19a9-e4f1a2'). Rejects path traversal
- * sequences (../) and control characters.
+ * Enforces git check-ref-format rules:
+ * - Only alphanumeric, hyphens, underscores, dots, forward slashes
+ * - No ".." (path traversal), no "//", no leading/trailing "/"
+ * - No ".lock" suffix, no dot-prefixed path components (e.g., ".hidden", "foo/.bar")
+ * - Max 200 chars
  */
 function validateBranchName(name: string): void {
   const safePattern = /^[a-zA-Z0-9/_.-]+$/;
-  if (!safePattern.test(name) || name.length > 200 || name.includes('..')) {
-    throw new Error(`Invalid branch name from dispatch: ${name}. Must contain only alphanumeric/hyphens/underscores/dots/slashes, no "..", max 200 chars.`);
+  if (
+    !safePattern.test(name) ||
+    name.length > 200 ||
+    name.includes('..') ||
+    name.includes('//') ||
+    name.startsWith('/') ||
+    name.endsWith('/') ||
+    name.endsWith('.lock') ||
+    name === '.' ||
+    /(?:^|\/)\./.test(name) // dot-prefixed path components
+  ) {
+    throw new Error(`Invalid branch name from dispatch: ${name.slice(0, 100)}. Must be a valid git ref name, max 200 chars.`);
   }
 }
 
