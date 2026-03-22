@@ -17,11 +17,11 @@ import { ClaudeSdkAdapter } from '../providers/claude-sdk-adapter.js';
 import { OpenClawAdapter } from '../providers/openclaw-adapter.js';
 import type { OpenClawBridge } from './openclaw-bridge.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
-import { createWorktree, syncProjectWorktree, getGitRoot } from './worktree.js';
+import { createWorktree, syncDeliveryWorktree, getGitRoot } from './worktree.js';
 import { ensureProjectWorkspace } from './workspace-root.js';
 import { BranchLockManager } from './branch-lock.js';
 import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha, isGhAvailable, getRepoSlug } from './git-pr.js';
-import { localMergeIntoProjectBranch } from './local-merge.js';
+import { localMergeIntoDeliveryBranch } from './local-merge.js';
 import {
   checkWorkdirSafety,
   isGitAvailable,
@@ -48,29 +48,29 @@ function sanitizeGitRef(ref: string): string {
 /**
  * Build a prompt instructing the agent to resolve merge conflicts.
  * The agent's worktree has the task branch checked out; it needs to
- * rebase onto the project branch to resolve conflicts, then commit.
+ * rebase onto the delivery branch to resolve conflicts, then commit.
  */
 function buildConflictResolutionPrompt(
   conflictFiles: string[],
-  projectBranch: string,
+  deliveryBranch: string,
   attempt: number,
   maxAttempts: number,
 ): string {
-  const safeBranch = sanitizeGitRef(projectBranch);
+  const safeBranch = sanitizeGitRef(deliveryBranch);
   const fileList = conflictFiles.map(f => `- ${f}`).join('\n');
   return `MERGE CONFLICT DETECTED (attempt ${attempt}/${maxAttempts})
 
-Your task branch cannot be cleanly merged into the project branch because
+Your task branch cannot be cleanly merged into the delivery branch because
 parallel tasks have modified overlapping files since you branched.
 
 Conflicting files:
 ${fileList}
 
-The project branch is: ${safeBranch}
+The delivery branch is: ${safeBranch}
 
 Please resolve this:
-1. Fetch the latest project branch: git fetch origin 2>/dev/null; git fetch . ${safeBranch}:${safeBranch} 2>/dev/null || true
-2. Rebase onto the project branch: git rebase ${safeBranch}
+1. Fetch the latest delivery branch: git fetch origin 2>/dev/null; git fetch . ${safeBranch}:${safeBranch} 2>/dev/null || true
+2. Rebase onto the delivery branch: git rebase ${safeBranch}
 3. For each conflict, open the file, resolve the conflict markers (<<<<<<< / ======= / >>>>>>>), keeping the correct combination of both changes
 4. Stage resolved files: git add <resolved-files>
 5. Continue the rebase: git rebase --continue
@@ -86,16 +86,16 @@ After you finish resolving, I will automatically retry the merge.`;
  * because the merge happens via GitHub API (gh pr merge), not locally.
  */
 function buildPRConflictResolutionPrompt(
-  projectBranch: string,
+  deliveryBranch: string,
   branchName: string,
   attempt: number,
   maxAttempts: number,
 ): string {
-  const safeBranch = sanitizeGitRef(projectBranch);
+  const safeBranch = sanitizeGitRef(deliveryBranch);
   const safeTaskBranch = sanitizeGitRef(branchName);
   return `MERGE CONFLICT DETECTED ON GITHUB (attempt ${attempt}/${maxAttempts})
 
-Your pull request cannot be automatically merged into the project branch because
+Your pull request cannot be automatically merged into the delivery branch because
 parallel tasks have modified overlapping files.
 
 Your task branch is: ${safeTaskBranch}
@@ -115,7 +115,7 @@ After you force-push, I will automatically retry the GitHub merge.`;
 }
 
 /**
- * Best-effort pre-merge rebase: if the project branch has moved forward
+ * Best-effort pre-merge rebase: if the delivery branch has moved forward
  * (another task merged), rebase the task branch onto the latest tip before
  * attempting the squash merge. This avoids conflicts in the common case
  * where changes don't overlap. On any failure, silently aborts — the
@@ -257,7 +257,7 @@ export class TaskExecutor {
   /** Preserved task metadata for worktree recreation on post-completion resume */
   private completedTaskMeta: Map<string, {
     originalWorkingDirectory: string;
-    projectBranch?: string;
+    deliveryBranch?: string;
     baseBranch?: string;
     agentDir?: string;
     shortProjectId?: string;
@@ -762,9 +762,9 @@ export class TaskExecutor {
     if (resumeDir && !existsSync(resumeDir)) {
       const meta = this.completedTaskMeta.get(taskId);
       if (meta?.originalWorkingDirectory && existsSync(meta.originalWorkingDirectory)) {
-        // Try to recreate a worktree from the project branch (like a new task)
+        // Try to recreate a worktree from the delivery branch (like a new task)
         try {
-          console.log(`[executor] Task ${taskId}: worktree gone, recreating from project branch at ${meta.originalWorkingDirectory}`);
+          console.log(`[executor] Task ${taskId}: worktree gone, recreating from delivery branch at ${meta.originalWorkingDirectory}`);
           const worktree = await createWorktree({
             workingDirectory: meta.originalWorkingDirectory,
             taskId: `resume-${taskId.slice(0, 12)}-${Date.now()}`,
@@ -773,7 +773,7 @@ export class TaskExecutor {
             shortNodeId: meta.shortNodeId,
             agentDir: meta.agentDir,
             baseBranch: meta.baseBranch,
-            projectBranch: meta.projectBranch,
+            deliveryBranch: meta.deliveryBranch,
             deliveryBranchIsSingleton: meta.deliveryBranchIsSingleton,
             stdout: stream.stdout,
             stderr: stream.stderr,
@@ -1257,7 +1257,7 @@ export class TaskExecutor {
         this.cleanupExpiredTaskMeta();
         this.completedTaskMeta.set(task.id, {
           originalWorkingDirectory: normalizedTask.workingDirectory,
-          projectBranch: normalizedTask.projectBranch,
+          deliveryBranch: normalizedTask.deliveryBranch ?? normalizedTask.projectBranch,
           baseBranch: normalizedTask.baseBranch,
           agentDir: normalizedTask.agentDir,
           shortProjectId: normalizedTask.shortProjectId,
@@ -1275,7 +1275,7 @@ export class TaskExecutor {
 
       // Delivery-mode-aware result handling
       // If pr mode is requested but gh is unavailable, fall back to branch mode
-      // so the work is still merged locally into the project branch.
+      // so the work is still merged locally into the delivery branch.
       let deliveryMode = task.deliveryMode ?? 'pr';
       if (deliveryMode === 'pr' && !(await isGhAvailable())) {
         console.log(`[executor] Task ${task.id}: gh CLI not available, falling back from 'pr' to 'branch' mode`);
@@ -1339,27 +1339,27 @@ export class TaskExecutor {
             stream.operational?.('Worktree preserved (copy mode)', 'delivery');
             console.log(`[executor] Task ${task.id}: copy mode, worktree preserved at ${prepared.workingDirectory}`);
           } else if (deliveryMode === 'branch') {
-            stream.operational?.(`Merging into project branch ${prepared.projectBranch ?? 'local'}...`, 'git');
-            // Branch mode: commit locally, merge into project branch if available.
+            stream.operational?.(`Merging into delivery branch ${prepared.deliveryBranch ?? 'local'}...`, 'git');
+            // Branch mode: commit locally, merge into delivery branch if available.
             // The merge lock is held only during the squash-merge (seconds, not minutes),
             // allowing tasks to execute in parallel. The squash merge naturally handles
-            // the case where the project branch moved forward (another task merged first)
+            // the case where the delivery branch moved forward (another task merged first)
             // because it computes the diff from the merge-base and applies it on the
-            // current project branch tip.
+            // current delivery branch tip.
             //
             // On conflict: if the provider supports session resume (Claude SDK), we
             // resume the agent session to let it resolve the conflict, then retry.
             result.branchName = prepared.branchName;
             keepBranch = true;
 
-            if (prepared.gitRoot && prepared.projectBranch && prepared.branchName) {
-              // Pre-merge rebase: if the project branch moved forward (another task
+            if (prepared.gitRoot && prepared.deliveryBranch && prepared.branchName) {
+              // Pre-merge rebase: if the delivery branch moved forward (another task
               // merged), rebase our task branch first. Avoids conflicts when changes
               // don't overlap, and saves one retry cycle when they do.
-              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.projectBranch, false);
+              const preRebase = await tryPreMergeRebase(prepared.workingDirectory, prepared.deliveryBranch, false);
               if (preRebase.rebased) {
-                stream.operational?.(`Rebased onto ${prepared.projectBranch}`, 'git');
-                console.log(`[executor] Task ${task.id}: pre-merge rebase onto ${prepared.projectBranch} succeeded`);
+                stream.operational?.(`Rebased onto ${prepared.deliveryBranch}`, 'git');
+                console.log(`[executor] Task ${task.id}: pre-merge rebase onto ${prepared.deliveryBranch} succeeded`);
               } else if (!preRebase.skipped) {
                 stream.operational?.('Rebase skipped (conflicts), retrying via merge', 'git');
                 console.log(`[executor] Task ${task.id}: pre-merge rebase had conflicts, falling back to merge retry loop`);
@@ -1380,11 +1380,11 @@ export class TaskExecutor {
                 const mergeLock = await this.branchLockManager.acquire(mergeLockKey, task.id);
                 let mergeResult;
                 try {
-                  this.wsClient.sendTaskStatus(task.id, 'running', 96, 'Merging into project branch...');
-                  mergeResult = await localMergeIntoProjectBranch(
+                  this.wsClient.sendTaskStatus(task.id, 'running', 96, 'Merging into delivery branch...');
+                  mergeResult = await localMergeIntoDeliveryBranch(
                     prepared.gitRoot,
                     prepared.branchName,
-                    prepared.projectBranch,
+                    prepared.deliveryBranch,
                     commitMessage,
                     (msg) => stream.operational?.(msg, 'git'),
                   );
@@ -1396,11 +1396,11 @@ export class TaskExecutor {
                 if (mergeResult.merged) {
                   result.deliveryStatus = 'success';
                   result.commitAfterSha = mergeResult.commitSha;
-                  stream.operational?.(`Merged into ${prepared.projectBranch} (${mergeResult.commitSha?.slice(0, 7)})`, 'git');
-                  console.log(`[executor] Task ${task.id}: merged into ${prepared.projectBranch} (${mergeResult.commitSha})`);
-                  // Sync project worktree to reflect the merged changes on disk
-                  if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
-                    await syncProjectWorktree(prepared.projectWorktreePath, prepared.projectBranch, prepared.gitRoot);
+                  stream.operational?.(`Merged into ${prepared.deliveryBranch} (${mergeResult.commitSha?.slice(0, 7)})`, 'git');
+                  console.log(`[executor] Task ${task.id}: merged into ${prepared.deliveryBranch} (${mergeResult.commitSha})`);
+                  // Sync delivery worktree to reflect the merged changes on disk
+                  if (prepared.deliveryWorktreePath && prepared.deliveryBranch && prepared.gitRoot) {
+                    await syncDeliveryWorktree(prepared.deliveryWorktreePath, prepared.deliveryBranch, prepared.gitRoot);
                   }
                   break;
                 } else if (mergeResult.conflict) {
@@ -1421,7 +1421,7 @@ export class TaskExecutor {
                     try {
                       await adapter.resumeTask(
                         task.id,
-                        buildConflictResolutionPrompt(mergeResult.conflictFiles ?? [], prepared.projectBranch, attempt, MAX_MERGE_ATTEMPTS),
+                        buildConflictResolutionPrompt(mergeResult.conflictFiles ?? [], prepared.deliveryBranch, attempt, MAX_MERGE_ATTEMPTS),
                         prepared.workingDirectory,
                         taskContext.sessionId,
                         stream,
@@ -1457,10 +1457,10 @@ export class TaskExecutor {
                   break;
                 }
               }
-            } else if (prepared.projectBranch) {
-              console.warn(`[executor] Task ${task.id}: projectBranch=${prepared.projectBranch} but gitRoot=${prepared.gitRoot}, branchName=${prepared.branchName} — skipping local merge`);
+            } else if (prepared.deliveryBranch) {
+              console.warn(`[executor] Task ${task.id}: deliveryBranch=${prepared.deliveryBranch} but gitRoot=${prepared.gitRoot}, branchName=${prepared.branchName} — skipping local merge`);
             } else {
-              console.log(`[executor] Task ${task.id}: branch mode, committing locally (no project branch)`);
+              console.log(`[executor] Task ${task.id}: branch mode, committing locally (no delivery branch)`);
             }
           } else if (deliveryMode === 'push') {
             // Push branch to remote, but don't create a PR — user creates PR manually
@@ -1493,7 +1493,7 @@ export class TaskExecutor {
               console.log(`[executor] Task ${task.id}: no changes to push`);
             }
           } else {
-            // 'pr' — push + create PR, auto-merge into project branch if applicable
+            // 'pr' — push + create PR, auto-merge into delivery branch if applicable
             stream.operational?.(`Creating PR: ${prepared.branchName} → ${prepared.baseBranch ?? 'main'}...`, 'git');
             this.wsClient.sendTaskStatus(task.id, 'running', 94, 'Rebasing before push...');
             // Pre-push rebase: if the target branch moved forward, rebase our task
@@ -1515,14 +1515,14 @@ export class TaskExecutor {
             // Singleton delivery branches create PRs directly to the base branch
             // (no auto-merge into an accumulation branch). Multi-task components
             // auto-merge per-task PRs into the delivery branch.
-            const hasProjectBranch = !!task.projectBranch && !task.deliveryBranchIsSingleton;
+            const hasDeliveryBranch = !!(task.deliveryBranch ?? task.projectBranch) && !task.deliveryBranchIsSingleton;
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
               branchName: prepared.branchName,
               taskTitle: prTitle,
               taskDescription: task.description || task.prompt.slice(0, 500),
               body: prBody,
               baseBranch: prepared.baseBranch,
-              autoMerge: hasProjectBranch,
+              autoMerge: hasDeliveryBranch,
               commitBeforeSha: prepared.commitBeforeSha,
               gitRoot: prepared.gitRoot,
             });
@@ -1546,7 +1546,7 @@ export class TaskExecutor {
                   ? adapter.getTaskContext(task.id)
                   : null;
 
-                if (prTaskContext?.sessionId && this.isResumableAdapter(adapter) && hasProjectBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
+                if (prTaskContext?.sessionId && this.isResumableAdapter(adapter) && hasDeliveryBranch && prepared.branchName && prepared.baseBranch && prResult.prNumber && prepared.gitRoot) {
                   for (let attempt = 1; attempt <= MAX_PR_MERGE_ATTEMPTS; attempt++) {
                     stream.operational?.(`Auto-merge failed — agent resolving conflict (attempt ${attempt})...`, 'git');
                     console.log(`[executor] Task ${task.id}: PR auto-merge failed (attempt ${attempt}), resuming ${adapter.name} to resolve`);
@@ -1585,8 +1585,8 @@ export class TaskExecutor {
                       result.deliveryStatus = 'success';
                       prMergeResolved = true;
                       console.log(`[executor] Task ${task.id}: PR merged on retry (attempt ${attempt}), commitAfterSha=${result.commitAfterSha}`);
-                      if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
-                        await syncProjectWorktree(prepared.projectWorktreePath, prepared.projectBranch, prepared.gitRoot);
+                      if (prepared.deliveryWorktreePath && prepared.deliveryBranch && prepared.gitRoot) {
+                        await syncDeliveryWorktree(prepared.deliveryWorktreePath, prepared.deliveryBranch, prepared.gitRoot);
                       }
                       break;
                     }
@@ -1603,14 +1603,14 @@ export class TaskExecutor {
                 if (!prMergeResolved && !result.deliveryError) {
                   // No resume capability or not applicable — original failure
                   result.deliveryStatus = 'failed';
-                  result.deliveryError = 'PR created but auto-merge into project branch failed';
+                  result.deliveryError = 'PR created but auto-merge into delivery branch failed';
                   console.error(`[executor] Task ${task.id}: PR created at ${prResult.prUrl} but auto-merge failed (no resume capability)`);
                 }
               } else {
                 result.deliveryStatus = 'success';
                 console.log(`[executor] Task ${task.id}: PR created at ${prResult.prUrl}`);
-                if (prepared.projectWorktreePath && prepared.projectBranch && prepared.gitRoot) {
-                  await syncProjectWorktree(prepared.projectWorktreePath, prepared.projectBranch, prepared.gitRoot);
+                if (prepared.deliveryWorktreePath && prepared.deliveryBranch && prepared.gitRoot) {
+                  await syncDeliveryWorktree(prepared.deliveryWorktreePath, prepared.deliveryBranch, prepared.gitRoot);
                 }
               }
             } else if (prResult.error) {
@@ -1761,8 +1761,8 @@ export class TaskExecutor {
     baseBranch?: string;
     commitBeforeSha?: string;
     gitRoot?: string;
-    projectBranch?: string;
-    projectWorktreePath?: string;
+    deliveryBranch?: string;
+    deliveryWorktreePath?: string;
     cleanup: (options?: { keepBranch?: boolean }) => Promise<void>;
   }> {
     // Per-task explicit opt-out: user consciously chose to skip worktree
@@ -1864,7 +1864,7 @@ export class TaskExecutor {
     // setup (seconds), not the entire task execution.
     let singletonLock: { release: () => void } | undefined;
     try {
-      if (task.deliveryBranchIsSingleton && task.projectBranch) {
+      if (task.deliveryBranchIsSingleton && (task.deliveryBranch ?? task.projectBranch)) {
         // Use git root (not workingDirectory) for the lock key so that tasks
         // dispatched to different subdirectories of the same repo (e.g., repo/
         // and repo/subdir/) share the same lock for the same branch.
@@ -1873,7 +1873,7 @@ export class TaskExecutor {
           gitRoot ?? task.workingDirectory,
           undefined,
           undefined,
-          `singleton::${task.projectBranch}`,
+          `singleton::${task.deliveryBranch ?? task.projectBranch}`,
         );
         console.log(`[executor] Task ${task.id}: acquiring singleton branch lock: ${lockKey}`);
         singletonLock = await this.branchLockManager.acquire(lockKey, task.id);
@@ -1890,7 +1890,7 @@ export class TaskExecutor {
         shortNodeId: task.shortNodeId,
         agentDir: task.agentDir,
         baseBranch: task.baseBranch,
-        projectBranch: task.projectBranch,
+        deliveryBranch: task.deliveryBranch ?? task.projectBranch,
         deliveryBranchIsSingleton: task.deliveryBranchIsSingleton,
         stdout: stream.stdout,
         stderr: stream.stderr,

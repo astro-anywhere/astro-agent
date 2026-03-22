@@ -26,7 +26,7 @@ vi.mock('../src/lib/worktree-setup.js', () => ({
   runSetupScript: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { localMergeIntoProjectBranch } from '../../src/lib/local-merge.js';
+import { localMergeIntoDeliveryBranch } from '../../src/lib/local-merge.js';
 import { createWorktree } from '../../src/lib/worktree.js';
 
 const tmpDirs: string[] = [];
@@ -57,11 +57,11 @@ afterAll(async () => {
   }
 });
 
-describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
-  it('squash-merges a task branch into a project branch', async () => {
+describe('localMergeIntoDeliveryBranch (real git)', { timeout: 30_000 }, () => {
+  it('squash-merges a task branch into a delivery branch', async () => {
     const repo = createLocalRepo();
 
-    // Create project branch from main
+    // Create delivery branch from main
     git(repo, 'branch', 'astro/proj1', 'main');
 
     // Create task branch with changes
@@ -71,7 +71,7 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     git(repo, 'commit', '-m', 'Add feature');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo,
       'astro/proj1-task1',
       'astro/proj1',
@@ -82,7 +82,7 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     expect(result.commitSha).toBeDefined();
     expect(result.commitSha!.length).toBeGreaterThanOrEqual(7);
 
-    // Verify the project branch has the file
+    // Verify the delivery branch has the file
     const projectFiles = git(repo, 'ls-tree', '--name-only', 'astro/proj1');
     expect(projectFiles).toContain('feature.txt');
 
@@ -99,7 +99,7 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     expect(mainFiles).not.toContain('feature.txt');
   });
 
-  it('accumulates multiple task merges into the same project branch', async () => {
+  it('accumulates multiple task merges into the same delivery branch', async () => {
     const repo = createLocalRepo();
     git(repo, 'branch', 'astro/proj2', 'main');
 
@@ -110,19 +110,19 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     git(repo, 'commit', '-m', 'Add file-a');
     git(repo, 'checkout', 'main');
 
-    const r1 = await localMergeIntoProjectBranch(
+    const r1 = await localMergeIntoDeliveryBranch(
       repo, 'astro/proj2-task1', 'astro/proj2', 'Task 1',
     );
     expect(r1.merged).toBe(true);
 
-    // Task 2: branch FROM project branch (accumulative) and add file-b
+    // Task 2: branch FROM delivery branch (accumulative) and add file-b
     git(repo, 'checkout', '-b', 'astro/proj2-task2', 'astro/proj2');
     writeFileSync(join(repo, 'file-b.txt'), 'content b\n');
     git(repo, 'add', '.');
     git(repo, 'commit', '-m', 'Add file-b');
     git(repo, 'checkout', 'main');
 
-    const r2 = await localMergeIntoProjectBranch(
+    const r2 = await localMergeIntoDeliveryBranch(
       repo, 'astro/proj2-task2', 'astro/proj2', 'Task 2',
     );
     expect(r2.merged).toBe(true);
@@ -149,7 +149,7 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     git(repo, 'checkout', 'main');
 
     // Merge task 1 first
-    const r1 = await localMergeIntoProjectBranch(
+    const r1 = await localMergeIntoDeliveryBranch(
       repo, 'astro/proj3-task1', 'astro/proj3', 'Task 1',
     );
     expect(r1.merged).toBe(true);
@@ -161,8 +161,8 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     git(repo, 'commit', '-m', 'Task 2 changes');
     git(repo, 'checkout', 'main');
 
-    // This should conflict because project branch has task 1's version
-    const r2 = await localMergeIntoProjectBranch(
+    // This should conflict because delivery branch has task 1's version
+    const r2 = await localMergeIntoDeliveryBranch(
       repo, 'astro/proj3-task2', 'astro/proj3', 'Task 2',
     );
 
@@ -170,11 +170,11 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     expect(r2.conflict).toBe(true);
     expect(r2.conflictFiles).toContain('readme.txt');
 
-    // Verify project branch is clean (not left in conflict state)
+    // Verify delivery branch is clean (not left in conflict state)
     const status = git(repo, 'status', '--porcelain');
     expect(status).toBe('');
 
-    // Verify project branch still has task 1's content (not corrupted)
+    // Verify delivery branch still has task 1's content (not corrupted)
     const content = git(repo, 'show', 'astro/proj3:readme.txt');
     expect(content).toBe('task 1 version');
   });
@@ -183,10 +183,10 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     const repo = createLocalRepo();
     git(repo, 'branch', 'astro/proj4', 'main');
 
-    // Create a task branch from project branch with NO changes
+    // Create a task branch from delivery branch with NO changes
     git(repo, 'branch', 'astro/proj4-task1', 'astro/proj4');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/proj4-task1', 'astro/proj4', 'Empty task',
     );
 
@@ -206,7 +206,7 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     git(repo, 'commit', '-m', 'A');
     git(repo, 'checkout', 'main');
 
-    const r1 = await localMergeIntoProjectBranch(
+    const r1 = await localMergeIntoDeliveryBranch(
       repo, 'astro/proj5-task1', 'astro/proj5', 'Task 1',
     );
     expect(r1.merged).toBe(true);
@@ -218,7 +218,7 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     git(repo, 'commit', '-m', 'B');
     git(repo, 'checkout', 'main');
 
-    await localMergeIntoProjectBranch(
+    await localMergeIntoDeliveryBranch(
       repo, 'astro/proj5-task2', 'astro/proj5', 'Task 2',
     );
 
@@ -253,7 +253,7 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     git(repo, 'commit', '-m', 'Third commit');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/proj6-task1', 'astro/proj6', 'Squashed 3 commits',
     );
 
@@ -289,7 +289,7 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
     git(repo, 'commit', '-m', 'Mixed changes');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/proj7-task1', 'astro/proj7', 'Mixed changes',
     );
 
@@ -307,7 +307,7 @@ describe('localMergeIntoProjectBranch (real git)', { timeout: 30_000 }, () => {
 });
 
 describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, () => {
-  it('creates worktree with project branch in a no-remote repo', async () => {
+  it('creates worktree with delivery branch in a no-remote repo', async () => {
     const repo = createLocalRepo();
 
     const result = await createWorktree({
@@ -315,7 +315,7 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
       taskId: 'local-task-1',
       shortProjectId: 'abc123',
       shortNodeId: 'def456',
-      projectBranch: 'astro/abc123',
+      deliveryBranch: 'astro/abc123',
     });
 
     expect(result).not.toBeNull();
@@ -323,7 +323,7 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
 
     expect(setup.branchName).toBe('astro/abc123-def456');
     expect(setup.gitRoot).toBeDefined();
-    expect(setup.projectBranch).toBe('astro/abc123');
+    expect(setup.deliveryBranch).toBe('astro/abc123');
     expect(existsSync(setup.workingDirectory)).toBe(true);
 
     // Project branch should have been created locally
@@ -348,7 +348,7 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
       taskId: 'e2e-task-1',
       shortProjectId: 'e2epro',
       shortNodeId: 'node01',
-      projectBranch: 'astro/e2epro',
+      deliveryBranch: 'astro/e2epro',
     });
     expect(wt1).not.toBeNull();
 
@@ -357,11 +357,11 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
     git(wt1!.workingDirectory, 'add', '.');
     git(wt1!.workingDirectory, 'commit', '-m', 'Task 1 work');
 
-    // Merge into project branch
-    const merge1 = await localMergeIntoProjectBranch(
+    // Merge into delivery branch
+    const merge1 = await localMergeIntoDeliveryBranch(
       wt1!.gitRoot,
       wt1!.branchName,
-      wt1!.projectBranch!,
+      wt1!.deliveryBranch!,
       '[e2epro/node01] Task 1',
     );
     expect(merge1.merged).toBe(true);
@@ -369,17 +369,17 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
     // Cleanup task 1 worktree
     await wt1!.cleanup({ keepBranch: true });
 
-    // --- Task 2 (branches from updated project branch) ---
+    // --- Task 2 (branches from updated delivery branch) ---
     const wt2 = await createWorktree({
       workingDirectory: repo,
       taskId: 'e2e-task-2',
       shortProjectId: 'e2epro',
       shortNodeId: 'node02',
-      projectBranch: 'astro/e2epro',
+      deliveryBranch: 'astro/e2epro',
     });
     expect(wt2).not.toBeNull();
 
-    // Task 2 should see task 1's file (branched from project branch)
+    // Task 2 should see task 1's file (branched from delivery branch)
     expect(existsSync(join(wt2!.workingDirectory, 'task1-output.txt'))).toBe(true);
 
     // Add task 2's work
@@ -388,17 +388,17 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
     git(wt2!.workingDirectory, 'commit', '-m', 'Task 2 work');
 
     // Merge task 2
-    const merge2 = await localMergeIntoProjectBranch(
+    const merge2 = await localMergeIntoDeliveryBranch(
       wt2!.gitRoot,
       wt2!.branchName,
-      wt2!.projectBranch!,
+      wt2!.deliveryBranch!,
       '[e2epro/node02] Task 2',
     );
     expect(merge2.merged).toBe(true);
 
     await wt2!.cleanup({ keepBranch: true });
 
-    // Verify project branch has BOTH task outputs
+    // Verify delivery branch has BOTH task outputs
     const projectFiles = git(repo, 'ls-tree', '--name-only', 'astro/e2epro');
     expect(projectFiles).toContain('task1-output.txt');
     expect(projectFiles).toContain('task2-output.txt');
@@ -426,7 +426,7 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
       taskId: 'master-test',
       shortProjectId: 'mst123',
       shortNodeId: 'nd1234',
-      projectBranch: 'astro/mst123',
+      deliveryBranch: 'astro/mst123',
     });
 
     expect(result).not.toBeNull();
@@ -436,14 +436,14 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
     const branches = git(dir, 'branch', '--list', 'astro/mst123');
     expect(branches).toContain('astro/mst123');
 
-    // Verify the project branch was created from master (has the same file)
+    // Verify the delivery branch was created from master (has the same file)
     const content = git(dir, 'show', 'astro/mst123:readme.txt');
     expect(content).toBe('hello');
 
     await result!.cleanup();
   });
 
-  it('handles re-merge after previous merge (idempotent project branch)', async () => {
+  it('handles re-merge after previous merge (idempotent delivery branch)', async () => {
     const repo = createLocalRepo();
     git(repo, 'branch', 'astro/remerge', 'main');
 
@@ -455,13 +455,13 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
     git(repo, 'checkout', 'main');
 
     // Merge once
-    const r1 = await localMergeIntoProjectBranch(
+    const r1 = await localMergeIntoDeliveryBranch(
       repo, 'astro/remerge-t1', 'astro/remerge', 'First merge',
     );
     expect(r1.merged).toBe(true);
 
     // Try to merge the same branch again — should return merged=false (no new changes)
-    const r2 = await localMergeIntoProjectBranch(
+    const r2 = await localMergeIntoDeliveryBranch(
       repo, 'astro/remerge-t1', 'astro/remerge', 'Duplicate merge',
     );
     expect(r2.merged).toBe(false);
@@ -481,13 +481,13 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
     git(repo, 'commit', '-m', 'Add binary');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/binary-t1', 'astro/binary', 'Add image',
     );
 
     expect(result.merged).toBe(true);
 
-    // Verify the binary file exists on the project branch
+    // Verify the binary file exists on the delivery branch
     const files = git(repo, 'ls-tree', '--name-only', 'astro/binary');
     expect(files).toContain('image.png');
   });
@@ -510,12 +510,12 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
     git(repo, 'commit', '-m', 'Task 1');
     git(repo, 'checkout', 'main');
 
-    const r1 = await localMergeIntoProjectBranch(
+    const r1 = await localMergeIntoDeliveryBranch(
       repo, 'astro/multi-t1', 'astro/multi', 'Task 1',
     );
     expect(r1.merged).toBe(true);
 
-    // Task 2 also modifies both files (from main, not from project branch)
+    // Task 2 also modifies both files (from main, not from delivery branch)
     git(repo, 'checkout', '-b', 'astro/multi-t2', 'main');
     writeFileSync(join(repo, 'config.json'), '{"a": "task2"}\n');
     writeFileSync(join(repo, 'settings.yaml'), 'key: task2\n');
@@ -523,7 +523,7 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
     git(repo, 'commit', '-m', 'Task 2');
     git(repo, 'checkout', 'main');
 
-    const r2 = await localMergeIntoProjectBranch(
+    const r2 = await localMergeIntoDeliveryBranch(
       repo, 'astro/multi-t2', 'astro/multi', 'Task 2',
     );
 
@@ -539,14 +539,14 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
     const repo = createLocalRepo();
     git(repo, 'branch', 'astro/parallel', 'main');
 
-    // Task A: add file-a (from project branch)
+    // Task A: add file-a (from delivery branch)
     git(repo, 'checkout', '-b', 'astro/parallel-a', 'astro/parallel');
     writeFileSync(join(repo, 'file-a.txt'), 'A content\n');
     git(repo, 'add', '.');
     git(repo, 'commit', '-m', 'Task A');
     git(repo, 'checkout', 'main');
 
-    // Task B: add file-b (also from project branch, simulating parallel start)
+    // Task B: add file-b (also from delivery branch, simulating parallel start)
     git(repo, 'checkout', '-b', 'astro/parallel-b', 'astro/parallel');
     writeFileSync(join(repo, 'file-b.txt'), 'B content\n');
     git(repo, 'add', '.');
@@ -554,19 +554,19 @@ describe('createWorktree for local-only repos (real git)', { timeout: 30_000 }, 
     git(repo, 'checkout', 'main');
 
     // Merge A first
-    const rA = await localMergeIntoProjectBranch(
+    const rA = await localMergeIntoDeliveryBranch(
       repo, 'astro/parallel-a', 'astro/parallel', 'Task A',
     );
     expect(rA.merged).toBe(true);
 
     // Merge B — even though B branched before A merged, there's no conflict
     // because they touch different files
-    const rB = await localMergeIntoProjectBranch(
+    const rB = await localMergeIntoDeliveryBranch(
       repo, 'astro/parallel-b', 'astro/parallel', 'Task B',
     );
     expect(rB.merged).toBe(true);
 
-    // Both files should be on the project branch
+    // Both files should be on the delivery branch
     const files = git(repo, 'ls-tree', '--name-only', 'astro/parallel');
     expect(files).toContain('file-a.txt');
     expect(files).toContain('file-b.txt');
@@ -590,7 +590,7 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
       taskId: 'subdir-test-1',
       shortProjectId: 'subdir',
       shortNodeId: 'node01',
-      projectBranch: 'astro/subdir',
+      deliveryBranch: 'astro/subdir',
     });
 
     expect(wt).not.toBeNull();
@@ -607,15 +607,15 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
     git(wt!.workingDirectory, 'commit', '-m', 'Add feature');
 
     // Merge should work — gitRoot is correctly set
-    const mergeResult = await localMergeIntoProjectBranch(
+    const mergeResult = await localMergeIntoDeliveryBranch(
       wt!.gitRoot,
       wt!.branchName,
-      wt!.projectBranch!,
+      wt!.deliveryBranch!,
       'Subdir feature',
     );
     expect(mergeResult.merged).toBe(true);
 
-    // Verify the file is on the project branch (in the correct subdirectory)
+    // Verify the file is on the delivery branch (in the correct subdirectory)
     const files = git(realRepo, 'ls-tree', '-r', '--name-only', 'astro/subdir');
     expect(files).toContain('packages/my-app/new-feature.ts');
 
@@ -636,7 +636,7 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
       taskId: 'deep-test-1',
       shortProjectId: 'deep01',
       shortNodeId: 'nd0001',
-      projectBranch: 'astro/deep01',
+      deliveryBranch: 'astro/deep01',
     });
 
     expect(wt).not.toBeNull();
@@ -655,7 +655,7 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
       taskId: 'root-test',
       shortProjectId: 'root01',
       shortNodeId: 'nd0001',
-      projectBranch: 'astro/root01',
+      deliveryBranch: 'astro/root01',
     });
 
     expect(wt).not.toBeNull();
@@ -685,7 +685,7 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
       taskId: 'minimal-test',
       shortProjectId: 'min001',
       shortNodeId: 'nd0001',
-      projectBranch: 'astro/min001',
+      deliveryBranch: 'astro/min001',
     });
 
     expect(wt).not.toBeNull();
@@ -695,10 +695,10 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
     git(wt!.workingDirectory, 'add', '.');
     git(wt!.workingDirectory, 'commit', '-m', 'Add output');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       wt!.gitRoot,
       wt!.branchName,
-      wt!.projectBranch!,
+      wt!.deliveryBranch!,
       'First work',
     );
     expect(result.merged).toBe(true);
@@ -726,7 +726,7 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
       taskId: 'tracked-subdir-test',
       shortProjectId: 'trckd1',
       shortNodeId: 'nd0001',
-      projectBranch: 'astro/trckd1',
+      deliveryBranch: 'astro/trckd1',
     });
 
     expect(wt).not.toBeNull();
@@ -737,7 +737,7 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
   });
 
   it('local merge with worktree in subdirectory uses gitRoot correctly', async () => {
-    // Ensure that localMergeIntoProjectBranch uses gitRoot (not workingDirectory)
+    // Ensure that localMergeIntoDeliveryBranch uses gitRoot (not workingDirectory)
     // for all git operations, even when the task worked in a subdirectory
     const repo = createLocalRepo();
     const realRepo = realpathSync(repo);
@@ -752,7 +752,7 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
       taskId: 'merge-subdir-test',
       shortProjectId: 'msub01',
       shortNodeId: 'nd0001',
-      projectBranch: 'astro/msub01',
+      deliveryBranch: 'astro/msub01',
     });
     expect(wt).not.toBeNull();
 
@@ -765,16 +765,16 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
     git(worktreeRoot, 'commit', '-m', 'Add routes and root change');
 
     // Merge using gitRoot — this should capture ALL changes (subdir + root)
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       wt!.gitRoot,
       wt!.branchName,
-      wt!.projectBranch!,
+      wt!.deliveryBranch!,
       'API service work',
     );
 
     expect(result.merged).toBe(true);
 
-    // Both the subdirectory and root-level changes should be on the project branch
+    // Both the subdirectory and root-level changes should be on the delivery branch
     const files = git(realRepo, 'ls-tree', '-r', '--name-only', 'astro/msub01');
     expect(files).toContain('services/api/routes.ts');
     expect(files).toContain('root-change.txt');
@@ -784,7 +784,7 @@ describe('edge cases: directory structures (real git)', { timeout: 30_000 }, () 
 });
 
 describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => {
-  it('concurrent merges to the same project branch serialize correctly', async () => {
+  it('concurrent merges to the same delivery branch serialize correctly', async () => {
     // Two tasks merging simultaneously — both should succeed since they touch different files
     const repo = createLocalRepo();
     git(repo, 'branch', 'astro/concurrent', 'main');
@@ -804,8 +804,8 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
 
     // Fire both merges concurrently
     const [rA, rB] = await Promise.all([
-      localMergeIntoProjectBranch(repo, 'astro/concurrent-a', 'astro/concurrent', 'Alpha'),
-      localMergeIntoProjectBranch(repo, 'astro/concurrent-b', 'astro/concurrent', 'Beta'),
+      localMergeIntoDeliveryBranch(repo, 'astro/concurrent-a', 'astro/concurrent', 'Alpha'),
+      localMergeIntoDeliveryBranch(repo, 'astro/concurrent-b', 'astro/concurrent', 'Beta'),
     ]);
 
     // At least one should succeed. The other may also succeed (if worktree locking works)
@@ -838,7 +838,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'Add unicode files — résumé + data');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/unicode-t1', 'astro/unicode', 'Unicode content — 日本語',
     );
 
@@ -865,7 +865,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
 
     // Commit message with characters that could break shell escaping
     const trickMessage = `Fix "the bug" in O'Reilly's \`code\` — yes/no $HOME`;
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/msg-t1', 'astro/msg', trickMessage,
     );
 
@@ -888,7 +888,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'Add symlink');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/symlink-t1', 'astro/symlink', 'Symlink merge',
     );
 
@@ -913,7 +913,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'Rename file');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/rename-t1', 'astro/rename', 'Renamed file',
     );
 
@@ -939,7 +939,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'Fresh work');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/stale-t1', 'astro/stale', 'Fresh merge',
     );
 
@@ -951,11 +951,11 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     expect(files).toContain('fresh.txt');
   });
 
-  it('task branch far behind project branch still merges cleanly (no conflict, different files)', async () => {
+  it('task branch far behind delivery branch still merges cleanly (no conflict, different files)', async () => {
     const repo = createLocalRepo();
     git(repo, 'branch', 'astro/farback', 'main');
 
-    // Merge 5 tasks into project branch to advance it far ahead
+    // Merge 5 tasks into delivery branch to advance it far ahead
     for (let i = 1; i <= 5; i++) {
       git(repo, 'checkout', '-b', `astro/farback-t${i}`, 'astro/farback');
       writeFileSync(join(repo, `file-${i}.txt`), `content ${i}\n`);
@@ -963,7 +963,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
       git(repo, 'commit', '-m', `Task ${i}`);
       git(repo, 'checkout', 'main');
 
-      const r = await localMergeIntoProjectBranch(
+      const r = await localMergeIntoDeliveryBranch(
         repo, `astro/farback-t${i}`, 'astro/farback', `Task ${i}`,
       );
       expect(r.merged).toBe(true);
@@ -977,13 +977,13 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'checkout', 'main');
 
     // This should merge cleanly since it touches a different file
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/farback-late', 'astro/farback', 'Late merge',
     );
 
     expect(result.merged).toBe(true);
 
-    // All 6 files should be on the project branch
+    // All 6 files should be on the delivery branch
     const files = git(repo, 'ls-tree', '--name-only', 'astro/farback');
     for (let i = 1; i <= 5; i++) {
       expect(files).toContain(`file-${i}.txt`);
@@ -1003,7 +1003,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'Add large file');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/large-t1', 'astro/large', 'Large file merge',
     );
 
@@ -1023,7 +1023,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', `Add ${fileCount} files`);
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/many-t1', 'astro/many', 'Bulk file merge',
     );
 
@@ -1034,11 +1034,11 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     expect(generatedFiles.length).toBe(fileCount);
   });
 
-  it('merge after project branch was manually advanced (simulating external changes)', async () => {
+  it('merge after delivery branch was manually advanced (simulating external changes)', async () => {
     const repo = createLocalRepo();
     git(repo, 'branch', 'astro/ext', 'main');
 
-    // Externally advance the project branch (e.g., user manually committed)
+    // Externally advance the delivery branch (e.g., user manually committed)
     git(repo, 'checkout', 'astro/ext');
     writeFileSync(join(repo, 'manual.txt'), 'manually added\n');
     git(repo, 'add', '.');
@@ -1052,7 +1052,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'Task work');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/ext-t1', 'astro/ext', 'Task merge after external change',
     );
 
@@ -1081,7 +1081,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'Delete files');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/delonly-t1', 'astro/delonly', 'Delete-only merge',
     );
 
@@ -1103,7 +1103,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'A');
     git(repo, 'checkout', 'main');
 
-    const rA = await localMergeIntoProjectBranch(
+    const rA = await localMergeIntoDeliveryBranch(
       repo, 'astro/threeway-a', 'astro/threeway', 'Task A',
     );
     expect(rA.merged).toBe(true);
@@ -1115,7 +1115,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'B');
     git(repo, 'checkout', 'main');
 
-    const rB = await localMergeIntoProjectBranch(
+    const rB = await localMergeIntoDeliveryBranch(
       repo, 'astro/threeway-b', 'astro/threeway', 'Task B',
     );
     expect(rB.merged).toBe(false);
@@ -1128,7 +1128,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'C');
     git(repo, 'checkout', 'main');
 
-    const rC = await localMergeIntoProjectBranch(
+    const rC = await localMergeIntoDeliveryBranch(
       repo, 'astro/threeway-c', 'astro/threeway', 'Task C',
     );
     expect(rC.merged).toBe(true);
@@ -1154,7 +1154,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'Deep dir');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/deep-t1', 'astro/deep', 'Deep directory merge',
     );
 
@@ -1179,7 +1179,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'Fix trailing newline');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/ws-t1', 'astro/ws', 'Whitespace fix',
     );
 
@@ -1200,7 +1200,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'Add executable script');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/chmod-t1', 'astro/chmod', 'Executable script merge',
     );
 
@@ -1222,7 +1222,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'A');
     git(repo, 'checkout', 'main');
 
-    const r1 = await localMergeIntoProjectBranch(
+    const r1 = await localMergeIntoDeliveryBranch(
       repo, 'astro/sha-t1', 'astro/sha', 'Task 1',
     );
 
@@ -1233,7 +1233,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '-m', 'B');
     git(repo, 'checkout', 'main');
 
-    const r2 = await localMergeIntoProjectBranch(
+    const r2 = await localMergeIntoDeliveryBranch(
       repo, 'astro/sha-t2', 'astro/sha', 'Task 2',
     );
 
@@ -1252,7 +1252,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     const repo = createLocalRepo();
     git(repo, 'branch', 'astro/noref', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/nonexistent-branch', 'astro/noref', 'Should fail',
     );
 
@@ -1261,17 +1261,17 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     expect(result.error).toBeDefined();
   });
 
-  it('nonexistent project branch returns structured error', async () => {
+  it('nonexistent delivery branch returns structured error', async () => {
     const repo = createLocalRepo();
 
-    // Create a valid task branch but no project branch
+    // Create a valid task branch but no delivery branch
     git(repo, 'checkout', '-b', 'astro/orphan-task', 'main');
     writeFileSync(join(repo, 'orphan.txt'), 'orphan\n');
     git(repo, 'add', '.');
     git(repo, 'commit', '-m', 'Orphan');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/orphan-task', 'astro/nonexistent-project', 'Should fail',
     );
 
@@ -1298,7 +1298,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
     git(repo, 'commit', '--no-verify', '-m', 'Add file');
     git(repo, 'checkout', 'main');
 
-    const result = await localMergeIntoProjectBranch(
+    const result = await localMergeIntoDeliveryBranch(
       repo, 'astro/hook-t1', 'astro/hook', 'Should fail at commit',
     );
 
@@ -1309,7 +1309,7 @@ describe('boundary: stress & edge cases (real git)', { timeout: 60_000 }, () => 
   });
 });
 
-describe('ensureProjectBranch local mode (real git)', { timeout: 15_000 }, () => {
+describe('ensureDeliveryBranch local mode (real git)', { timeout: 15_000 }, () => {
   it('does not attempt to push for a no-remote repo', async () => {
     const repo = createLocalRepo();
 
@@ -1319,7 +1319,7 @@ describe('ensureProjectBranch local mode (real git)', { timeout: 15_000 }, () =>
       taskId: 'nopush-test',
       shortProjectId: 'nopush',
       shortNodeId: 'node01',
-      projectBranch: 'astro/nopush',
+      deliveryBranch: 'astro/nopush',
     });
 
     expect(result).not.toBeNull();
@@ -1330,16 +1330,16 @@ describe('ensureProjectBranch local mode (real git)', { timeout: 15_000 }, () =>
     await result!.cleanup();
   });
 
-  it('reuses existing local project branch on second task', async () => {
+  it('reuses existing local delivery branch on second task', async () => {
     const repo = createLocalRepo();
 
-    // First task creates the project branch
+    // First task creates the delivery branch
     const wt1 = await createWorktree({
       workingDirectory: repo,
       taskId: 'reuse-test-1',
       shortProjectId: 'reuse1',
       shortNodeId: 'node01',
-      projectBranch: 'astro/reuse1',
+      deliveryBranch: 'astro/reuse1',
     });
     expect(wt1).not.toBeNull();
 
@@ -1347,22 +1347,22 @@ describe('ensureProjectBranch local mode (real git)', { timeout: 15_000 }, () =>
     writeFileSync(join(wt1!.workingDirectory, 'first.txt'), 'first\n');
     git(wt1!.workingDirectory, 'add', '.');
     git(wt1!.workingDirectory, 'commit', '-m', 'First task');
-    await localMergeIntoProjectBranch(
-      wt1!.gitRoot, wt1!.branchName, wt1!.projectBranch!, 'First',
+    await localMergeIntoDeliveryBranch(
+      wt1!.gitRoot, wt1!.branchName, wt1!.deliveryBranch!, 'First',
     );
     await wt1!.cleanup({ keepBranch: true });
 
-    // Second task — should reuse the same project branch
+    // Second task — should reuse the same delivery branch
     const wt2 = await createWorktree({
       workingDirectory: repo,
       taskId: 'reuse-test-2',
       shortProjectId: 'reuse1',
       shortNodeId: 'node02',
-      projectBranch: 'astro/reuse1',
+      deliveryBranch: 'astro/reuse1',
     });
     expect(wt2).not.toBeNull();
 
-    // The second task's worktree should be branched from the project branch
+    // The second task's worktree should be branched from the delivery branch
     // which now has the first task's changes
     expect(existsSync(join(wt2!.workingDirectory, 'first.txt'))).toBe(true);
 

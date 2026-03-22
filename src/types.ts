@@ -159,9 +159,12 @@ export interface Task {
   /** Target branch for worktree creation and PR base (e.g., 'main', 'develop') */
   baseBranch?: string;
 
-  /** Project-level accumulation branch (e.g., 'astro/7b19a9').
-   *  With delivery branches, this contains the per-component delivery branch name
-   *  (e.g., 'astro/7b19a9-e4f1a2'). Per-task PRs target this branch. */
+  /** Per-component delivery branch (e.g., 'astro/7b19a9-e4f1a2').
+   *  In multi-task components, per-task branches are created from this branch.
+   *  In singleton components, the agent works directly on this branch. */
+  deliveryBranch?: string;
+
+  /** @deprecated Use `deliveryBranch` instead. Kept for backward compatibility with older servers. */
   projectBranch?: string;
 
   /** When true, this task is the only task in its delivery branch component.
@@ -255,9 +258,9 @@ export interface TaskResult {
   branchName?: string;
   prUrl?: string;
   prNumber?: number;
-  /** Git SHA of the project branch before this task's PR was merged */
+  /** Git SHA of the delivery branch before this task's PR was merged */
   commitBeforeSha?: string;
-  /** Git SHA of the project branch after this task's PR was merged */
+  /** Git SHA of the delivery branch after this task's PR was merged */
   commitAfterSha?: string;
   /** Delivery outcome — separate from execution status */
   deliveryStatus?: 'success' | 'failed' | 'skipped';
