@@ -1496,7 +1496,10 @@ export class TaskExecutor {
 
             this.wsClient.sendTaskStatus(task.id, 'running', 95, 'Creating pull request...');
             console.log(`[executor] Task ${task.id}: pr mode, attempting PR creation for branch ${prepared.branchName}`);
-            const hasProjectBranch = !!task.projectBranch;
+            // Singleton delivery branches create PRs directly to the base branch
+            // (no auto-merge into an accumulation branch). Multi-task components
+            // auto-merge per-task PRs into the delivery branch.
+            const hasProjectBranch = !!task.projectBranch && !task.deliveryBranchIsSingleton;
             const prResult = await pushAndCreatePR(prepared.workingDirectory, {
               branchName: prepared.branchName,
               taskTitle: prTitle,
@@ -1851,6 +1854,7 @@ export class TaskExecutor {
         agentDir: task.agentDir,
         baseBranch: task.baseBranch,
         projectBranch: task.projectBranch,
+        deliveryBranchIsSingleton: task.deliveryBranchIsSingleton,
         stdout: stream.stdout,
         stderr: stream.stderr,
         operational: stream.operational,

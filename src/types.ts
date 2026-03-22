@@ -159,8 +159,15 @@ export interface Task {
   /** Target branch for worktree creation and PR base (e.g., 'main', 'develop') */
   baseBranch?: string;
 
-  /** Project-level accumulation branch (e.g., 'astro/7b19a9'). Per-task PRs target this branch. */
+  /** Project-level accumulation branch (e.g., 'astro/7b19a9').
+   *  With delivery branches, this contains the per-component delivery branch name
+   *  (e.g., 'astro/7b19a9-e4f1a2'). Per-task PRs target this branch. */
   projectBranch?: string;
+
+  /** When true, this task is the only task in its delivery branch component.
+   *  The agent works directly on the delivery branch (no task sub-branch).
+   *  PR is created from delivery branch directly to base branch. */
+  deliveryBranchIsSingleton?: boolean;
 
   /** Worktree strategy for non-git or copy-based execution */
   worktreeStrategy?: 'copy' | 'reference' | 'direct';

@@ -24,8 +24,12 @@ export interface WorktreeOptions {
   agentDir?: string;
   /** Target branch from dispatch — takes priority over .astro/config.json and auto-detection */
   baseBranch?: string;
-  /** Project-level accumulation branch (e.g., 'astro/7b19a9'). Task branches from this instead of main. */
+  /** Delivery branch for this task's connected component (e.g., 'astro/7b19a9-e4f1a2').
+   *  In multi-task mode, task branches are created from this branch.
+   *  In singleton mode, the agent works directly on this branch. */
   projectBranch?: string;
+  /** If true, work directly on the delivery branch (singleton component — no task sub-branch). */
+  deliveryBranchIsSingleton?: boolean;
   stdout?: (data: string) => void;
   stderr?: (data: string) => void;
   /** Emit structured operational activity lines */
@@ -64,6 +68,7 @@ export async function createWorktree(
     agentDir,
     baseBranch: dispatchBaseBranch,
     projectBranch: dispatchProjectBranch,
+    deliveryBranchIsSingleton,
     stdout,
     stderr,
     signal,
@@ -92,15 +97,18 @@ export async function createWorktree(
 
   const branchPrefix = await readBranchPrefix(gitRoot, agentDirName);
 
-  // Separate project branch (accumulative) from task branch (per-task).
-  // Project branch: `astro/{shortProjectId}` — accumulates all task work via auto-merged PRs
-  // Task branch: `astro/{shortProjectId}-{shortNodeId}` — per-task worktree branch
+  // Delivery branch: per-connected-component accumulation branch (e.g., 'astro/7b19a9-e4f1a2').
+  // Task branch: per-task worktree branch (e.g., 'astro/7b19a9-a1b2c3').
+  // Singleton mode: delivery branch IS the working branch (no task sub-branch).
   const projectBranchName = dispatchProjectBranch
     ?? (shortProjectId ? `${branchPrefix}${sanitize(shortProjectId)}` : undefined);
+  const isSingleton = deliveryBranchIsSingleton && !!projectBranchName;
   const branchSuffix = shortProjectId && shortNodeId
     ? `${sanitize(shortProjectId)}-${sanitize(shortNodeId)}`
     : sanitize(taskId);
-  const taskBranchName = `${branchPrefix}${branchSuffix}`;
+  const taskBranchName = isSingleton
+    ? projectBranchName!  // Singleton: work directly on delivery branch
+    : `${branchPrefix}${branchSuffix}`;
   const worktreePath = join(baseRoot, branchSuffix);
   // Abort-signal gate: check between every long git operation so cancellation
   // actually halts workspace prep instead of letting it run to completion.
@@ -113,16 +121,20 @@ export async function createWorktree(
   await rm(worktreePath, { recursive: true, force: true });
   await pruneWorktrees(gitRoot);
 
-  // Clean up lingering worktrees and branches for the TASK branch only.
-  // Never delete the project branch — it accumulates work across tasks.
+  // Clean up lingering worktrees for the working branch.
+  // For singletons, only clean up stale worktree checkouts — never delete
+  // the delivery branch itself (it's managed by the server).
+  // For multi-task, also delete the stale task branch and its remote.
   checkAborted();
   await removeLingeringWorktrees(gitRoot, taskBranchName);
-  await ensureBranchAvailable(gitRoot, taskBranchName);
+  if (!isSingleton) {
+    await ensureBranchAvailable(gitRoot, taskBranchName);
 
-  // Delete remote task branch if it exists — prevents non-fast-forward push
-  // failures when re-executing a task whose previous branch was already pushed
-  checkAborted();
-  await deleteRemoteBranch(gitRoot, taskBranchName);
+    // Delete remote task branch if it exists — prevents non-fast-forward push
+    // failures when re-executing a task whose previous branch was already pushed
+    checkAborted();
+    await deleteRemoteBranch(gitRoot, taskBranchName);
+  }
 
   // Fetch latest so we branch from up-to-date origin (skip for local-only repos)
   checkAborted();
@@ -164,8 +176,9 @@ export async function createWorktree(
   // Create persistent project worktree (detached HEAD) — idempotent.
   // This enables file browsing at .astro/worktrees/{shortProjectId}/ after
   // task worktrees are cleaned up.
+  // Skip for singletons — the task worktree IS the working worktree.
   let projectWorktreePath: string | undefined;
-  if (projectBranchName && shortProjectId) {
+  if (!isSingleton && projectBranchName && shortProjectId) {
     projectWorktreePath = await createProjectWorktree(
       gitRoot, projectBranchName, baseRoot, sanitize(shortProjectId), operational,
     ) ?? undefined;
@@ -199,41 +212,69 @@ export async function createWorktree(
   }
 
   checkAborted();
-  operational?.(`Creating worktree from ${startPoint}...`, 'astro');
-  try {
-    await execFileAsync(
-      'git',
-      ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
-      { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
-    );
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (msg.includes('already exists')) {
-      // Branch exists from a previous failed/retried execution — delete it and retry.
-      console.log(`[worktree] Branch ${taskBranchName} already exists, deleting stale branch and retrying`);
-      try {
+  if (isSingleton) {
+    // Singleton: checkout the existing delivery branch in the worktree.
+    // No new branch is created — the agent works directly on the delivery branch.
+    operational?.(`Creating singleton worktree on delivery branch ${taskBranchName}...`, 'astro');
+    try {
+      await execFileAsync(
+        'git',
+        ['-C', gitRoot, 'worktree', 'add', worktreePath, taskBranchName],
+        { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('already checked out') || msg.includes('already registered')) {
+        // Stale worktree — prune and retry
+        console.log(`[worktree] Delivery branch ${taskBranchName} locked by stale worktree, pruning and retrying`);
+        await pruneWorktrees(gitRoot);
         await execFileAsync(
-          'git', ['-C', gitRoot, 'branch', '-D', taskBranchName],
-          { env: withGitEnv(), timeout: 5_000 }
+          'git',
+          ['-C', gitRoot, 'worktree', 'add', worktreePath, taskBranchName],
+          { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
         );
-      } catch { /* branch might be checked out in a stale worktree — prune first */ }
-      try {
-        await execFileAsync(
-          'git', ['-C', gitRoot, 'worktree', 'prune'],
-          { env: withGitEnv(), timeout: 5_000 }
-        );
-        await execFileAsync(
-          'git', ['-C', gitRoot, 'branch', '-D', taskBranchName],
-          { env: withGitEnv(), timeout: 5_000 }
-        );
-      } catch { /* best effort — may already be deleted */ }
+      } else {
+        throw err;
+      }
+    }
+  } else {
+    // Multi-task: create a new task branch from the delivery branch (or default branch).
+    operational?.(`Creating worktree from ${startPoint}...`, 'astro');
+    try {
       await execFileAsync(
         'git',
         ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
         { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
       );
-    } else {
-      throw err;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('already exists')) {
+        // Branch exists from a previous failed/retried execution — delete it and retry.
+        console.log(`[worktree] Branch ${taskBranchName} already exists, deleting stale branch and retrying`);
+        try {
+          await execFileAsync(
+            'git', ['-C', gitRoot, 'branch', '-D', taskBranchName],
+            { env: withGitEnv(), timeout: 5_000 }
+          );
+        } catch { /* branch might be checked out in a stale worktree — prune first */ }
+        try {
+          await execFileAsync(
+            'git', ['-C', gitRoot, 'worktree', 'prune'],
+            { env: withGitEnv(), timeout: 5_000 }
+          );
+          await execFileAsync(
+            'git', ['-C', gitRoot, 'branch', '-D', taskBranchName],
+            { env: withGitEnv(), timeout: 5_000 }
+          );
+        } catch { /* best effort — may already be deleted */ }
+        await execFileAsync(
+          'git',
+          ['-C', gitRoot, 'worktree', 'add', '-b', taskBranchName, worktreePath, startPoint],
+          { env: withGitEnv(), timeout: 30_000, signal: signal ?? undefined }
+        );
+      } else {
+        throw err;
+      }
     }
   }
 
@@ -308,13 +349,17 @@ export async function createWorktree(
   return {
     workingDirectory: worktreeWorkingDirectory,
     branchName: taskBranchName,
-    baseBranch: effectiveBase,
+    // Singleton: PR targets the base branch (main) directly.
+    // Multi-task: PR targets the delivery branch (effectiveBase).
+    baseBranch: isSingleton ? defaultBranch : effectiveBase,
     commitBeforeSha,
     gitRoot,
-    projectBranch: projectBranchName,
-    projectWorktreePath,
+    // Singleton: no accumulative merge step — PR goes directly to base branch.
+    projectBranch: isSingleton ? undefined : projectBranchName,
+    projectWorktreePath: isSingleton ? undefined : projectWorktreePath,
     cleanup: async (options?: { keepBranch?: boolean }) => {
-      await cleanupWorktree(gitRoot, worktreePath, taskBranchName, options?.keepBranch);
+      // Singleton: always keep the delivery branch (server manages its lifecycle).
+      await cleanupWorktree(gitRoot, worktreePath, taskBranchName, isSingleton || options?.keepBranch);
     },
   };
 }
