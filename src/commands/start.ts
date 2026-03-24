@@ -784,15 +784,18 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           return;
         }
 
-        // Check if it's a git repo
+        // Check if dirPath itself is the root of a git repo.
+        // Use --show-toplevel and compare to dirPath so that subdirectories
+        // of a parent git repo are NOT reported as git repos.
         let isGit = false;
         try {
-          execFileSync('git', ['-C', dirPath, 'rev-parse', '--is-inside-work-tree'], {
+          const gitRoot = execFileSync('git', ['-C', dirPath, 'rev-parse', '--show-toplevel'], {
             encoding: 'utf-8',
             timeout: 5_000,
             stdio: 'pipe',
-          });
-          isGit = true;
+          }).trim();
+          // Normalize trailing slashes before comparing
+          isGit = gitRoot.replace(/\/$/, '') === dirPath.replace(/\/$/, '');
         } catch {
           // Not a git repo
         }
