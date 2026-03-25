@@ -71,7 +71,7 @@ const DEFAULT_CONFIG: RunnerConfig = {
   maxConcurrentTasks: 40,
   heartbeatInterval: 30000, // 30 seconds
   reconnectMaxRetries: -1, // Infinite retries
-  reconnectBaseDelay: 1000, // 1 second
+  reconnectBaseDelay: 3000, // 3 seconds
   reconnectMaxDelay: 60000, // 1 minute
   taskTimeout: 3600000, // 1 hour
   logLevel: 'info',
@@ -182,6 +182,7 @@ export class WebSocketClient {
   private reconnectTimeout: NodeJS.Timeout | null = null;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private tokenRefreshTimeout: NodeJS.Timeout | null = null;
+  private pongTimeout: NodeJS.Timeout | null = null;
   private isConnecting = false;
   private shouldReconnect = true;
   private activeTasks: Set<string> = new Set();
@@ -448,6 +449,10 @@ export class WebSocketClient {
 
         this.ws.on('pong', () => {
           // Server responded to ping, connection is alive
+          if (this.pongTimeout) {
+            clearTimeout(this.pongTimeout);
+            this.pongTimeout = null;
+          }
         });
       } catch (error) {
         this.isConnecting = false;
@@ -1529,6 +1534,14 @@ export class WebSocketClient {
 
         // Also send WebSocket ping for connection health
         this.ws.ping();
+
+        // Expect a pong within 10 seconds; if not, the connection is dead
+        if (this.pongTimeout) clearTimeout(this.pongTimeout);
+        this.pongTimeout = setTimeout(() => {
+          console.warn('[ws-client] Pong timeout — connection appears dead, forcing reconnect');
+          this.pongTimeout = null;
+          this.ws?.terminate();
+        }, 10000);
       }
     }, this.config.heartbeatInterval);
   }
@@ -1571,6 +1584,11 @@ export class WebSocketClient {
   private cleanup(): void {
     this.stopHeartbeat();
     this.cancelTokenRefresh();
+
+    if (this.pongTimeout) {
+      clearTimeout(this.pongTimeout);
+      this.pongTimeout = null;
+    }
 
     if (this.openclawBridge) {
       this.openclawBridge.stop();
