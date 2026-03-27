@@ -997,29 +997,8 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       // For chat tasks with conversation history, build the prompt by appending
       // the conversation history to the effective prompt. The last user message
       // is the actual query; prior messages provide context.
-      //
-      // Safety truncation: cap messages to avoid exceeding the model's context window
-      // on the first API call (before auto-compaction can kick in). This is especially
-      // important when resume fails and the full history is used as fallback context.
-      const MAX_FALLBACK_MESSAGES = 40;
-      const MAX_FALLBACK_CHARS = 200_000;
-
-      let msgs = task.messages;
-      if (msgs.length > MAX_FALLBACK_MESSAGES) {
-        console.log(`[claude-sdk] Task ${task.id} truncating fallback messages: ${msgs.length} → ${MAX_FALLBACK_MESSAGES}`);
-        msgs = msgs.slice(-MAX_FALLBACK_MESSAGES);
-      }
-      let totalChars = msgs.reduce((sum, m) => sum + m.content.length, 0);
-      while (totalChars > MAX_FALLBACK_CHARS && msgs.length > 4) {
-        totalChars -= msgs[0].content.length;
-        msgs = msgs.slice(1);
-      }
-      // Ensure we start with a user message
-      if (msgs.length > 0 && msgs[0].role !== 'user') {
-        msgs = msgs.slice(1);
-      }
-
-      const conversationContext = msgs
+      // Note: messages are already truncated server-side before dispatch.
+      const conversationContext = task.messages
         .map(m => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
         .join('\n\n');
       queryPrompt = effectivePrompt
@@ -1027,8 +1006,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         : conversationContext;
 
       const promptLen = typeof queryPrompt === 'string' ? queryPrompt.length : 0;
-      const wasTruncated = msgs.length < task.messages.length;
-      console.log(`[claude-sdk] Task ${task.id} fallback prompt: ${task.messages.length}${wasTruncated ? ` → ${msgs.length}` : ''} messages, ${promptLen} chars (~${Math.round(promptLen / 4)}tok)${wasTruncated ? ' (TRUNCATED)' : ''}`);
+      console.log(`[claude-sdk] Task ${task.id} fallback prompt: ${task.messages.length} messages, ${promptLen} chars (~${Math.round(promptLen / 4)}tok)`);
     } else {
       queryPrompt = effectivePrompt;
     }
