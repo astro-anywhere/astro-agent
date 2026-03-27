@@ -997,12 +997,16 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       // For chat tasks with conversation history, build the prompt by appending
       // the conversation history to the effective prompt. The last user message
       // is the actual query; prior messages provide context.
+      // Note: messages are already truncated server-side before dispatch.
       const conversationContext = task.messages
         .map(m => `${m.role === 'user' ? 'Human' : 'Assistant'}: ${m.content}`)
         .join('\n\n');
       queryPrompt = effectivePrompt
         ? `${effectivePrompt}\n\n---\n\nConversation history:\n${conversationContext}`
         : conversationContext;
+
+      const promptLen = typeof queryPrompt === 'string' ? queryPrompt.length : 0;
+      console.log(`[claude-sdk] Task ${task.id} fallback prompt: ${task.messages.length} messages, ${promptLen} chars (~${Math.round(promptLen / 4)}tok)`);
     } else {
       queryPrompt = effectivePrompt;
     }
@@ -1034,9 +1038,12 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     const toolUseNames = new Map<string, string>();
 
     let turnIndex = 0;
+    let receivedResult = false;
 
     for await (const msg of gen) {
       try {
+      const msgSubtype = 'subtype' in msg ? (msg as Record<string, unknown>).subtype : undefined;
+      console.log(`[claude-sdk] Task ${task.id} message: type=${msg.type}${msgSubtype ? ` subtype=${msgSubtype}` : ''}`);
       if (msg.type === 'system' && msg.subtype === 'init') {
         this.model = msg.model;
         const sessionId = (msg as unknown as Record<string, unknown>).session_id as string ?? '';
@@ -1198,12 +1205,17 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         const tokenSummary = usage ? `${usage.input_tokens ?? 0}+${usage.output_tokens ?? 0}` : 'N/A';
         const costStr = totalCostUsd != null ? `$${totalCostUsd.toFixed(4)}` : 'N/A';
         console.log(`[claude-sdk] Task ${task.id} completed: status=${success ? 'success' : 'failure'} turns=${numTurns ?? turnIndex} tokens=${tokenSummary} cost=${costStr}`);
+        receivedResult = true;
         break;
+      } else {
+        console.log(`[claude-sdk] Task ${task.id} unhandled message: type=${msg.type}${msgSubtype ? ` subtype=${String(msgSubtype)}` : ''}`);
       }
       } catch (err) {
         console.error(`[claude-sdk] Task ${task.id} event processing error (continuing):`, err);
       }
     }
+
+    console.log(`[claude-sdk] Task ${task.id} for-await loop exited: ${receivedResult ? 'received result message (normal)' : 'generator exhausted without result message'}`);
 
     // Detect unauthenticated Claude Code sessions.
     // When the keychain token is missing (common on remote/HPC machines), the CLI

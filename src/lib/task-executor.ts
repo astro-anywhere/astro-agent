@@ -1213,6 +1213,7 @@ export class TaskExecutor {
       let result: Awaited<ReturnType<typeof adapter.execute>>;
       if (canResume) {
         console.log(`[executor] Task ${task.id}: resuming session ${taskWithWorkspace.resumeSessionId} with ${adapter.name} (type=${adapter.type}, hasMessages=${!!taskWithWorkspace.messages?.length})...`);
+        stream.operational?.('Resuming previous session...', 'astro');
         const resumeStartedAt = new Date().toISOString();
         try {
           const resumeResult = await adapter.resumeTask(
@@ -1236,15 +1237,22 @@ export class TaskExecutor {
             // fall back to fresh execution. Codex/OpenCode adapters resolve with
             // { success: false } instead of throwing, so the catch block won't fire.
             console.warn(`[executor] Task ${task.id}: resume returned failure (${resumeResult.error}), falling back to fresh execution`);
+            stream.operational?.('Session resume failed, starting fresh session', 'astro');
+
             result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
           }
         } catch (resumeErr) {
           // Resume threw (Claude SDK throws on session errors) —
           // fall back to fresh execution with conversation history in messages
           console.warn(`[executor] Task ${task.id}: resume threw (${resumeErr instanceof Error ? resumeErr.message : resumeErr}), falling back to fresh execution`);
+          stream.operational?.('Session resume failed, starting fresh session', 'astro');
           result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
         }
       } else {
+        const msgCount = taskWithWorkspace.messages?.length ?? 0;
+        if (msgCount > 0) {
+          stream.operational?.(`Starting new session with ${msgCount} messages of context`, 'astro');
+        }
         console.log(`[executor] Task ${task.id}: executing with ${adapter.name}...`);
         result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
       }
