@@ -703,7 +703,7 @@ export class TaskExecutor {
     const originalCount = task.messages.length;
     let msgs = task.messages.slice(-40);
     let totalChars = msgs.reduce((sum, m) => sum + m.content.length, 0);
-    while (totalChars > 200_000 && msgs.length > 2) {
+    while (totalChars > 200_000 && msgs.length > 4) {
       totalChars -= msgs[0].content.length;
       msgs = msgs.slice(1);
     }

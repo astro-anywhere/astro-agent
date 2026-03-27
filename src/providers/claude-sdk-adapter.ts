@@ -1010,7 +1010,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         msgs = msgs.slice(-MAX_FALLBACK_MESSAGES);
       }
       let totalChars = msgs.reduce((sum, m) => sum + m.content.length, 0);
-      while (totalChars > MAX_FALLBACK_CHARS && msgs.length > 2) {
+      while (totalChars > MAX_FALLBACK_CHARS && msgs.length > 4) {
         totalChars -= msgs[0].content.length;
         msgs = msgs.slice(1);
       }
