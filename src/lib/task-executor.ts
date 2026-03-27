@@ -693,29 +693,6 @@ export class TaskExecutor {
   }
 
   /**
-   * Truncate fallback messages in-place when resume fails and the adapter falls back
-   * to fresh execution. Without this, the full conversation history (potentially hundreds
-   * of messages) gets flattened into the prompt, which can exceed the context window
-   * before the SDK's auto-compaction kicks in.
-   */
-  private truncateFallbackMessages(task: Task & { workingDirectory: string }, stream?: TaskOutputStream): void {
-    if (!task.messages || task.messages.length <= 40) return;
-    const originalCount = task.messages.length;
-    let msgs = task.messages.slice(-40);
-    let totalChars = msgs.reduce((sum, m) => sum + m.content.length, 0);
-    while (totalChars > 200_000 && msgs.length > 4) {
-      totalChars -= msgs[0].content.length;
-      msgs = msgs.slice(1);
-    }
-    if (msgs.length > 0 && msgs[0].role !== 'user') {
-      msgs = msgs.slice(1);
-    }
-    task.messages = msgs;
-    console.log(`[executor] Task ${task.id}: truncated fallback messages ${originalCount} → ${msgs.length}`);
-    stream?.operational?.(`Context trimmed to recent ${msgs.length} messages (was ${originalCount})`, 'astro');
-  }
-
-  /**
    * Find the adapter that has a preserved session for the given task.
    */
   private findAdapterWithSession(taskId: string): ProviderAdapter | null {
@@ -1261,7 +1238,7 @@ export class TaskExecutor {
             // { success: false } instead of throwing, so the catch block won't fire.
             console.warn(`[executor] Task ${task.id}: resume returned failure (${resumeResult.error}), falling back to fresh execution`);
             stream.operational?.('Session resume failed, starting fresh session', 'astro');
-            this.truncateFallbackMessages(taskWithWorkspace, stream);
+
             result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
           }
         } catch (resumeErr) {
@@ -1269,7 +1246,6 @@ export class TaskExecutor {
           // fall back to fresh execution with conversation history in messages
           console.warn(`[executor] Task ${task.id}: resume threw (${resumeErr instanceof Error ? resumeErr.message : resumeErr}), falling back to fresh execution`);
           stream.operational?.('Session resume failed, starting fresh session', 'astro');
-          this.truncateFallbackMessages(taskWithWorkspace, stream);
           result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
         }
       } else {
