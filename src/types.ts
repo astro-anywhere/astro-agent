@@ -318,6 +318,8 @@ export type WSMessageType =
   | 'slash_commands_response'
   | 'repo_detect_response'
   | 'branch_list_response'
+  | 'git_checkout_response'
+  | 'git_create_branch_response'
   | 'git_init_response'
   | 'sessions_list_response'
   | 'channel_notification_ack'
@@ -344,6 +346,8 @@ export type WSMessageType =
   | 'slash_commands_request'
   | 'repo_detect_request'
   | 'branch_list_request'
+  | 'git_checkout_request'
+  | 'git_create_branch_request'
   | 'git_init_request'
   | 'sessions_list_request'
   | 'channel_notification'
@@ -829,6 +833,45 @@ export interface BranchListResponseMessage extends WSMessage {
       isDefault: boolean;
     }>;
     defaultBranch?: string;
+    error?: string;
+  };
+}
+
+export interface GitCheckoutRequestMessage extends WSMessage {
+  type: 'git_checkout_request';
+  payload: {
+    correlationId: string;
+    path: string;
+    branch: string;
+    stash?: boolean;
+  };
+}
+
+export interface GitCheckoutResponseMessage extends WSMessage {
+  type: 'git_checkout_response';
+  payload: {
+    correlationId: string;
+    success: boolean;
+    branch?: string;
+    error?: string;
+  };
+}
+
+export interface GitCreateBranchRequestMessage extends WSMessage {
+  type: 'git_create_branch_request';
+  payload: {
+    correlationId: string;
+    path: string;
+    branch: string;
+  };
+}
+
+export interface GitCreateBranchResponseMessage extends WSMessage {
+  type: 'git_create_branch_response';
+  payload: {
+    correlationId: string;
+    success: boolean;
+    branch?: string;
     error?: string;
   };
 }

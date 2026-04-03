@@ -26,7 +26,7 @@ import {
   formatSetupHint,
   formatNoProvidersWarning,
 } from '../lib/display.js';
-import type { RunnerEvent, Task, RepoSetupRequestMessage, RepoDetectRequestMessage, BranchListRequestMessage, GitInitRequestMessage } from '../types.js';
+import type { RunnerEvent, Task, RepoSetupRequestMessage, RepoDetectRequestMessage, BranchListRequestMessage, GitCheckoutRequestMessage, GitCreateBranchRequestMessage, GitInitRequestMessage } from '../types.js';
 
 interface StartOptions {
   foreground?: boolean;
@@ -1038,6 +1038,72 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         log('error', `Branch list failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
         wsClient.sendBranchListResponse(correlationId, {
           branches: [],
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    onGitCheckout: async (payload: GitCheckoutRequestMessage['payload']) => {
+      const { correlationId, path: dirPath, branch, stash } = payload;
+      log('info', `Git checkout request: dir=${dirPath} branch=${branch} stash=${!!stash}`, logLevel);
+      try {
+        if (!existsSync(dirPath)) {
+          wsClient.sendGitCheckoutResponse(correlationId, {
+            success: false,
+            error: `Directory does not exist: ${dirPath}`,
+          });
+          return;
+        }
+        if (stash) {
+          execFileSync('git', ['stash', 'push', '-m', `astro-auto-stash before switching to ${branch}`], {
+            cwd: dirPath,
+            encoding: 'utf-8',
+            timeout: 30_000,
+          });
+          log('info', `Git stash completed before checkout`, logLevel);
+        }
+        execFileSync('git', ['checkout', branch], {
+          cwd: dirPath,
+          encoding: 'utf-8',
+          timeout: 30_000,
+        });
+        wsClient.sendGitCheckoutResponse(correlationId, {
+          success: true,
+          branch,
+        });
+        log('info', `Git checkout result: success=true branch=${branch}`, logLevel);
+      } catch (error) {
+        log('error', `Git checkout failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendGitCheckoutResponse(correlationId, {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    onGitCreateBranch: async (payload: GitCreateBranchRequestMessage['payload']) => {
+      const { correlationId, path: dirPath, branch } = payload;
+      log('info', `Git create-branch request: dir=${dirPath} branch=${branch}`, logLevel);
+      try {
+        if (!existsSync(dirPath)) {
+          wsClient.sendGitCreateBranchResponse(correlationId, {
+            success: false,
+            error: `Directory does not exist: ${dirPath}`,
+          });
+          return;
+        }
+        execFileSync('git', ['checkout', '-b', branch], {
+          cwd: dirPath,
+          encoding: 'utf-8',
+          timeout: 30_000,
+        });
+        wsClient.sendGitCreateBranchResponse(correlationId, {
+          success: true,
+          branch,
+        });
+        log('info', `Git create-branch result: success=true branch=${branch}`, logLevel);
+      } catch (error) {
+        log('error', `Git create-branch failed: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendGitCreateBranchResponse(correlationId, {
+          success: false,
           error: error instanceof Error ? error.message : String(error),
         });
       }
