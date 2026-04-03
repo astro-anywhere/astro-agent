@@ -49,6 +49,10 @@ import type {
   RepoDetectResponseMessage,
   BranchListRequestMessage,
   BranchListResponseMessage,
+  GitCheckoutRequestMessage,
+  GitCheckoutResponseMessage,
+  GitCreateBranchRequestMessage,
+  GitCreateBranchResponseMessage,
   GitInitRequestMessage,
   GitInitResponseMessage,
   ChannelNotificationMessage,
@@ -119,6 +123,8 @@ export interface WebSocketClientOptions {
   onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
   onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
   onBranchList?: (payload: BranchListRequestMessage['payload']) => void;
+  onGitCheckout?: (payload: GitCheckoutRequestMessage['payload']) => void;
+  onGitCreateBranch?: (payload: GitCreateBranchRequestMessage['payload']) => void;
   onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
   onSessionsList?: (correlationId: string, maxAgeMs?: number) => void;
   onOpenClawBridgeReady?: (bridge: OpenClawBridge) => void;
@@ -161,6 +167,8 @@ type IncomingMessage =
   | SlashCommandsRequestMessage
   | RepoDetectRequestMessage
   | BranchListRequestMessage
+  | GitCheckoutRequestMessage
+  | GitCreateBranchRequestMessage
   | GitInitRequestMessage
   | import('../types.js').SessionsListRequestMessage
   | ChannelNotificationMessage
@@ -208,6 +216,8 @@ export class WebSocketClient {
   private onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
   private onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
   private onBranchList?: (payload: BranchListRequestMessage['payload']) => void;
+  private onGitCheckout?: (payload: GitCheckoutRequestMessage['payload']) => void;
+  private onGitCreateBranch?: (payload: GitCreateBranchRequestMessage['payload']) => void;
   private onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
   private onSessionsList?: (correlationId: string, maxAgeMs?: number) => void;
   private onOpenClawBridgeReady?: (bridge: OpenClawBridge) => void;
@@ -237,6 +247,8 @@ export class WebSocketClient {
     this.onSlashCommands = options.onSlashCommands;
     this.onRepoDetect = options.onRepoDetect;
     this.onBranchList = options.onBranchList;
+    this.onGitCheckout = options.onGitCheckout;
+    this.onGitCreateBranch = options.onGitCreateBranch;
     this.onGitInit = options.onGitInit;
     this.onSessionsList = options.onSessionsList;
     this.onOpenClawBridgeReady = options.onOpenClawBridgeReady;
@@ -870,6 +882,28 @@ export class WebSocketClient {
         return;
       }
 
+      // Handle git_checkout.request (dot notation from relay)
+      if (raw.type === 'git_checkout.request') {
+        const msg: GitCheckoutRequestMessage = {
+          type: 'git_checkout_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: raw.payload as GitCheckoutRequestMessage['payload'],
+        };
+        this.handleGitCheckoutRequest(msg);
+        return;
+      }
+
+      // Handle git_create_branch.request (dot notation from relay)
+      if (raw.type === 'git_create_branch.request') {
+        const msg: GitCreateBranchRequestMessage = {
+          type: 'git_create_branch_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: raw.payload as GitCreateBranchRequestMessage['payload'],
+        };
+        this.handleGitCreateBranchRequest(msg);
+        return;
+      }
+
       // Handle git_init.request (dot notation from relay)
       if (raw.type === 'git_init.request') {
         const gitInitMsg: GitInitRequestMessage = {
@@ -959,6 +993,12 @@ export class WebSocketClient {
         break;
       case 'branch_list_request':
         this.handleBranchListRequest(message as BranchListRequestMessage);
+        break;
+      case 'git_checkout_request':
+        this.handleGitCheckoutRequest(message as GitCheckoutRequestMessage);
+        break;
+      case 'git_create_branch_request':
+        this.handleGitCreateBranchRequest(message as GitCreateBranchRequestMessage);
         break;
       case 'git_init_request':
         this.handleGitInitRequest(message as GitInitRequestMessage);
@@ -1431,6 +1471,38 @@ export class WebSocketClient {
   ): void {
     const msg: BranchListResponseMessage = {
       type: 'branch_list_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, ...result },
+    };
+    this.send(msg);
+  }
+
+  private handleGitCheckoutRequest(message: GitCheckoutRequestMessage): void {
+    this.onGitCheckout?.(message.payload);
+  }
+
+  sendGitCheckoutResponse(
+    correlationId: string,
+    result: Omit<GitCheckoutResponseMessage['payload'], 'correlationId'>,
+  ): void {
+    const msg: GitCheckoutResponseMessage = {
+      type: 'git_checkout_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, ...result },
+    };
+    this.send(msg);
+  }
+
+  private handleGitCreateBranchRequest(message: GitCreateBranchRequestMessage): void {
+    this.onGitCreateBranch?.(message.payload);
+  }
+
+  sendGitCreateBranchResponse(
+    correlationId: string,
+    result: Omit<GitCreateBranchResponseMessage['payload'], 'correlationId'>,
+  ): void {
+    const msg: GitCreateBranchResponseMessage = {
+      type: 'git_create_branch_response',
       timestamp: new Date().toISOString(),
       payload: { correlationId, ...result },
     };
