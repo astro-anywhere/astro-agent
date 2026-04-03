@@ -1150,12 +1150,14 @@ export class TaskExecutor {
     const TASK_HEARTBEAT_INTERVAL_MS = 30_000;
     let heartbeatSeq = 0;
     const taskHeartbeatTimer = setInterval(() => {
-      // Send directly via wsClient to keep the server's activity timer alive
-      // WITHOUT resetting the agent-side idle timeout. stream.text() calls
-      // resetIdleTimeout(), which would make a hung agent run until hard cap
-      // instead of idle-timing out after 15 minutes of no real activity.
-      // Heartbeat text is intentionally empty — it exists only to keep the
-      // server's activity timer alive, not to display anything to the user.
+      // Heartbeat resets the agent-side idle timeout: if the heartbeat timer
+      // fires, the Node.js event loop is alive and the task process hasn't
+      // crashed. The idle timeout should only detect truly dead processes
+      // (event loop blocked, process exited), not slow LLM reasoning — models
+      // can spend 15+ minutes "thinking" before emitting tokens, and killing
+      // the task during that time loses real work. The hard cap (8h default)
+      // remains as backstop for genuinely stuck tasks.
+      resetIdleTimeout();
       this.wsClient.sendTaskText(
         normalizedTask.id,
         '',
