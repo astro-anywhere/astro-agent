@@ -6,7 +6,7 @@
  */
 
 import { homedir } from 'node:os';
-import { statSync, realpathSync, existsSync } from 'node:fs';
+import { statSync, realpathSync, existsSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -1946,6 +1946,14 @@ export class TaskExecutor {
     stream: { fileChange: (path: string, action: 'created' | 'modified' | 'deleted', linesAdded?: number, linesRemoved?: number) => void },
   ): Promise<void> {
     try {
+      // Check if workdir is a git repository before running diff
+      try {
+        await execFileAsync('git', ['-C', workdir, 'rev-parse', '--git-dir'], { timeout: 5_000 });
+      } catch {
+        // Not a git repo — skip diff silently
+        return;
+      }
+
       // Collect diff output from both committed and uncommitted changes.
       // commitBeforeSha..HEAD covers committed work; HEAD vs working tree covers uncommitted.
       let output = '';
@@ -2126,6 +2134,12 @@ function resolveWorkingDirectory(value: string | undefined, projectId?: string):
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      // Auto-create directories under ~/.astro/workspace/ (playground sessions)
+      const astroWorkspace = homedir() + '/.astro/workspace/';
+      if (resolved.startsWith(astroWorkspace)) {
+        mkdirSync(resolved, { recursive: true });
+        return resolved;
+      }
       throw new Error(
         `Working directory does not exist: ${resolved}. ` +
         'Check that the project directory path is correct and accessible.'
