@@ -451,7 +451,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       const gen = query({ prompt: promptIterable, options });
 
       let output = '';
-      let success = true;
+      let success = false;
       let errorMessage: string | undefined;
       let newSessionId = sessionId;
       // Map tool_use_id → tool name for matching results back to uses
@@ -743,6 +743,12 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         }
         break;
       }
+    }
+
+    // If the stream ended without a result message, treat as failure
+    if (!success && !errorMessage) {
+      errorMessage = 'Agent process exited without producing a result message';
+      stream.status('failed', 0, errorMessage);
     }
 
     return { success, output, error: errorMessage, metrics: resultMetrics };
@@ -1249,6 +1255,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           success = false;
           errorMessage = `Task failed: ${msg.subtype}`;
           stream.status('failed', progress, errorMessage);
+        } else {
+          // Unrecognized result subtype — treat as failure with descriptive message
+          success = false;
+          errorMessage = `Task ended with unrecognized result: ${msg.subtype}`;
+          stream.status('failed', progress, errorMessage);
         }
 
         const tokenSummary = usage ? `${usage.input_tokens ?? 0}+${usage.output_tokens ?? 0}` : 'N/A';
@@ -1268,7 +1279,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     // If the stream ended without a result message, the process likely crashed
     // or hit a limit not covered by the SDK's result subtypes.
-    if (!receivedResult && success) {
+    if (!receivedResult) {
       success = false;
       errorMessage ??= 'Agent process exited without producing a result message';
       stream.status('failed', progress, errorMessage);
