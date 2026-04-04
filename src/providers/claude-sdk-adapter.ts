@@ -703,7 +703,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     const gen = query({ prompt: promptIterable, options });
 
     let output = '';
-    let success = true;
+    let success = false;
     let errorMessage: string | undefined;
     let resultMetrics: TaskResult['metrics'] | undefined;
 
@@ -1077,7 +1077,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     });
 
     let output = '';
-    let success = true;
+    let success = false;
     let errorMessage: string | undefined;
     const artifacts: TaskArtifact[] = [];
     let progress = 0;
@@ -1265,6 +1265,14 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     }
 
     console.log(`[claude-sdk] Task ${task.id} for-await loop exited: ${receivedResult ? 'received result message (normal)' : 'generator exhausted without result message'}`);
+
+    // If the stream ended without a result message, the process likely crashed
+    // or hit a limit not covered by the SDK's result subtypes.
+    if (!receivedResult && success) {
+      success = false;
+      errorMessage ??= 'Agent process exited without producing a result message';
+      stream.status('failed', progress, errorMessage);
+    }
 
     // Detect unauthenticated Claude Code sessions.
     // When the keychain token is missing (common on remote/HPC machines), the CLI
