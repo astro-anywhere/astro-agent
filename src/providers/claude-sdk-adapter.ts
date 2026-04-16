@@ -454,6 +454,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       let success = false;
       let errorMessage: string | undefined;
       let newSessionId = sessionId;
+      let receivedResult = false;
       // Map tool_use_id → tool name for matching results back to uses
       const resumeToolUseNames = new Map<string, string>();
 
@@ -499,9 +500,18 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           } else {
             success = false;
             errorMessage = `Resume failed: ${msg.subtype}`;
+            stream.status('failed', 0, errorMessage);
           }
+          receivedResult = true;
           break;
         }
+      }
+
+      // If the stream ended without a result message, treat as failure
+      if (!receivedResult) {
+        success = false;
+        errorMessage ??= 'Agent process exited without producing a result message';
+        stream.status('failed', 0, errorMessage);
       }
 
       // Preserve context after resume completes
