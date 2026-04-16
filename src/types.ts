@@ -163,7 +163,13 @@ export interface Task {
    *  - working: a git worktree is created on the folder's current HEAD and the
    *    worktree path is mounted read/write.
    *  - reference: the path is mounted read-only. Edit/Write/Bash operations that
-   *    target files under the path are denied by the tool permission hook. */
+   *    target files under the path are denied by the tool permission hook.
+   *
+   *  NOTE: currently honored only by the `claude-sdk` provider. The task
+   *  executor rejects the task if this field is set with any other provider,
+   *  so the agent can't silently fail to see the extra folders. If another
+   *  provider adapter gains multi-directory support, remove the guard in
+   *  `task-executor.ts` around `setupAdditionalFolders`. */
   additionalFolders?: Array<{
     machineId: string;
     path: string;

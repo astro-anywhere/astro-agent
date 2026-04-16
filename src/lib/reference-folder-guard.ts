@@ -106,6 +106,15 @@ export function extractPathsForWriteCheck(
   if (toolName === 'Bash' || toolName === 'bash') {
     const cmd = (input as { command?: unknown }).command;
     if (typeof cmd === 'string') {
+      // Defense-in-depth heuristic: flag any token that looks like a POSIX
+      // path (starts with /, ./, ../, ~/). We intentionally do not expand
+      // environment variables ($HOME/file), command substitutions ($(pwd)/x),
+      // glob patterns (/tmp/*.txt), or handle Windows-style drive paths
+      // (C:\...). A determined attacker with shell-metacharacter knowledge
+      // could still craft a path that slips past — the SDK sandbox and the
+      // additional-directories allowlist remain the authoritative guards.
+      // Do not weaken this check without preserving the quote-aware tokenizer
+      // above: quoted paths with spaces MUST be treated as a single token.
       for (const t of tokenizeShellArgs(cmd)) {
         if (t.startsWith('/') || t.startsWith('./') || t.startsWith('../') || t.startsWith('~/')) {
           paths.push(t);

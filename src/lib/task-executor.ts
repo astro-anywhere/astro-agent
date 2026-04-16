@@ -1190,9 +1190,45 @@ export class TaskExecutor {
     // Set up additional folders (working worktrees + reference mounts).
     // Failures during setup (missing path, not a git repo for working mode)
     // must fail the task — we never silently drop a mount the user asked for.
+    //
+    // Provider-parity guard: additional folders are only honored by the
+    // claude-sdk adapter today. Other adapters (codex, openclaw, opencode,
+    // slurm) don't wire the mount paths into the CLI or enforce the
+    // reference-folder deny hook, so silently accepting the request would
+    // give the user a task that "succeeds" with none of the folders
+    // actually visible to the agent. Fail fast instead.
     let additionalFoldersCleanup: (() => Promise<void>) | undefined;
     let additionalFolderMounts: AdditionalFolderMount[] = [];
     if (normalizedTask.additionalFolders && normalizedTask.additionalFolders.length > 0) {
+      if (normalizedTask.provider !== 'claude-sdk') {
+        clearInterval(taskHeartbeatTimer);
+        const msg =
+          `Additional folders are only supported with the claude-sdk provider. ` +
+          `This task requested provider=${normalizedTask.provider}.`;
+        console.error(`[executor] Task ${task.id}: ${msg}`);
+        stream.operational?.(msg, 'astro');
+        try {
+          await prepared.cleanup({ keepBranch: false });
+        } catch (cleanupErr) {
+          const cmsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+          console.warn(`[executor] Task ${task.id}: primary cleanup after provider-parity failure: ${cmsg}`);
+        }
+        this.wsClient.sendTaskResult({
+          taskId: task.id,
+          status: 'failed',
+          error: msg,
+          completedAt: new Date().toISOString(),
+        });
+        // Note: normalizedTask.id and taskWithWorkspace.id are the same — the
+        // latter is a shallow spread of the former with only `workingDirectory`
+        // overridden, so runningTasks.delete(normalizedTask.id) removes the
+        // correct entry regardless of which alias we use.
+        this.runningTasks.delete(normalizedTask.id);
+        this.wsClient.removeActiveTask(task.id);
+        this.untrackTaskDirectory(task);
+        this.processQueue();
+        return;
+      }
       try {
         const result = await setupAdditionalFolders(
           normalizedTask.additionalFolders,
@@ -1204,7 +1240,9 @@ export class TaskExecutor {
         runningTask.task = taskWithWorkspace;
         console.log(
           `[executor] Task ${task.id}: mounted ${additionalFolderMounts.length} additional folder(s): ` +
-          additionalFolderMounts.map(m => `${m.mode}:${m.hostPath}`).join(', '),
+          additionalFolderMounts
+            .map(m => m.mode === 'working' ? `${m.mode}:${m.hostPath}→${m.mountPath}` : `${m.mode}:${m.hostPath}`)
+            .join(', '),
         );
       } catch (extraErr) {
         clearInterval(taskHeartbeatTimer);

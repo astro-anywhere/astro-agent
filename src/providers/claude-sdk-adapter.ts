@@ -342,6 +342,16 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
    * Resume a completed task session to continue execution.
    * Uses the SDK's `resume` option to reconnect to a previous session.
    * This enables post-completion steering (follow-up questions after task finishes).
+   *
+   * Note on additional folders: working-mode worktrees are cleaned up when the
+   * original task completes, and reference-mode mounts are not preserved on the
+   * resumed session either (we don't forward `_resolvedAdditionalFolders` here).
+   * This is intentional — by the time resume fires, the working worktrees are
+   * gone from disk, and leaving reference paths out of `additionalDirectories`
+   * means the SDK's sandbox prevents any access, so the reference-folder deny
+   * hook isn't needed on resume. If a user needs follow-up work that touches the
+   * extra folders, they should dispatch a new task rather than steer the
+   * completed one.
    */
   async resumeTask(
     taskId: string,

@@ -218,6 +218,17 @@ async function setupOneFolder(
       }
 
       const worktreePath = siblingWorktreePath(hostPath);
+      // Concurrency note: two tasks dispatched simultaneously with the same
+      // `hostPath` will compute the same `worktreePath`. We do NOT hold a
+      // BranchLockManager lock around the stale-cleanup + add sequence
+      // because the outcome under race is acceptable:
+      //   • First task wins `worktree add` and proceeds.
+      //   • Second task sees the sibling path exists, tries to remove it
+      //     (fails because it's in use), tries `worktree add`, fails fast
+      //     with a clear error via the catch below.
+      // The user sees an explicit "failed to create worktree at …" and can
+      // retry once the first task finishes. Silent fallback would be worse.
+      //
       // If a stale worktree from a prior run remains, prune it out first so
       // `git worktree add` doesn't refuse. Tight timeouts: don't let a slow
       // or hung filesystem stall the whole task queue — if quick cleanup
@@ -284,7 +295,8 @@ export function isPathUnderReferenceMount(
   if (!targetPath || referenceMountPaths.length === 0) return false;
   let abs: string;
   try {
-    abs = isAbsolute(targetPath) ? resolve(targetPath) : resolve(targetPath);
+    // resolve() is idempotent on absolute paths, so one call covers both cases.
+    abs = resolve(targetPath);
   } catch {
     return false;
   }
