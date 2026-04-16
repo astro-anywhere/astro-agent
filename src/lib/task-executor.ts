@@ -268,8 +268,8 @@ export class TaskExecutor {
     storedAt: number;
   }> = new Map();
 
-  /** TTL for completed task metadata (10 minutes, matches adapter session TTL) */
-  private static readonly COMPLETED_TASK_META_TTL_MS = 10 * 60 * 1000;
+  /** TTL for completed task metadata (30 minutes, allows follow-up execution to recreate worktrees) */
+  private static readonly COMPLETED_TASK_META_TTL_MS = 30 * 60 * 1000;
 
   constructor(options: TaskExecutorOptions) {
     this.wsClient = options.wsClient;
@@ -327,11 +327,11 @@ export class TaskExecutor {
     this.claimedTasks.add(task.id);
     try {
 
-    // Only execution tasks need workingDirectory resolution, safety checks,
+    // Execution and follow-up tasks need workingDirectory resolution, safety checks,
     // git diff, and summary generation. All other types (plan/chat/summarize/
     // playground) skip this overhead but still get full tool access when they
     // have a working directory.
-    const isExecutionTask = !task.type || task.type === 'execution';
+    const isExecutionTask = !task.type || task.type === 'execution' || task.type === 'follow-up';
 
     // Non-execution tasks can run without a working directory.
     // For execution tasks, resolve the directory or auto-provision one.
@@ -1166,9 +1166,9 @@ export class TaskExecutor {
       );
     }, TASK_HEARTBEAT_INTERVAL_MS);
 
-    // Only execution tasks get git diff, delivery, and summary — all other types (chat, plan, playground, summarize) skip them.
+    // Execution and follow-up tasks get git diff, delivery, and summary — all other types (chat, plan, playground, summarize) skip them.
     // These non-execution types still get full tool access when they have a working directory.
-    const isExecutionTask = !normalizedTask.type || normalizedTask.type === 'execution';
+    const isExecutionTask = !normalizedTask.type || normalizedTask.type === 'execution' || normalizedTask.type === 'follow-up';
     let prepared: Awaited<ReturnType<typeof this.prepareTaskWorkspace>>;
     try {
       prepared = !isExecutionTask && !normalizedTask.workingDirectory
@@ -1296,10 +1296,11 @@ export class TaskExecutor {
       // Notify task started
       this.wsClient.sendTaskStatus(task.id, 'running', 0, 'Starting');
 
-      // Resume existing session if resumeSessionId is provided
+      // Resume existing session if resumeSessionId is provided.
+      // Follow-up tasks are treated as execution (get delivery pipeline) but also allow session resume.
       const canResume = taskWithWorkspace.resumeSessionId
         && this.isResumableAdapter(adapter)
-        && !isExecutionTask;
+        && (!isExecutionTask || normalizedTask.type === 'follow-up');
 
       let result: Awaited<ReturnType<typeof adapter.execute>>;
       if (canResume) {
