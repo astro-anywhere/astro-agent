@@ -41,7 +41,7 @@ const claudeExecutablePath = resolveClaudeExecutable();
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, getAugmentedPath } from './base-adapter.js';
-import { isPathUnderReferenceMount } from '../lib/additional-folders.js';
+import { buildReferenceFolderDenyHook } from '../lib/reference-folder-guard.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
 import { config } from '../lib/config.js';
@@ -49,88 +49,6 @@ import { config } from '../lib/config.js';
 /** Shell execution tools whose output may contain real sbatch submissions */
 const SHELL_TOOLS = new Set(['Bash', 'bash', 'shell', 'execute_command', 'terminal']);
 
-/**
- * Tools that can mutate the filesystem and must be denied when their target
- * resolves under a reference-mode additional folder.
- */
-const WRITE_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit']);
-
-/**
- * Extract candidate filesystem paths from a tool input. Returns every path
- * that should be checked against the reference-mount guard. Covers the
- * built-in Edit/Write/NotebookEdit inputs and best-effort Bash parsing.
- */
-function extractPathsForWriteCheck(toolName: string, input: Record<string, unknown>): string[] {
-  const paths: string[] = [];
-  const pushIfString = (v: unknown): void => {
-    if (typeof v === 'string' && v.length > 0) paths.push(v);
-  };
-
-  if (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit' || toolName === 'MultiEdit') {
-    pushIfString((input as { file_path?: unknown }).file_path);
-    pushIfString((input as { notebook_path?: unknown }).notebook_path);
-    pushIfString((input as { path?: unknown }).path);
-    // MultiEdit: edits[].file_path
-    const edits = (input as { edits?: unknown }).edits;
-    if (Array.isArray(edits)) {
-      for (const e of edits) {
-        if (e && typeof e === 'object') {
-          pushIfString((e as { file_path?: unknown }).file_path);
-        }
-      }
-    }
-    return paths;
-  }
-
-  if (toolName === 'Bash' || toolName === 'bash') {
-    const cmd = (input as { command?: unknown }).command;
-    if (typeof cmd === 'string') {
-      // Best-effort: tokenize and keep anything that looks like a path
-      // argument (starts with /, ./, ../, or ~/). The reference-mount guard
-      // only fires on paths under a known reference root, so false positives
-      // on unrelated tokens are harmless.
-      const tokens = cmd.split(/\s+/);
-      for (const t of tokens) {
-        const unquoted = t.replace(/^['"]|['"]$/g, '');
-        if (unquoted.startsWith('/') || unquoted.startsWith('./') || unquoted.startsWith('../') || unquoted.startsWith('~/')) {
-          paths.push(unquoted);
-        }
-      }
-    }
-  }
-  return paths;
-}
-
-/**
- * Build a canUseTool wrapper that denies write/edit/bash calls whose target
- * resolves under any reference-mode additional folder. When `referenceMountPaths`
- * is empty, returns `undefined` so callers can skip installing the wrapper.
- */
-function buildReferenceFolderDenyHook(
-  referenceMountPaths: readonly string[],
-  stream?: { toolResult?: (toolName: string, result: unknown, success: boolean, toolUseId?: string) => void },
-): ((toolName: string, input: Record<string, unknown>, toolUseID: string) => { denied: boolean; message?: string }) | undefined {
-  if (referenceMountPaths.length === 0) return undefined;
-
-  return (toolName: string, input: Record<string, unknown>, toolUseID: string) => {
-    if (!WRITE_TOOLS.has(toolName) && toolName !== 'Bash' && toolName !== 'bash') {
-      return { denied: false };
-    }
-
-    const candidates = extractPathsForWriteCheck(toolName, input);
-    for (const p of candidates) {
-      if (isPathUnderReferenceMount(p, referenceMountPaths)) {
-        const message =
-          `Denied: ${toolName} targets a read-only reference folder (${p}). ` +
-          `Reference folders are mounted read-only and cannot be modified.`;
-        // Surface the denial to the UI as a failed tool_result, not a silent no-op.
-        stream?.toolResult?.(toolName, message, false, toolUseID);
-        return { denied: true, message };
-      }
-    }
-    return { denied: false };
-  };
-}
 
 /**
  * Determine whether to enable sandbox mode for Claude Code.
@@ -879,7 +797,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     const referenceMountPaths = resolvedAdditionalFolders
       .filter((m) => m.mode === 'reference')
       .map((m) => m.mountPath);
-    const referenceDenyHook = buildReferenceFolderDenyHook(referenceMountPaths, stream);
+    const referenceDenyHook = buildReferenceFolderDenyHook(referenceMountPaths);
 
     // Build options for the query
     const options: Parameters<typeof query>[0]['options'] = {
@@ -923,7 +841,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         // Deny write/edit/bash calls that target read-only reference folders.
         // This runs first so the denial is surfaced before any other handling.
         if (referenceDenyHook) {
-          const check = referenceDenyHook(toolName, input, options.toolUseID);
+          const check = referenceDenyHook(toolName, input)
           if (check.denied) {
             return {
               behavior: 'deny' as const,

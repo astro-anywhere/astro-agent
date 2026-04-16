@@ -1211,16 +1211,29 @@ export class TaskExecutor {
         const msg = extraErr instanceof Error ? extraErr.message : String(extraErr);
         console.error(`[executor] Task ${task.id}: additional folder setup failed: ${msg}`);
         stream.operational?.(`Additional folder setup failed: ${msg}`, 'astro');
-        // Run primary cleanup before rethrowing so the main worktree is released.
+        // Run primary cleanup before reporting so the main worktree is released.
         try {
           await prepared.cleanup({ keepBranch: false });
         } catch (cleanupErr) {
           const cmsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
           console.warn(`[executor] Task ${task.id}: primary cleanup after additional-folder failure: ${cmsg}`);
         }
+        // Report failure to the server directly — executeTask() is invoked from
+        // several paths (submitTask, handleSafetyDecision, processQueue) and not
+        // all of them catch thrown errors. Matches the sandbox/provider-error
+        // failure pattern above. sendTaskResult + removeActiveTask are idempotent
+        // so if processQueue's outer catch also runs later, it's a no-op.
+        this.wsClient.sendTaskResult({
+          taskId: task.id,
+          status: 'failed',
+          error: `Additional folder setup failed: ${msg}`,
+          completedAt: new Date().toISOString(),
+        });
         this.runningTasks.delete(normalizedTask.id);
+        this.wsClient.removeActiveTask(task.id);
         this.untrackTaskDirectory(task);
-        throw extraErr;
+        this.processQueue();
+        return;
       }
     }
 

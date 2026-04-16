@@ -79,6 +79,16 @@ describe('setupAdditionalFolders (reference mode)', () => {
       setupAdditionalFolders([{ machineId: 'm1', path: missing, mode: 'reference' }]),
     ).rejects.toThrow(/not found on this machine/);
   });
+
+  it('error message includes the folder index and machineId for debuggability', async () => {
+    const missing = join(tmpRoot, 'nope');
+    await expect(
+      setupAdditionalFolders([
+        { machineId: 'm1', path: tmpRoot, mode: 'reference' },
+        { machineId: 'm-broken', path: missing, mode: 'reference' },
+      ]),
+    ).rejects.toThrow(/additionalFolders\[1\].*m-broken/);
+  });
 });
 
 describe('reference-folder write-denial hook (integration with isPathUnderReferenceMount)', () => {

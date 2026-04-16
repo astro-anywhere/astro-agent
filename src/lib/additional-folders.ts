@@ -155,65 +155,18 @@ export async function setupAdditionalFolders(
   const mounts: AdditionalFolderMount[] = [];
   const cleanups: Array<() => Promise<void>> = [];
 
-  for (const folder of folders) {
-    if (!folder?.path) {
-      throw new Error('Additional folder entry missing path.');
+  for (let i = 0; i < folders.length; i++) {
+    const folder = folders[i];
+    const entryLabel = `additionalFolders[${i}] (machineId=${folder?.machineId ?? '<unknown>'})`;
+    try {
+      await setupOneFolder(folder, mounts, cleanups, logger);
+    } catch (err) {
+      // Wrap every per-entry error with the label so callers can pinpoint
+      // which entry in a multi-folder payload failed without losing the
+      // original message.
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`${entryLabel}: ${msg}`);
     }
-    const hostPath = isAbsolute(folder.path) ? folder.path : resolve(folder.path);
-
-    if (folder.mode === 'reference') {
-      assertDirectoryExists('reference', hostPath);
-      mounts.push({ hostPath, mountPath: hostPath, mode: 'reference' });
-      logger?.operational?.(
-        `Mounted reference folder (read-only): ${hostPath}`,
-        'astro',
-      );
-      continue;
-    }
-
-    if (folder.mode === 'working') {
-      assertDirectoryExists('working', hostPath);
-      const isRepo = await isGitWorkTree(hostPath);
-      if (!isRepo) {
-        throw new Error(
-          `Additional working folder is not inside a git repository: ${hostPath}. ` +
-          `Working folders require git so a secondary worktree can be created.`,
-        );
-      }
-
-      const worktreePath = siblingWorktreePath(hostPath);
-      // If a stale worktree from a prior run remains, prune it out first so
-      // `git worktree add` doesn't refuse. Best-effort.
-      if (existsSync(worktreePath)) {
-        try {
-          await execFileAsync(
-            'git',
-            ['-C', hostPath, 'worktree', 'remove', '--force', worktreePath],
-            { timeout: 30_000 },
-          );
-        } catch {
-          try {
-            await execFileAsync('git', ['-C', hostPath, 'worktree', 'prune'], { timeout: 15_000 });
-          } catch {
-            // ignore
-          }
-        }
-      }
-
-      logger?.operational?.(
-        `Creating worktree for additional folder: ${hostPath} -> ${worktreePath}`,
-        'git',
-      );
-      await addDetachedWorktree(hostPath, worktreePath);
-      mounts.push({ hostPath, mountPath: worktreePath, mode: 'working' });
-      cleanups.push(() => removeWorktree(hostPath, worktreePath));
-      continue;
-    }
-
-    throw new Error(
-      `Unknown additional folder mode: ${String((folder as { mode?: unknown }).mode)} ` +
-      `for path ${hostPath}. Expected 'working' or 'reference'.`,
-    );
   }
 
   let cleanedUp = false;
@@ -231,6 +184,92 @@ export async function setupAdditionalFolders(
   };
 
   return { mounts, cleanup };
+}
+
+async function setupOneFolder(
+  folder: AdditionalFolderInput,
+  mounts: AdditionalFolderMount[],
+  cleanups: Array<() => Promise<void>>,
+  logger?: { operational?: (message: string, source: 'astro' | 'git' | 'delivery') => void },
+): Promise<void> {
+    if (!folder?.path) {
+      throw new Error('missing path.');
+    }
+    const hostPath = isAbsolute(folder.path) ? folder.path : resolve(folder.path);
+
+    if (folder.mode === 'reference') {
+      assertDirectoryExists('reference', hostPath);
+      mounts.push({ hostPath, mountPath: hostPath, mode: 'reference' });
+      logger?.operational?.(
+        `Mounted reference folder (read-only): ${hostPath}`,
+        'astro',
+      );
+      return;
+    }
+
+    if (folder.mode === 'working') {
+      assertDirectoryExists('working', hostPath);
+      const isRepo = await isGitWorkTree(hostPath);
+      if (!isRepo) {
+        throw new Error(
+          `working folder is not inside a git repository: ${hostPath}. ` +
+          `Working folders require git so a secondary worktree can be created.`,
+        );
+      }
+
+      const worktreePath = siblingWorktreePath(hostPath);
+      // If a stale worktree from a prior run remains, prune it out first so
+      // `git worktree add` doesn't refuse. Tight timeouts: don't let a slow
+      // or hung filesystem stall the whole task queue — if quick cleanup
+      // fails, addDetachedWorktree below will surface a clear error.
+      if (existsSync(worktreePath)) {
+        logger?.operational?.(
+          `Removing stale worktree for additional folder: ${worktreePath}`,
+          'git',
+        );
+        try {
+          await execFileAsync(
+            'git',
+            ['-C', hostPath, 'worktree', 'remove', '--force', worktreePath],
+            { timeout: 5_000 },
+          );
+        } catch {
+          try {
+            await execFileAsync('git', ['-C', hostPath, 'worktree', 'prune'], { timeout: 2_000 });
+          } catch {
+            // ignore — `git worktree add` below will error if state is still bad.
+          }
+        }
+      }
+
+      logger?.operational?.(
+        `Creating worktree for additional folder: ${hostPath} -> ${worktreePath}`,
+        'git',
+      );
+      try {
+        await addDetachedWorktree(hostPath, worktreePath);
+      } catch (addErr) {
+        // Leave the repo in a consistent state: prune any half-created
+        // worktree metadata so the next attempt isn't blocked by stale refs.
+        try {
+          await execFileAsync('git', ['-C', hostPath, 'worktree', 'prune'], { timeout: 2_000 });
+        } catch {
+          // ignore — the original add error is more useful to surface.
+        }
+        const msg = addErr instanceof Error ? addErr.message : String(addErr);
+        throw new Error(
+          `failed to create worktree at ${worktreePath}: ${msg}`,
+        );
+      }
+      mounts.push({ hostPath, mountPath: worktreePath, mode: 'working' });
+      cleanups.push(() => removeWorktree(hostPath, worktreePath));
+      return;
+    }
+
+    throw new Error(
+      `unknown mode ${String((folder as { mode?: unknown }).mode)} ` +
+      `for path ${hostPath}. Expected 'working' or 'reference'.`,
+    );
 }
 
 /**
