@@ -348,6 +348,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     sessionId: string,
     stream: TaskOutputStream,
     signal: AbortSignal,
+    resumeOptions?: { systemPrompt?: string; taskType?: string },
   ): Promise<{ success: boolean; output: string; error?: string }> {
     const abortController = new AbortController();
     const abortHandler = () => abortController.abort();
@@ -381,6 +382,16 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
       // Resume the previous session
       (options as Record<string, unknown>).resume = sessionId;
+
+      // Re-apply caller's system prompt so directives survive taskType
+      // transitions (e.g. chat → plan). Without this, the resumed session
+      // replays the original system prompt baked in at first execution and
+      // plan-mode instructions like "use astro-cli only, don't execute" are
+      // lost — leading to auto-execution on follow-up turns.
+      if (resumeOptions?.systemPrompt) {
+        (options as Record<string, unknown>).systemPrompt = resumeOptions.systemPrompt;
+        console.log(`[claude-sdk] Resume ${taskId.slice(0, 8)}: applied systemPrompt (${resumeOptions.systemPrompt.length} chars, taskType=${resumeOptions.taskType ?? 'unspecified'})`);
+      }
 
       // Load MCP servers from config if available
       const agentConfig = config.getConfig();
