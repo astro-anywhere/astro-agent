@@ -41,12 +41,96 @@ const claudeExecutablePath = resolveClaudeExecutable();
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, getAugmentedPath } from './base-adapter.js';
+import { isPathUnderReferenceMount } from '../lib/additional-folders.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
 import { config } from '../lib/config.js';
 
 /** Shell execution tools whose output may contain real sbatch submissions */
 const SHELL_TOOLS = new Set(['Bash', 'bash', 'shell', 'execute_command', 'terminal']);
+
+/**
+ * Tools that can mutate the filesystem and must be denied when their target
+ * resolves under a reference-mode additional folder.
+ */
+const WRITE_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit', 'MultiEdit']);
+
+/**
+ * Extract candidate filesystem paths from a tool input. Returns every path
+ * that should be checked against the reference-mount guard. Covers the
+ * built-in Edit/Write/NotebookEdit inputs and best-effort Bash parsing.
+ */
+function extractPathsForWriteCheck(toolName: string, input: Record<string, unknown>): string[] {
+  const paths: string[] = [];
+  const pushIfString = (v: unknown): void => {
+    if (typeof v === 'string' && v.length > 0) paths.push(v);
+  };
+
+  if (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit' || toolName === 'MultiEdit') {
+    pushIfString((input as { file_path?: unknown }).file_path);
+    pushIfString((input as { notebook_path?: unknown }).notebook_path);
+    pushIfString((input as { path?: unknown }).path);
+    // MultiEdit: edits[].file_path
+    const edits = (input as { edits?: unknown }).edits;
+    if (Array.isArray(edits)) {
+      for (const e of edits) {
+        if (e && typeof e === 'object') {
+          pushIfString((e as { file_path?: unknown }).file_path);
+        }
+      }
+    }
+    return paths;
+  }
+
+  if (toolName === 'Bash' || toolName === 'bash') {
+    const cmd = (input as { command?: unknown }).command;
+    if (typeof cmd === 'string') {
+      // Best-effort: tokenize and keep anything that looks like a path
+      // argument (starts with /, ./, ../, or ~/). The reference-mount guard
+      // only fires on paths under a known reference root, so false positives
+      // on unrelated tokens are harmless.
+      const tokens = cmd.split(/\s+/);
+      for (const t of tokens) {
+        const unquoted = t.replace(/^['"]|['"]$/g, '');
+        if (unquoted.startsWith('/') || unquoted.startsWith('./') || unquoted.startsWith('../') || unquoted.startsWith('~/')) {
+          paths.push(unquoted);
+        }
+      }
+    }
+  }
+  return paths;
+}
+
+/**
+ * Build a canUseTool wrapper that denies write/edit/bash calls whose target
+ * resolves under any reference-mode additional folder. When `referenceMountPaths`
+ * is empty, returns `undefined` so callers can skip installing the wrapper.
+ */
+function buildReferenceFolderDenyHook(
+  referenceMountPaths: readonly string[],
+  stream?: { toolResult?: (toolName: string, result: unknown, success: boolean, toolUseId?: string) => void },
+): ((toolName: string, input: Record<string, unknown>, toolUseID: string) => { denied: boolean; message?: string }) | undefined {
+  if (referenceMountPaths.length === 0) return undefined;
+
+  return (toolName: string, input: Record<string, unknown>, toolUseID: string) => {
+    if (!WRITE_TOOLS.has(toolName) && toolName !== 'Bash' && toolName !== 'bash') {
+      return { denied: false };
+    }
+
+    const candidates = extractPathsForWriteCheck(toolName, input);
+    for (const p of candidates) {
+      if (isPathUnderReferenceMount(p, referenceMountPaths)) {
+        const message =
+          `Denied: ${toolName} targets a read-only reference folder (${p}). ` +
+          `Reference folders are mounted read-only and cannot be modified.`;
+        // Surface the denial to the UI as a failed tool_result, not a silent no-op.
+        stream?.toolResult?.(toolName, message, false, toolUseID);
+        return { denied: true, message };
+      }
+    }
+    return { denied: false };
+  };
+}
 
 /**
  * Determine whether to enable sandbox mode for Claude Code.
@@ -348,6 +432,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     sessionId: string,
     stream: TaskOutputStream,
     signal: AbortSignal,
+    resumeOptions?: { systemPrompt?: string; taskType?: string },
   ): Promise<{ success: boolean; output: string; error?: string }> {
     const abortController = new AbortController();
     const abortHandler = () => abortController.abort();
@@ -381,6 +466,16 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
       // Resume the previous session
       (options as Record<string, unknown>).resume = sessionId;
+
+      // Re-apply caller's system prompt so directives survive taskType
+      // transitions (e.g. chat → plan). Without this, the resumed session
+      // replays the original system prompt baked in at first execution and
+      // plan-mode instructions like "use astro-cli only, don't execute" are
+      // lost — leading to auto-execution on follow-up turns.
+      if (resumeOptions?.systemPrompt) {
+        (options as Record<string, unknown>).systemPrompt = resumeOptions.systemPrompt;
+        console.log(`[claude-sdk] Resume ${taskId.slice(0, 8)}: applied systemPrompt (${resumeOptions.systemPrompt.length} chars, taskType=${resumeOptions.taskType ?? 'unspecified'})`);
+      }
 
       // Load MCP servers from config if available
       const agentConfig = config.getConfig();
@@ -775,6 +870,17 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // ── Standard path for all other task types (plan/chat/playground/execution) ──
     // All get full tool access; the prompt controls behavior.
 
+    // Resolve additional folder mounts set up by the task executor.
+    // Working-mode mounts point at a secondary worktree (agent-writable).
+    // Reference-mode mounts point at the host path (read-only; guarded by
+    // the canUseTool deny hook below).
+    const resolvedAdditionalFolders = task._resolvedAdditionalFolders ?? [];
+    const additionalMountPaths = resolvedAdditionalFolders.map((m) => m.mountPath);
+    const referenceMountPaths = resolvedAdditionalFolders
+      .filter((m) => m.mode === 'reference')
+      .map((m) => m.mountPath);
+    const referenceDenyHook = buildReferenceFolderDenyHook(referenceMountPaths, stream);
+
     // Build options for the query
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
@@ -786,7 +892,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       ...getSandboxOption(task.model),
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
       persistSession: true, // Keep session on disk so generateSummary() can resume it
-      ...(workdir ? { cwd: workdir, additionalDirectories: [workdir] } : {}),
+      ...(workdir
+        ? { cwd: workdir, additionalDirectories: [workdir, ...additionalMountPaths] }
+        : additionalMountPaths.length > 0
+          ? { additionalDirectories: [...additionalMountPaths] }
+          : {}),
       // Use globally installed claude binary if available (avoids missing cli.js on remote machines)
       ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
       // Capture subprocess stderr for debugging exit code 1 crashes
@@ -810,6 +920,17 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       },
       // Intercept built-in AskUserQuestion to handle approvals (following Cyrus pattern)
       canUseTool: async (toolName: string, input: Record<string, unknown>, options: { toolUseID: string; signal: AbortSignal }) => {
+        // Deny write/edit/bash calls that target read-only reference folders.
+        // This runs first so the denial is surfaced before any other handling.
+        if (referenceDenyHook) {
+          const check = referenceDenyHook(toolName, input, options.toolUseID);
+          if (check.denied) {
+            return {
+              behavior: 'deny' as const,
+              message: check.message ?? 'Write blocked: target is inside a read-only reference folder.',
+            };
+          }
+        }
         if (toolName === 'AskUserQuestion') {
           console.log(`[claude-sdk] Intercepted AskUserQuestion (toolUseID: ${options.toolUseID})`);
 

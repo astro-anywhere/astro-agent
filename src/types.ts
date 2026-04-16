@@ -159,6 +159,30 @@ export interface Task {
   /** Target branch for worktree creation and PR base (e.g., 'main', 'develop') */
   baseBranch?: string;
 
+  /** Additional folders (working or reference) to mount into the agent session.
+   *  - working: a git worktree is created on the folder's current HEAD and the
+   *    worktree path is mounted read/write.
+   *  - reference: the path is mounted read-only. Edit/Write/Bash operations that
+   *    target files under the path are denied by the tool permission hook. */
+  additionalFolders?: Array<{
+    machineId: string;
+    path: string;
+    mode: 'working' | 'reference';
+  }>;
+
+  /**
+   * Resolved mount information for `additionalFolders`, populated by the
+   * task executor after worktree setup. Not part of the wire payload —
+   * the executor sets this before invoking the provider adapter so the
+   * adapter can wire the paths into the SDK without re-doing setup.
+   * Internal: consumers must treat this as optional.
+   */
+  _resolvedAdditionalFolders?: Array<{
+    hostPath: string;
+    mountPath: string;
+    mode: 'working' | 'reference';
+  }>;
+
   /** Per-component delivery branch (e.g., 'astro/7b19a9-e4f1a2').
    *  In multi-task components, per-task branches are created from this branch.
    *  In singleton components, the agent works directly on this branch. */

@@ -4,7 +4,7 @@
 
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import type { Task, TaskResult, TaskStatus, ExecutionSummary } from '../types.js';
+import type { Task, TaskResult, TaskStatus, ExecutionSummary, TaskDispatchType } from '../types.js';
 
 /**
  * A task that has been normalized by the executor — workingDirectory is always
@@ -85,6 +85,12 @@ export interface ProviderAdapter {
   /**
    * Resume a completed session for post-completion follow-up.
    * Optional — only adapters that support session persistence implement this.
+   *
+   * `options.systemPrompt` re-applies the caller's system prompt so directives
+   * like plan-mode's "use astro-cli only" survive taskType transitions across
+   * turns (the resumed session otherwise replays the original prompt baked in
+   * at first execution). Adapters that don't support system-prompt override on
+   * resume may ignore it.
    */
   resumeTask?(
     taskId: string,
@@ -93,6 +99,7 @@ export interface ProviderAdapter {
     sessionId: string,
     stream: TaskOutputStream,
     signal: AbortSignal,
+    options?: { systemPrompt?: string; taskType?: TaskDispatchType },
   ): Promise<{ success: boolean; output: string; error?: string }>;
 
   /**
