@@ -1225,6 +1225,10 @@ export class TaskExecutor {
             taskWithWorkspace.resumeSessionId!,
             stream,
             abortController.signal,
+            {
+              systemPrompt: taskWithWorkspace.systemPrompt,
+              taskType: taskWithWorkspace.type,
+            },
           );
           if (resumeResult.success) {
             result = {
