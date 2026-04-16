@@ -171,11 +171,19 @@ export interface Task {
   }>;
 
   /**
-   * Resolved mount information for `additionalFolders`, populated by the
-   * task executor after worktree setup. Not part of the wire payload —
-   * the executor sets this before invoking the provider adapter so the
-   * adapter can wire the paths into the SDK without re-doing setup.
-   * Internal: consumers must treat this as optional.
+   * Resolved mount information for `additionalFolders`.
+   *
+   * INVARIANT: this is an executor-to-adapter handoff field only.
+   *   • Set by `task-executor.ts` after `setupAdditionalFolders()` returns,
+   *     before invoking the provider adapter's run method.
+   *   • Consumed by the provider adapter to wire paths into the SDK's
+   *     `additionalDirectories` and the reference-folder deny hook.
+   *   • Never appears in the incoming dispatch payload (the server sends
+   *     `additionalFolders`, which the executor translates into mounts).
+   *   • Never persisted to disk or DB.
+   *
+   * The `_` prefix marks this as private to the executor/adapter pair —
+   * do not read it from other call sites.
    */
   _resolvedAdditionalFolders?: Array<{
     hostPath: string;
