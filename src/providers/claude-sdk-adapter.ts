@@ -451,9 +451,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       const gen = query({ prompt: promptIterable, options });
 
       let output = '';
-      let success = true;
+      let success = false;
       let errorMessage: string | undefined;
       let newSessionId = sessionId;
+      let receivedResult = false;
       // Map tool_use_id → tool name for matching results back to uses
       const resumeToolUseNames = new Map<string, string>();
 
@@ -499,9 +500,18 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           } else {
             success = false;
             errorMessage = `Resume failed: ${msg.subtype}`;
+            stream.status('failed', 0, errorMessage);
           }
+          receivedResult = true;
           break;
         }
+      }
+
+      // If the stream ended without a result message, treat as failure
+      if (!receivedResult) {
+        success = false;
+        errorMessage ??= 'Agent process exited without producing a result message';
+        stream.status('failed', 0, errorMessage);
       }
 
       // Preserve context after resume completes
@@ -703,9 +713,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     const gen = query({ prompt: promptIterable, options });
 
     let output = '';
-    let success = true;
+    let success = false;
     let errorMessage: string | undefined;
     let resultMetrics: TaskResult['metrics'] | undefined;
+    let receivedResult = false;
 
     for await (const msg of gen) {
       if (msg.type === 'system' && msg.subtype === 'init') {
@@ -741,8 +752,16 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           errorMessage = `Task failed: ${msg.subtype}`;
           stream.status('failed', 0, errorMessage);
         }
+        receivedResult = true;
         break;
       }
+    }
+
+    // If the stream ended without a result message, treat as failure
+    if (!receivedResult) {
+      success = false;
+      errorMessage ??= 'Agent process exited without producing a result message';
+      stream.status('failed', 0, errorMessage);
     }
 
     return { success, output, error: errorMessage, metrics: resultMetrics };
@@ -1077,7 +1096,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     });
 
     let output = '';
-    let success = true;
+    let success = false;
     let errorMessage: string | undefined;
     const artifacts: TaskArtifact[] = [];
     let progress = 0;
@@ -1088,6 +1107,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     let turnIndex = 0;
     let receivedResult = false;
+    let lastResultSubtype: string | undefined;
 
     for await (const msg of gen) {
       try {
@@ -1200,6 +1220,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       } else if (msg.type === 'result') {
         // Extract metrics from SDK result (available on both success and error subtypes)
         const msgAny = msg as Record<string, unknown>;
+        lastResultSubtype = msg.subtype;
         const usage = msgAny.usage as { input_tokens?: number; output_tokens?: number } | undefined;
         const totalCostUsd = (msgAny.total_cost_usd ?? msgAny.cost_usd) as number | undefined;
         const numTurns = msgAny.num_turns as number | undefined;
@@ -1249,6 +1270,12 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           success = false;
           errorMessage = `Task failed: ${msg.subtype}`;
           stream.status('failed', progress, errorMessage);
+        } else {
+          // Unrecognized result subtype — treat as failure with descriptive message.
+          // Likely a Claude Code version mismatch or new SDK error subtype.
+          success = false;
+          errorMessage = `Task ended with unrecognized SDK result subtype: ${msg.subtype} — this may indicate a Claude Code version mismatch or SDK change`;
+          stream.status('failed', progress, errorMessage);
         }
 
         const tokenSummary = usage ? `${usage.input_tokens ?? 0}+${usage.output_tokens ?? 0}` : 'N/A';
@@ -1264,7 +1291,15 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       }
     }
 
-    console.log(`[claude-sdk] Task ${task.id} for-await loop exited: ${receivedResult ? 'received result message (normal)' : 'generator exhausted without result message'}`);
+    console.log(`[claude-sdk] Task ${task.id} for-await loop exited: ${receivedResult ? `received result message (subtype=${lastResultSubtype ?? 'unknown'})` : 'generator exhausted without result message'}`);
+
+    // If the stream ended without a result message, the process likely crashed
+    // or hit a limit not covered by the SDK's result subtypes.
+    if (!receivedResult) {
+      success = false;
+      errorMessage ??= 'Agent process exited without producing a result message';
+      stream.status('failed', progress, errorMessage);
+    }
 
     // Detect unauthenticated Claude Code sessions.
     // When the keychain token is missing (common on remote/HPC machines), the CLI
