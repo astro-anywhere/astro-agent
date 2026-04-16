@@ -110,7 +110,7 @@ export type TaskStatus =
  * Dispatch task type — tells the agent runner what kind of work this is.
  * Matches TaskDispatchType in server/types/relay.ts.
  */
-export type TaskDispatchType = 'execution' | 'plan' | 'chat' | 'summarize' | 'playground';
+export type TaskDispatchType = 'execution' | 'plan' | 'chat' | 'summarize' | 'playground' | 'follow-up';
 
 /**
  * A single message in a conversation history.
@@ -158,6 +158,44 @@ export interface Task {
 
   /** Target branch for worktree creation and PR base (e.g., 'main', 'develop') */
   baseBranch?: string;
+
+  /** Additional folders (working or reference) to mount into the agent session.
+   *  - working: a git worktree is created on the folder's current HEAD and the
+   *    worktree path is mounted read/write.
+   *  - reference: the path is mounted read-only. Edit/Write/Bash operations that
+   *    target files under the path are denied by the tool permission hook.
+   *
+   *  NOTE: currently honored only by the `claude-sdk` provider. The task
+   *  executor rejects the task if this field is set with any other provider,
+   *  so the agent can't silently fail to see the extra folders. If another
+   *  provider adapter gains multi-directory support, remove the guard in
+   *  `task-executor.ts` around `setupAdditionalFolders`. */
+  additionalFolders?: Array<{
+    machineId: string;
+    path: string;
+    mode: 'working' | 'reference';
+  }>;
+
+  /**
+   * Resolved mount information for `additionalFolders`.
+   *
+   * INVARIANT: this is an executor-to-adapter handoff field only.
+   *   • Set by `task-executor.ts` after `setupAdditionalFolders()` returns,
+   *     before invoking the provider adapter's run method.
+   *   • Consumed by the provider adapter to wire paths into the SDK's
+   *     `additionalDirectories` and the reference-folder deny hook.
+   *   • Never appears in the incoming dispatch payload (the server sends
+   *     `additionalFolders`, which the executor translates into mounts).
+   *   • Never persisted to disk or DB.
+   *
+   * The `_` prefix marks this as private to the executor/adapter pair —
+   * do not read it from other call sites.
+   */
+  _resolvedAdditionalFolders?: Array<{
+    hostPath: string;
+    mountPath: string;
+    mode: 'working' | 'reference';
+  }>;
 
   /** Per-component delivery branch (e.g., 'astro/7b19a9-e4f1a2').
    *  In multi-task components, per-task branches are created from this branch.

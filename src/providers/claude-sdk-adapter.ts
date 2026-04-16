@@ -41,12 +41,14 @@ const claudeExecutablePath = resolveClaudeExecutable();
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, getAugmentedPath } from './base-adapter.js';
+import { buildReferenceFolderDenyHook } from '../lib/reference-folder-guard.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
 import { config } from '../lib/config.js';
 
 /** Shell execution tools whose output may contain real sbatch submissions */
 const SHELL_TOOLS = new Set(['Bash', 'bash', 'shell', 'execute_command', 'terminal']);
+
 
 /**
  * Determine whether to enable sandbox mode for Claude Code.
@@ -340,6 +342,16 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
    * Resume a completed task session to continue execution.
    * Uses the SDK's `resume` option to reconnect to a previous session.
    * This enables post-completion steering (follow-up questions after task finishes).
+   *
+   * Note on additional folders: working-mode worktrees are cleaned up when the
+   * original task completes, and reference-mode mounts are not preserved on the
+   * resumed session either (we don't forward `_resolvedAdditionalFolders` here).
+   * This is intentional — by the time resume fires, the working worktrees are
+   * gone from disk, and leaving reference paths out of `additionalDirectories`
+   * means the SDK's sandbox prevents any access, so the reference-folder deny
+   * hook isn't needed on resume. If a user needs follow-up work that touches the
+   * extra folders, they should dispatch a new task rather than steer the
+   * completed one.
    */
   async resumeTask(
     taskId: string,
@@ -348,6 +360,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     sessionId: string,
     stream: TaskOutputStream,
     signal: AbortSignal,
+    resumeOptions?: { systemPrompt?: string; taskType?: string },
   ): Promise<{ success: boolean; output: string; error?: string }> {
     const abortController = new AbortController();
     const abortHandler = () => abortController.abort();
@@ -381,6 +394,16 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
       // Resume the previous session
       (options as Record<string, unknown>).resume = sessionId;
+
+      // Re-apply caller's system prompt so directives survive taskType
+      // transitions (e.g. chat → plan). Without this, the resumed session
+      // replays the original system prompt baked in at first execution and
+      // plan-mode instructions like "use astro-cli only, don't execute" are
+      // lost — leading to auto-execution on follow-up turns.
+      if (resumeOptions?.systemPrompt) {
+        (options as Record<string, unknown>).systemPrompt = resumeOptions.systemPrompt;
+        console.log(`[claude-sdk] Resume ${taskId.slice(0, 8)}: applied systemPrompt (${resumeOptions.systemPrompt.length} chars, taskType=${resumeOptions.taskType ?? 'unspecified'})`);
+      }
 
       // Load MCP servers from config if available
       const agentConfig = config.getConfig();
@@ -428,9 +451,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       const gen = query({ prompt: promptIterable, options });
 
       let output = '';
-      let success = true;
+      let success = false;
       let errorMessage: string | undefined;
       let newSessionId = sessionId;
+      let receivedResult = false;
       // Map tool_use_id → tool name for matching results back to uses
       const resumeToolUseNames = new Map<string, string>();
 
@@ -476,9 +500,18 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           } else {
             success = false;
             errorMessage = `Resume failed: ${msg.subtype}`;
+            stream.status('failed', 0, errorMessage);
           }
+          receivedResult = true;
           break;
         }
+      }
+
+      // If the stream ended without a result message, treat as failure
+      if (!receivedResult) {
+        success = false;
+        errorMessage ??= 'Agent process exited without producing a result message';
+        stream.status('failed', 0, errorMessage);
       }
 
       // Preserve context after resume completes
@@ -680,9 +713,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     const gen = query({ prompt: promptIterable, options });
 
     let output = '';
-    let success = true;
+    let success = false;
     let errorMessage: string | undefined;
     let resultMetrics: TaskResult['metrics'] | undefined;
+    let receivedResult = false;
 
     for await (const msg of gen) {
       if (msg.type === 'system' && msg.subtype === 'init') {
@@ -718,8 +752,16 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           errorMessage = `Task failed: ${msg.subtype}`;
           stream.status('failed', 0, errorMessage);
         }
+        receivedResult = true;
         break;
       }
+    }
+
+    // If the stream ended without a result message, treat as failure
+    if (!receivedResult) {
+      success = false;
+      errorMessage ??= 'Agent process exited without producing a result message';
+      stream.status('failed', 0, errorMessage);
     }
 
     return { success, output, error: errorMessage, metrics: resultMetrics };
@@ -775,6 +817,17 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // ── Standard path for all other task types (plan/chat/playground/execution) ──
     // All get full tool access; the prompt controls behavior.
 
+    // Resolve additional folder mounts set up by the task executor.
+    // Working-mode mounts point at a secondary worktree (agent-writable).
+    // Reference-mode mounts point at the host path (read-only; guarded by
+    // the canUseTool deny hook below).
+    const resolvedAdditionalFolders = task._resolvedAdditionalFolders ?? [];
+    const additionalMountPaths = resolvedAdditionalFolders.map((m) => m.mountPath);
+    const referenceMountPaths = resolvedAdditionalFolders
+      .filter((m) => m.mode === 'reference')
+      .map((m) => m.mountPath);
+    const referenceDenyHook = buildReferenceFolderDenyHook(referenceMountPaths);
+
     // Build options for the query
     const options: Parameters<typeof query>[0]['options'] = {
       abortController,
@@ -786,7 +839,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       ...getSandboxOption(task.model),
       settingSources: ['user', 'project', 'local'], // Load CLAUDE.md from user home, project dir, and cwd
       persistSession: true, // Keep session on disk so generateSummary() can resume it
-      ...(workdir ? { cwd: workdir, additionalDirectories: [workdir] } : {}),
+      ...(workdir
+        ? { cwd: workdir, additionalDirectories: [workdir, ...additionalMountPaths] }
+        : additionalMountPaths.length > 0
+          ? { additionalDirectories: [...additionalMountPaths] }
+          : {}),
       // Use globally installed claude binary if available (avoids missing cli.js on remote machines)
       ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
       // Capture subprocess stderr for debugging exit code 1 crashes
@@ -810,6 +867,17 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       },
       // Intercept built-in AskUserQuestion to handle approvals (following Cyrus pattern)
       canUseTool: async (toolName: string, input: Record<string, unknown>, options: { toolUseID: string; signal: AbortSignal }) => {
+        // Deny write/edit/bash calls that target read-only reference folders.
+        // This runs first so the denial is surfaced before any other handling.
+        if (referenceDenyHook) {
+          const check = referenceDenyHook(toolName, input)
+          if (check.denied) {
+            return {
+              behavior: 'deny' as const,
+              message: check.message ?? 'Write blocked: target is inside a read-only reference folder.',
+            };
+          }
+        }
         if (toolName === 'AskUserQuestion') {
           console.log(`[claude-sdk] Intercepted AskUserQuestion (toolUseID: ${options.toolUseID})`);
 
@@ -1028,7 +1096,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     });
 
     let output = '';
-    let success = true;
+    let success = false;
     let errorMessage: string | undefined;
     const artifacts: TaskArtifact[] = [];
     let progress = 0;
@@ -1039,6 +1107,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     let turnIndex = 0;
     let receivedResult = false;
+    let lastResultSubtype: string | undefined;
 
     for await (const msg of gen) {
       try {
@@ -1151,6 +1220,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       } else if (msg.type === 'result') {
         // Extract metrics from SDK result (available on both success and error subtypes)
         const msgAny = msg as Record<string, unknown>;
+        lastResultSubtype = msg.subtype;
         const usage = msgAny.usage as { input_tokens?: number; output_tokens?: number } | undefined;
         const totalCostUsd = (msgAny.total_cost_usd ?? msgAny.cost_usd) as number | undefined;
         const numTurns = msgAny.num_turns as number | undefined;
@@ -1200,6 +1270,12 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           success = false;
           errorMessage = `Task failed: ${msg.subtype}`;
           stream.status('failed', progress, errorMessage);
+        } else {
+          // Unrecognized result subtype — treat as failure with descriptive message.
+          // Likely a Claude Code version mismatch or new SDK error subtype.
+          success = false;
+          errorMessage = `Task ended with unrecognized SDK result subtype: ${msg.subtype} — this may indicate a Claude Code version mismatch or SDK change`;
+          stream.status('failed', progress, errorMessage);
         }
 
         const tokenSummary = usage ? `${usage.input_tokens ?? 0}+${usage.output_tokens ?? 0}` : 'N/A';
@@ -1215,7 +1291,15 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       }
     }
 
-    console.log(`[claude-sdk] Task ${task.id} for-await loop exited: ${receivedResult ? 'received result message (normal)' : 'generator exhausted without result message'}`);
+    console.log(`[claude-sdk] Task ${task.id} for-await loop exited: ${receivedResult ? `received result message (subtype=${lastResultSubtype ?? 'unknown'})` : 'generator exhausted without result message'}`);
+
+    // If the stream ended without a result message, the process likely crashed
+    // or hit a limit not covered by the SDK's result subtypes.
+    if (!receivedResult) {
+      success = false;
+      errorMessage ??= 'Agent process exited without producing a result message';
+      stream.status('failed', progress, errorMessage);
+    }
 
     // Detect unauthenticated Claude Code sessions.
     // When the keychain token is missing (common on remote/HPC machines), the CLI

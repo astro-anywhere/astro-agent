@@ -18,6 +18,7 @@ import { OpenClawAdapter } from '../providers/openclaw-adapter.js';
 import type { OpenClawBridge } from './openclaw-bridge.js';
 import { SlurmJobMonitor } from './slurm-job-monitor.js';
 import { createWorktree, syncDeliveryWorktree, getGitRoot } from './worktree.js';
+import { setupAdditionalFolders, type AdditionalFolderMount } from './additional-folders.js';
 import { ensureProjectWorkspace } from './workspace-root.js';
 import { BranchLockManager } from './branch-lock.js';
 import { pushAndCreatePR, mergePullRequest, getRemoteBranchSha, isGhAvailable, getRepoSlug } from './git-pr.js';
@@ -267,8 +268,8 @@ export class TaskExecutor {
     storedAt: number;
   }> = new Map();
 
-  /** TTL for completed task metadata (10 minutes, matches adapter session TTL) */
-  private static readonly COMPLETED_TASK_META_TTL_MS = 10 * 60 * 1000;
+  /** TTL for completed task metadata (30 minutes, allows follow-up execution to recreate worktrees) */
+  private static readonly COMPLETED_TASK_META_TTL_MS = 30 * 60 * 1000;
 
   constructor(options: TaskExecutorOptions) {
     this.wsClient = options.wsClient;
@@ -326,11 +327,11 @@ export class TaskExecutor {
     this.claimedTasks.add(task.id);
     try {
 
-    // Only execution tasks need workingDirectory resolution, safety checks,
+    // Execution and follow-up tasks need workingDirectory resolution, safety checks,
     // git diff, and summary generation. All other types (plan/chat/summarize/
     // playground) skip this overhead but still get full tool access when they
     // have a working directory.
-    const isExecutionTask = !task.type || task.type === 'execution';
+    const isExecutionTask = !task.type || task.type === 'execution' || task.type === 'follow-up';
 
     // Non-execution tasks can run without a working directory.
     // For execution tasks, resolve the directory or auto-provision one.
@@ -1165,9 +1166,9 @@ export class TaskExecutor {
       );
     }, TASK_HEARTBEAT_INTERVAL_MS);
 
-    // Only execution tasks get git diff, delivery, and summary — all other types (chat, plan, playground, summarize) skip them.
+    // Execution and follow-up tasks get git diff, delivery, and summary — all other types (chat, plan, playground, summarize) skip them.
     // These non-execution types still get full tool access when they have a working directory.
-    const isExecutionTask = !normalizedTask.type || normalizedTask.type === 'execution';
+    const isExecutionTask = !normalizedTask.type || normalizedTask.type === 'execution' || normalizedTask.type === 'follow-up';
     let prepared: Awaited<ReturnType<typeof this.prepareTaskWorkspace>>;
     try {
       prepared = !isExecutionTask && !normalizedTask.workingDirectory
@@ -1185,6 +1186,94 @@ export class TaskExecutor {
     const taskWithWorkspace = { ...normalizedTask, workingDirectory: prepared.workingDirectory };
     runningTask.task = taskWithWorkspace;
     console.log(`[executor] Task ${task.id}: workspace prepared, cwd=${prepared.workingDirectory}`);
+
+    // Set up additional folders (working worktrees + reference mounts).
+    // Failures during setup (missing path, not a git repo for working mode)
+    // must fail the task — we never silently drop a mount the user asked for.
+    //
+    // Provider-parity guard: additional folders are only honored by the
+    // claude-sdk adapter today. Other adapters (codex, openclaw, opencode,
+    // slurm) don't wire the mount paths into the CLI or enforce the
+    // reference-folder deny hook, so silently accepting the request would
+    // give the user a task that "succeeds" with none of the folders
+    // actually visible to the agent. Fail fast instead.
+    let additionalFoldersCleanup: (() => Promise<void>) | undefined;
+    let additionalFolderMounts: AdditionalFolderMount[] = [];
+    if (normalizedTask.additionalFolders && normalizedTask.additionalFolders.length > 0) {
+      if (normalizedTask.provider !== 'claude-sdk') {
+        clearInterval(taskHeartbeatTimer);
+        const msg =
+          `Additional folders are only supported with the claude-sdk provider. ` +
+          `This task requested provider=${normalizedTask.provider}.`;
+        console.error(`[executor] Task ${task.id}: ${msg}`);
+        stream.operational?.(msg, 'astro');
+        try {
+          await prepared.cleanup({ keepBranch: false });
+        } catch (cleanupErr) {
+          const cmsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+          console.warn(`[executor] Task ${task.id}: primary cleanup after provider-parity failure: ${cmsg}`);
+        }
+        this.wsClient.sendTaskResult({
+          taskId: task.id,
+          status: 'failed',
+          error: msg,
+          completedAt: new Date().toISOString(),
+        });
+        // Note: normalizedTask.id and taskWithWorkspace.id are the same — the
+        // latter is a shallow spread of the former with only `workingDirectory`
+        // overridden, so runningTasks.delete(normalizedTask.id) removes the
+        // correct entry regardless of which alias we use.
+        this.runningTasks.delete(normalizedTask.id);
+        this.wsClient.removeActiveTask(task.id);
+        this.untrackTaskDirectory(task);
+        this.processQueue();
+        return;
+      }
+      try {
+        const result = await setupAdditionalFolders(
+          normalizedTask.additionalFolders,
+          { operational: stream.operational },
+        );
+        additionalFolderMounts = result.mounts;
+        additionalFoldersCleanup = result.cleanup;
+        taskWithWorkspace._resolvedAdditionalFolders = additionalFolderMounts;
+        runningTask.task = taskWithWorkspace;
+        console.log(
+          `[executor] Task ${task.id}: mounted ${additionalFolderMounts.length} additional folder(s): ` +
+          additionalFolderMounts
+            .map(m => m.mode === 'working' ? `${m.mode}:${m.hostPath}→${m.mountPath}` : `${m.mode}:${m.hostPath}`)
+            .join(', '),
+        );
+      } catch (extraErr) {
+        clearInterval(taskHeartbeatTimer);
+        const msg = extraErr instanceof Error ? extraErr.message : String(extraErr);
+        console.error(`[executor] Task ${task.id}: additional folder setup failed: ${msg}`);
+        stream.operational?.(`Additional folder setup failed: ${msg}`, 'astro');
+        // Run primary cleanup before reporting so the main worktree is released.
+        try {
+          await prepared.cleanup({ keepBranch: false });
+        } catch (cleanupErr) {
+          const cmsg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+          console.warn(`[executor] Task ${task.id}: primary cleanup after additional-folder failure: ${cmsg}`);
+        }
+        // Report failure to the server directly — executeTask() is invoked from
+        // several paths (submitTask, handleSafetyDecision, processQueue) and not
+        // all of them catch thrown errors. Matches the sandbox/provider-error
+        // failure pattern above. sendTaskResult + removeActiveTask are idempotent
+        // so if processQueue's outer catch also runs later, it's a no-op.
+        this.wsClient.sendTaskResult({
+          taskId: task.id,
+          status: 'failed',
+          error: `Additional folder setup failed: ${msg}`,
+          completedAt: new Date().toISOString(),
+        });
+        this.runningTasks.delete(normalizedTask.id);
+        this.wsClient.removeActiveTask(task.id);
+        this.untrackTaskDirectory(task);
+        this.processQueue();
+        return;
+      }
+    }
 
     // Execute with idle timeout + hard cap.
     // Idle timeout resets on every stream activity (text, tool, file, etc.).
@@ -1207,10 +1296,11 @@ export class TaskExecutor {
       // Notify task started
       this.wsClient.sendTaskStatus(task.id, 'running', 0, 'Starting');
 
-      // Resume existing session if resumeSessionId is provided
+      // Resume existing session if resumeSessionId is provided.
+      // Follow-up tasks are treated as execution (get delivery pipeline) but also allow session resume.
       const canResume = taskWithWorkspace.resumeSessionId
         && this.isResumableAdapter(adapter)
-        && !isExecutionTask;
+        && (!isExecutionTask || normalizedTask.type === 'follow-up');
 
       let result: Awaited<ReturnType<typeof adapter.execute>>;
       if (canResume) {
@@ -1225,6 +1315,10 @@ export class TaskExecutor {
             taskWithWorkspace.resumeSessionId!,
             stream,
             abortController.signal,
+            {
+              systemPrompt: taskWithWorkspace.systemPrompt,
+              taskType: taskWithWorkspace.type,
+            },
           );
           if (resumeResult.success) {
             result = {
@@ -1692,6 +1786,19 @@ export class TaskExecutor {
     } finally {
       clearTimeout(hardCapTimeoutId);
       if (idleTimerId !== undefined) clearTimeout(idleTimerId);
+
+      // Clean up any additional-folder worktrees before the primary worktree.
+      // Best-effort: failures log but never throw — cleanup must not mask
+      // the real task result.
+      if (additionalFoldersCleanup) {
+        try {
+          await additionalFoldersCleanup();
+          console.log(`[executor] Task ${task.id}: additional folder worktrees cleaned up`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.warn(`[executor] Task ${task.id}: additional folder cleanup failed: ${msg}`);
+        }
+      }
 
       // Always cleanup the local worktree directory to reclaim disk space
       // (node_modules alone is ~680MB per worktree). When keepBranch is true
