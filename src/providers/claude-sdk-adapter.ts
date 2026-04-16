@@ -716,6 +716,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     let success = false;
     let errorMessage: string | undefined;
     let resultMetrics: TaskResult['metrics'] | undefined;
+    let receivedResult = false;
 
     for await (const msg of gen) {
       if (msg.type === 'system' && msg.subtype === 'init') {
@@ -751,13 +752,15 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           errorMessage = `Task failed: ${msg.subtype}`;
           stream.status('failed', 0, errorMessage);
         }
+        receivedResult = true;
         break;
       }
     }
 
     // If the stream ended without a result message, treat as failure
-    if (!success && !errorMessage) {
-      errorMessage = 'Agent process exited without producing a result message';
+    if (!receivedResult) {
+      success = false;
+      errorMessage ??= 'Agent process exited without producing a result message';
       stream.status('failed', 0, errorMessage);
     }
 
@@ -1104,6 +1107,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
 
     let turnIndex = 0;
     let receivedResult = false;
+    let lastResultSubtype: string | undefined;
 
     for await (const msg of gen) {
       try {
@@ -1216,6 +1220,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       } else if (msg.type === 'result') {
         // Extract metrics from SDK result (available on both success and error subtypes)
         const msgAny = msg as Record<string, unknown>;
+        lastResultSubtype = msg.subtype;
         const usage = msgAny.usage as { input_tokens?: number; output_tokens?: number } | undefined;
         const totalCostUsd = (msgAny.total_cost_usd ?? msgAny.cost_usd) as number | undefined;
         const numTurns = msgAny.num_turns as number | undefined;
@@ -1266,9 +1271,10 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           errorMessage = `Task failed: ${msg.subtype}`;
           stream.status('failed', progress, errorMessage);
         } else {
-          // Unrecognized result subtype — treat as failure with descriptive message
+          // Unrecognized result subtype — treat as failure with descriptive message.
+          // Likely a Claude Code version mismatch or new SDK error subtype.
           success = false;
-          errorMessage = `Task ended with unrecognized result: ${msg.subtype}`;
+          errorMessage = `Task ended with unrecognized SDK result subtype: ${msg.subtype} — this may indicate a Claude Code version mismatch or SDK change`;
           stream.status('failed', progress, errorMessage);
         }
 
@@ -1285,7 +1291,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       }
     }
 
-    console.log(`[claude-sdk] Task ${task.id} for-await loop exited: ${receivedResult ? 'received result message (normal)' : 'generator exhausted without result message'}`);
+    console.log(`[claude-sdk] Task ${task.id} for-await loop exited: ${receivedResult ? `received result message (subtype=${lastResultSubtype ?? 'unknown'})` : 'generator exhausted without result message'}`);
 
     // If the stream ended without a result message, the process likely crashed
     // or hit a limit not covered by the SDK's result subtypes.
