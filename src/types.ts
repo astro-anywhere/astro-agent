@@ -360,6 +360,7 @@ export type WSMessageType =
   | 'git_create_branch_response'
   | 'git_init_response'
   | 'sessions_list_response'
+  | 'import_sessions_response'
   | 'channel_notification_ack'
   | 'channel_response_ack'
   | 'channel_approval_response'
@@ -388,6 +389,7 @@ export type WSMessageType =
   | 'git_create_branch_request'
   | 'git_init_request'
   | 'sessions_list_request'
+  | 'import_sessions_request'
   | 'channel_notification'
   | 'channel_response'
   | 'channel_approval_request'
@@ -942,15 +944,28 @@ export interface GitInitResponseMessage extends WSMessage {
 // Sessions List Types
 // ============================================================================
 
+export type ExternalAgentProvider = 'claude' | 'codex' | 'pi';
+
 export interface SessionsListRequestMessage extends WSMessage {
   type: 'sessions_list_request';
   payload: {
     correlationId: string;
     /** Only return sessions modified within this many ms. Omit for all sessions. */
     maxAgeMs?: number;
+    /** Restrict to a subset of providers. Omit for all available providers. */
+    providers?: ExternalAgentProvider[];
+    /** If set, only sessions whose cwd equals this absolute path are returned. */
+    cwd?: string;
   };
 }
 
+/**
+ * Normalized session info across Claude Code / Codex / Pi.
+ *
+ * `provider` and `transcriptPath` are optional for backward compatibility
+ * with older consumers: the Claude walker historically did not set them.
+ * New code paths populate both fields for every session.
+ */
 export interface ClaudeCodeSessionInfo {
   sessionId: string;
   summary: string;
@@ -960,6 +975,8 @@ export interface ClaudeCodeSessionInfo {
   firstPrompt?: string;
   gitBranch?: string;
   cwd?: string;
+  provider?: ExternalAgentProvider;
+  transcriptPath?: string;
 }
 
 export interface SessionsListResponseMessage extends WSMessage {
@@ -967,6 +984,66 @@ export interface SessionsListResponseMessage extends WSMessage {
   payload: {
     correlationId: string;
     sessions: ClaudeCodeSessionInfo[];
+    error?: string;
+  };
+}
+
+/**
+ * Request: copy the selected agent sessions' transcripts into
+ * `<workingDirectory>/.astro/imports/` on this machine so subsequent agent
+ * runs can summarize them. Sessions are identified by provider + sessionId;
+ * the agent resolves each to a transcript path via its discovery adapter.
+ */
+export interface ImportSessionsRequestMessage extends WSMessage {
+  type: 'import_sessions_request';
+  payload: {
+    correlationId: string;
+    workingDirectory: string;
+    sessions: Array<{
+      provider: ExternalAgentProvider;
+      sessionId: string;
+      /** Human-readable title, saved into the manifest for UI provenance. */
+      title: string;
+      /** cwd at time of discovery (saved into manifest; not re-validated). */
+      cwd?: string;
+      gitBranch?: string;
+      lastModified?: number;
+    }>;
+  };
+}
+
+export interface ImportManifestEntry {
+  provider: ExternalAgentProvider;
+  sessionId: string;
+  /** Absolute source path at time of copy. */
+  originalPath: string;
+  /** Path of the copied file, relative to `.astro/imports/`. */
+  localPath: string;
+  /** Planned path for the per-session memory file (initially absent). */
+  memoryPath: string;
+  cwd?: string;
+  gitBranch?: string;
+  lastModified?: number;
+  title: string;
+}
+
+export interface ImportSessionsFailure {
+  provider: ExternalAgentProvider;
+  sessionId: string;
+  reason: string;
+}
+
+export interface ImportSessionsResponseMessage extends WSMessage {
+  type: 'import_sessions_response';
+  payload: {
+    correlationId: string;
+    ok: boolean;
+    /** Absolute path of the manifest file written, if any. */
+    manifestPath?: string;
+    /** Number of transcripts successfully copied. */
+    rawCount: number;
+    failures: ImportSessionsFailure[];
+    /** Set when the request aborted before any file was touched. */
     error?: string;
   };
 }
