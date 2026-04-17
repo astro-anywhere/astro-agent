@@ -26,6 +26,8 @@ import {
   formatSetupHint,
   formatNoProvidersWarning,
 } from '../lib/display.js';
+import { discoverSessions } from '../session-discovery/index.js';
+import { importSessions } from './import-sessions.js';
 import type { RunnerEvent, Task, RepoSetupRequestMessage, RepoDetectRequestMessage, BranchListRequestMessage, GitCheckoutRequestMessage, GitCreateBranchRequestMessage, GitInitRequestMessage } from '../types.js';
 
 interface StartOptions {
@@ -1142,123 +1144,56 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         });
       }
     },
-    onSessionsList: (correlationId: string, maxAgeMs?: number) => {
-      log('debug', `Sessions list request received (maxAge=${maxAgeMs ?? 'all'})`, logLevel);
+    onSessionsList: (
+      correlationId: string,
+      maxAgeMs?: number,
+      providers?: import('../types.js').ExternalAgentProvider[],
+      cwd?: string,
+    ) => {
+      log(
+        'debug',
+        `Sessions list request received (maxAge=${maxAgeMs ?? 'all'}, providers=${(providers ?? ['*']).join(',')}, cwd=${cwd ?? '*'})`,
+        logLevel,
+      );
       try {
-        const claudeDir = join(homedir(), '.claude', 'projects');
-        if (!existsSync(claudeDir)) {
-          wsClient.sendSessionsListResponse(correlationId, []);
-          return;
-        }
-
-        // Cutoff timestamp: only include files modified after this time
-        const cutoff = maxAgeMs ? Date.now() - maxAgeMs : 0;
-
-        const sessions: import('../types.js').ClaudeCodeSessionInfo[] = [];
-        const projectDirs = readdirSync(claudeDir, { withFileTypes: true })
-          .filter(d => d.isDirectory());
-
-        for (const projDir of projectDirs) {
-          const projPath = join(claudeDir, projDir.name);
-          const cwd = projDir.name.replace(/^-/, '/').replace(/-/g, '/');
-
-          let jsonlFiles: string[];
-          try {
-            jsonlFiles = readdirSync(projPath).filter(f => f.endsWith('.jsonl'));
-          } catch { continue; }
-
-          for (const file of jsonlFiles) {
-            const sessionId = file.replace('.jsonl', '');
-            const filePath = join(projPath, file);
-            try {
-              const stat = statSync(filePath);
-              // Skip tiny files (likely empty sessions)
-              if (stat.size < 100) continue;
-              // Skip files older than cutoff (fast mtime check, no content read)
-              if (cutoff && stat.mtimeMs < cutoff) continue;
-
-              // Extract metadata from head + last user messages from tail
-              const content = readFileSync(filePath, 'utf-8');
-              let firstPrompt = '';
-              let lastUserMsg = '';
-              let secondLastUserMsg = '';
-              let gitBranch = '';
-              let customTitle = '';
-
-              // Helper: extract user text from entry (any text, no filtering)
-              const getUserText = (entry: Record<string, unknown>): string | null => {
-                if (entry.type !== 'user' || !(entry.message as Record<string, unknown>)?.content) return null;
-                const msg = entry.message as Record<string, unknown>;
-                const textContent = Array.isArray(msg.content)
-                  ? (msg.content as Array<{ type: string; text?: string }>).find((c) => c.type === 'text')?.text || ''
-                  : String(msg.content);
-                return textContent.trim() || null;
-              };
-
-              // Read first ~10 lines for metadata + first prompt
-              const lines = content.split('\n');
-              for (let li = 0; li < Math.min(lines.length, 10); li++) {
-                if (!lines[li].trim()) continue;
-                try {
-                  const entry = JSON.parse(lines[li]);
-                  if (entry.gitBranch && !gitBranch) gitBranch = entry.gitBranch;
-                  if (entry.customTitle) customTitle = entry.customTitle;
-                  if (!firstPrompt) {
-                    const text = getUserText(entry);
-                    if (text) firstPrompt = text.slice(0, 200);
-                  }
-                } catch { /* skip */ }
-              }
-
-              // Read last ~16KB to find last two user messages
-              const tailStart = Math.max(0, content.length - 16384);
-              const tailLines = content.slice(tailStart).split('\n');
-              for (let li = tailLines.length - 1; li >= 0; li--) {
-                if (!tailLines[li].trim()) continue;
-                try {
-                  const entry = JSON.parse(tailLines[li]);
-                  const text = getUserText(entry);
-                  if (text) {
-                    if (!lastUserMsg) { lastUserMsg = text.slice(0, 200); }
-                    else if (!secondLastUserMsg) { secondLastUserMsg = text.slice(0, 200); break; }
-                  }
-                } catch { /* skip */ }
-              }
-
-              // Summary: use second-to-last user msg if last is noisy, else last, else first
-              const isNoisy = (t: string) => /^\s*\[/.test(t) || /^\s*</.test(t) || t.trim().length < 5;
-              let summary = '';
-              if (lastUserMsg && !isNoisy(lastUserMsg)) {
-                summary = lastUserMsg.slice(0, 100);
-              } else if (secondLastUserMsg && !isNoisy(secondLastUserMsg)) {
-                summary = secondLastUserMsg.slice(0, 100);
-              } else {
-                summary = (lastUserMsg || firstPrompt).slice(0, 100);
-              }
-
-              sessions.push({
-                sessionId,
-                summary,
-                lastModified: stat.mtimeMs,
-                fileSize: stat.size,
-                customTitle,
-                firstPrompt: firstPrompt || lastUserMsg,
-                gitBranch,
-                cwd,
-              });
-            } catch { /* skip unreadable files */ }
-          }
-        }
-
-        // Sort by lastModified descending, limit to 50 most recent
-        sessions.sort((a, b) => b.lastModified - a.lastModified);
-        const result = sessions.slice(0, 50);
-
-        wsClient.sendSessionsListResponse(correlationId, result);
-        log('debug', `Sent ${result.length} sessions (scanned with cutoff)`, logLevel);
+        const sessions = discoverSessions({ maxAgeMs, providers, cwd, limit: 50 });
+        wsClient.sendSessionsListResponse(correlationId, sessions);
+        log('debug', `Sent ${sessions.length} sessions`, logLevel);
       } catch (error) {
-        log('warn', `Failed to list sessions: ${error instanceof Error ? error.message : String(error)}`, logLevel);
-        wsClient.sendSessionsListResponse(correlationId, [], error instanceof Error ? error.message : String(error));
+        log(
+          'warn',
+          `Failed to list sessions: ${error instanceof Error ? error.message : String(error)}`,
+          logLevel,
+        );
+        wsClient.sendSessionsListResponse(
+          correlationId,
+          [],
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    },
+    onImportSessions: async (
+      correlationId: string,
+      workingDirectory: string,
+      requested: import('../types.js').ImportSessionsRequestMessage['payload']['sessions'],
+    ) => {
+      log(
+        'debug',
+        `Import sessions request received (count=${requested.length}, workingDir=${workingDirectory})`,
+        logLevel,
+      );
+      try {
+        const result = await importSessions({ workingDirectory, sessions: requested });
+        wsClient.sendImportSessionsResponse(correlationId, result);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log('warn', `Import sessions failed: ${message}`, logLevel);
+        wsClient.sendImportSessionsResponse(correlationId, {
+          ok: false,
+          rawCount: 0,
+          failures: [],
+          error: message,
+        });
       }
     },
   });
