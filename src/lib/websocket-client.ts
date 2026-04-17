@@ -126,7 +126,17 @@ export interface WebSocketClientOptions {
   onGitCheckout?: (payload: GitCheckoutRequestMessage['payload']) => void;
   onGitCreateBranch?: (payload: GitCreateBranchRequestMessage['payload']) => void;
   onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
-  onSessionsList?: (correlationId: string, maxAgeMs?: number) => void;
+  onSessionsList?: (
+    correlationId: string,
+    maxAgeMs?: number,
+    providers?: import('../types.js').ExternalAgentProvider[],
+    cwd?: string,
+  ) => void;
+  onImportSessions?: (
+    correlationId: string,
+    workingDirectory: string,
+    sessions: import('../types.js').ImportSessionsRequestMessage['payload']['sessions'],
+  ) => void;
   onOpenClawBridgeReady?: (bridge: OpenClawBridge) => void;
   version?: string;
   wsToken?: string;
@@ -171,6 +181,7 @@ type IncomingMessage =
   | GitCreateBranchRequestMessage
   | GitInitRequestMessage
   | import('../types.js').SessionsListRequestMessage
+  | import('../types.js').ImportSessionsRequestMessage
   | ChannelNotificationMessage
   | ChannelResponseMessage
   | ChannelApprovalRequestMessage
@@ -219,7 +230,17 @@ export class WebSocketClient {
   private onGitCheckout?: (payload: GitCheckoutRequestMessage['payload']) => void;
   private onGitCreateBranch?: (payload: GitCreateBranchRequestMessage['payload']) => void;
   private onGitInit?: (payload: GitInitRequestMessage['payload']) => void;
-  private onSessionsList?: (correlationId: string, maxAgeMs?: number) => void;
+  private onSessionsList?: (
+    correlationId: string,
+    maxAgeMs?: number,
+    providers?: import('../types.js').ExternalAgentProvider[],
+    cwd?: string,
+  ) => void;
+  private onImportSessions?: (
+    correlationId: string,
+    workingDirectory: string,
+    sessions: import('../types.js').ImportSessionsRequestMessage['payload']['sessions'],
+  ) => void;
   private onOpenClawBridgeReady?: (bridge: OpenClawBridge) => void;
 
   constructor(options: WebSocketClientOptions) {
@@ -251,6 +272,7 @@ export class WebSocketClient {
     this.onGitCreateBranch = options.onGitCreateBranch;
     this.onGitInit = options.onGitInit;
     this.onSessionsList = options.onSessionsList;
+    this.onImportSessions = options.onImportSessions;
     this.onOpenClawBridgeReady = options.onOpenClawBridgeReady;
   }
 
@@ -1006,6 +1028,9 @@ export class WebSocketClient {
       case 'sessions_list_request':
         this.handleSessionsListRequest(message as import('../types.js').SessionsListRequestMessage);
         break;
+      case 'import_sessions_request':
+        this.handleImportSessionsRequest(message as import('../types.js').ImportSessionsRequestMessage);
+        break;
       case 'channel_notification':
         this.handleChannelNotification(message as ChannelNotificationMessage);
         break;
@@ -1529,7 +1554,12 @@ export class WebSocketClient {
   }
 
   private handleSessionsListRequest(message: import('../types.js').SessionsListRequestMessage): void {
-    this.onSessionsList?.(message.payload.correlationId, message.payload.maxAgeMs);
+    this.onSessionsList?.(
+      message.payload.correlationId,
+      message.payload.maxAgeMs,
+      message.payload.providers,
+      message.payload.cwd,
+    );
   }
 
   /**
@@ -1544,6 +1574,31 @@ export class WebSocketClient {
       type: 'sessions_list_response',
       timestamp: new Date().toISOString(),
       payload: { correlationId, sessions, error },
+    };
+    this.send(msg);
+  }
+
+  private handleImportSessionsRequest(
+    message: import('../types.js').ImportSessionsRequestMessage,
+  ): void {
+    this.onImportSessions?.(
+      message.payload.correlationId,
+      message.payload.workingDirectory,
+      message.payload.sessions,
+    );
+  }
+
+  /**
+   * Send import sessions response
+   */
+  sendImportSessionsResponse(
+    correlationId: string,
+    result: Omit<import('../types.js').ImportSessionsResponseMessage['payload'], 'correlationId'>,
+  ): void {
+    const msg: import('../types.js').ImportSessionsResponseMessage = {
+      type: 'import_sessions_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, ...result },
     };
     this.send(msg);
   }
