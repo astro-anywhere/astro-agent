@@ -49,6 +49,22 @@ interface ImportManifest {
   sessions: ImportManifestEntry[];
 }
 
+/**
+ * Reject (don't silently strip) sessionIds that contain characters unsafe
+ * for a filename. Claude / Codex / Pi all use UUID-shaped or filename-safe
+ * ids; anything with `/`, `\`, `..`, NUL, or other path metacharacters is
+ * hostile and the whole id should be refused rather than normalized into a
+ * different-but-still-valid filename.
+ * Returns the id unchanged if acceptable, or null if hostile.
+ */
+function sanitizeSessionIdForFilename(sessionId: string): string | null {
+  if (!sessionId || sessionId.length > 200) return null;
+  if (sessionId.includes('..')) return null;
+  // Disallow anything outside a conservative filename alphabet.
+  if (!/^[A-Za-z0-9._-]+$/.test(sessionId)) return null;
+  return sessionId;
+}
+
 function rawFilename(provider: ExternalAgentProvider, sessionId: string): string {
   return `${provider}-${sessionId}.jsonl`;
 }
@@ -78,6 +94,19 @@ export async function importSessions(
   const failures: ImportSessionsFailure[] = [];
 
   for (const req of sessions) {
+    // Hostile sessionIds (path traversal, NUL, shell metachars) would escape
+    // the raw dir once interpolated into the destination filename. Guard
+    // before touching the adapter or the filesystem.
+    const safeSessionId = sanitizeSessionIdForFilename(req.sessionId);
+    if (!safeSessionId) {
+      failures.push({
+        provider: req.provider,
+        sessionId: req.sessionId,
+        reason: 'invalid sessionId',
+      });
+      continue;
+    }
+
     const adapter = getAdapter(req.provider);
     if (!adapter) {
       failures.push({
@@ -96,6 +125,9 @@ export async function importSessions(
       continue;
     }
 
+    // Adapter uses the original id (which may differ from the sanitized one
+    // only in characters we'd have rejected above — so any session that
+    // resolves has a id that also survives sanitization).
     const sourcePath = adapter.resolveTranscriptPath(req.sessionId);
     if (!sourcePath) {
       failures.push({
@@ -106,7 +138,7 @@ export async function importSessions(
       continue;
     }
 
-    const destFilename = rawFilename(req.provider, req.sessionId);
+    const destFilename = rawFilename(req.provider, safeSessionId);
     const destPath = join(rawDir, destFilename);
     try {
       await copyFile(sourcePath, destPath);
@@ -121,7 +153,7 @@ export async function importSessions(
       sessionId: req.sessionId,
       originalPath: sourcePath,
       localPath: relative(importsDir, destPath),
-      memoryPath: relative(importsDir, join(memoryDir, memoryFilename(req.provider, req.sessionId))),
+      memoryPath: relative(importsDir, join(memoryDir, memoryFilename(req.provider, safeSessionId))),
       cwd: req.cwd,
       gitBranch: req.gitBranch,
       lastModified: req.lastModified,

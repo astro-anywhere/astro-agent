@@ -112,4 +112,27 @@ describe('importSessions', () => {
     expect(result.ok).toBe(false);
     expect(result.error).toBeDefined();
   });
+
+  it('rejects hostile sessionIds (path traversal) before touching the filesystem', async () => {
+    // Guard is at the top of the per-session loop, so we don't need a seeded
+    // transcript — the sanitizer rejects before the adapter is consulted.
+    const result = await importSessions({
+      workingDirectory: workspace,
+      sessions: [
+        { provider: 'claude', sessionId: '../../../etc/passwd', title: 'Hostile', cwd: '/Users/alice/app' },
+        { provider: 'claude', sessionId: 'with/slash', title: 'Also bad' },
+        { provider: 'claude', sessionId: 'nul\0here', title: 'NUL inject' },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.failures).toHaveLength(3);
+    for (const f of result.failures) {
+      expect(f.reason).toMatch(/invalid sessionId/);
+    }
+
+    // Nothing should have been written outside the imports/raw/ dir.
+    const traversalTarget = join(workspace, '..', 'etc', 'passwd.jsonl');
+    expect(existsSync(traversalTarget)).toBe(false);
+  });
 });
