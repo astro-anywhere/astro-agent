@@ -773,6 +773,12 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           return;
         }
 
+        // Validate root exists and is a directory
+        if (!existsSync(resolvedRoot) || !statSync(resolvedRoot).isDirectory()) {
+          wsClient.sendContentSearchResponse(correlationId, [], 'Invalid search root: not a directory');
+          return;
+        }
+
         // Prefer @vscode/ripgrep (ships pre-built rg binary), fall back to system rg
         let rgBin: string;
         try {
@@ -796,12 +802,13 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         if (!opts?.caseSensitive) args.push('--ignore-case');
         args.push(pattern, resolvedRoot);
 
-        const proc = spawn(rgBin, args, { stdio: ['ignore', 'pipe', 'ignore'] });
-        activeSearchProcs.add(proc);
+        const proc = spawn(rgBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        activeSearchProcs.set(correlationId, proc);
         const matches: Array<{ path: string; lineNo: number; line: string; matchStart: number; matchEnd: number }> = [];
         const limit = opts?.limit ?? 500;
         let buf = '';
         let responseSent = false;
+        let parseErrors = 0;
 
         proc.stdout.on('data', (chunk: Buffer) => {
           if (matches.length >= limit) {
@@ -834,12 +841,16 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
                   matchEnd: sub.end,
                 });
               }
-            } catch { /* skip malformed rg output */ }
+            } catch { parseErrors++; }
           }
         });
 
+        proc.stderr?.on('data', (chunk: Buffer) => {
+          log('debug', `ripgrep stderr: ${chunk.toString().trimEnd()}`, logLevel);
+        });
+
         proc.on('close', (code) => {
-          activeSearchProcs.delete(proc);
+          activeSearchProcs.delete(correlationId);
           if (responseSent) return;
           responseSent = true;
           if (code !== 0 && code !== 1 && code !== null) {
@@ -847,17 +858,20 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
             log('warn', `ripgrep exited with code ${code}`, logLevel);
             wsClient.sendContentSearchResponse(correlationId, [], `Search failed (exit ${code})`);
           } else {
-            log('debug', `Content search found ${matches.length} matches for: ${pattern}`, logLevel);
+            log('debug', `Content search found ${matches.length} matches for: ${pattern}${parseErrors > 0 ? ` (${parseErrors} parse errors)` : ''}`, logLevel);
             wsClient.sendContentSearchResponse(correlationId, matches);
           }
         });
 
         proc.on('error', (err) => {
-          activeSearchProcs.delete(proc);
+          activeSearchProcs.delete(correlationId);
           if (responseSent) return;
           responseSent = true;
-          log('warn', `Content search failed: ${err.message}`, logLevel);
-          wsClient.sendContentSearchResponse(correlationId, [], err.message);
+          const msg = err.message.includes('ENOENT')
+            ? 'ripgrep not found — install ripgrep or @vscode/ripgrep'
+            : err.message;
+          log('warn', `Content search failed: ${msg}`, logLevel);
+          wsClient.sendContentSearchResponse(correlationId, [], msg);
         });
       } catch (error) {
         log('warn', `Content search error: ${error instanceof Error ? error.message : String(error)}`, logLevel);
@@ -1319,8 +1333,8 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     hpcCapability,
   });
 
-  // Track in-flight ripgrep processes for shutdown cleanup
-  const activeSearchProcs = new Set<ReturnType<typeof spawn>>();
+  // Track in-flight ripgrep processes by correlationId for shutdown cleanup
+  const activeSearchProcs = new Map<string, ReturnType<typeof spawn>>();
 
   // Handle graceful shutdown
   let isShuttingDown = false;
@@ -1351,7 +1365,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
       }
 
       // Kill any in-flight ripgrep search processes
-      for (const proc of activeSearchProcs) {
+      for (const proc of activeSearchProcs.values()) {
         try { proc.kill(); } catch { /* ignore */ }
       }
       activeSearchProcs.clear();
