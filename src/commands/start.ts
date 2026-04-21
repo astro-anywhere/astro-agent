@@ -759,6 +759,20 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     onContentSearch: (root: string, pattern: string, correlationId: string, opts?: { caseSensitive?: boolean; maxMatchesPerFile?: number; limit?: number }) => {
       log('debug', `Content search request: pattern=${pattern} root=${root}`, logLevel);
       try {
+        // Security: reject path traversal
+        if (root.includes('..')) {
+          wsClient.sendContentSearchResponse(correlationId, [], 'Path traversal not allowed');
+          return;
+        }
+
+        // Security: reject sensitive paths
+        const sensitivePaths = ['/etc/', '/.ssh/', '/usr/', '/bin/', '/sbin/', '/root/', '/var/'];
+        const resolvedRoot = root.startsWith('~') ? root.replace(/^~/, homedir()) : root;
+        if (sensitivePaths.some(p => resolvedRoot.includes(p))) {
+          wsClient.sendContentSearchResponse(correlationId, [], 'Search in sensitive path not allowed');
+          return;
+        }
+
         // Prefer @vscode/ripgrep (ships pre-built rg binary), fall back to system rg
         let rgBin: string;
         try {
@@ -770,7 +784,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
 
         const args: string[] = [
           '--json',
-          '--max-count', String(opts?.maxMatchesPerFile ?? 5),
+          '--max-count', String(opts?.maxMatchesPerFile ?? 20),
           '--max-filesize', '1M',
           '--glob', '!node_modules',
           '--glob', '!.git',
@@ -780,15 +794,20 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           '--glob', '!target',
         ];
         if (!opts?.caseSensitive) args.push('--ignore-case');
-        args.push(pattern, root);
+        args.push(pattern, resolvedRoot);
 
         const proc = spawn(rgBin, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+        activeSearchProcs.add(proc);
         const matches: Array<{ path: string; lineNo: number; line: string; matchStart: number; matchEnd: number }> = [];
         const limit = opts?.limit ?? 500;
         let buf = '';
+        let responseSent = false;
 
         proc.stdout.on('data', (chunk: Buffer) => {
-          if (matches.length >= limit) return;
+          if (matches.length >= limit) {
+            proc.kill();
+            return;
+          }
           buf += chunk.toString();
           const lines = buf.split('\n');
           buf = lines.pop() ?? '';
@@ -806,24 +825,37 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
               };
               if (obj.type === 'match') {
                 const sub = obj.data.submatches[0];
+                if (sub === undefined) continue;
                 matches.push({
                   path: obj.data.path.text,
                   lineNo: obj.data.line_number,
                   line: obj.data.lines.text.trimEnd(),
-                  matchStart: sub?.start ?? 0,
-                  matchEnd: sub?.end ?? 0,
+                  matchStart: sub.start,
+                  matchEnd: sub.end,
                 });
               }
             } catch { /* skip malformed rg output */ }
           }
         });
 
-        proc.on('close', () => {
-          log('debug', `Content search found ${matches.length} matches for: ${pattern}`, logLevel);
-          wsClient.sendContentSearchResponse(correlationId, matches.slice(0, limit));
+        proc.on('close', (code) => {
+          activeSearchProcs.delete(proc);
+          if (responseSent) return;
+          responseSent = true;
+          if (code !== 0 && code !== 1 && code !== null) {
+            // rg exits 1 for no matches (not an error), null when killed (limit reached)
+            log('warn', `ripgrep exited with code ${code}`, logLevel);
+            wsClient.sendContentSearchResponse(correlationId, [], `Search failed (exit ${code})`);
+          } else {
+            log('debug', `Content search found ${matches.length} matches for: ${pattern}`, logLevel);
+            wsClient.sendContentSearchResponse(correlationId, matches);
+          }
         });
 
         proc.on('error', (err) => {
+          activeSearchProcs.delete(proc);
+          if (responseSent) return;
+          responseSent = true;
           log('warn', `Content search failed: ${err.message}`, logLevel);
           wsClient.sendContentSearchResponse(correlationId, [], err.message);
         });
@@ -1287,6 +1319,9 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     hpcCapability,
   });
 
+  // Track in-flight ripgrep processes for shutdown cleanup
+  const activeSearchProcs = new Set<ReturnType<typeof spawn>>();
+
   // Handle graceful shutdown
   let isShuttingDown = false;
 
@@ -1314,6 +1349,12 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         log('info', `Cancelling ${counts.running} running and ${counts.queued} queued tasks`, logLevel);
         taskExecutor.cancelAll();
       }
+
+      // Kill any in-flight ripgrep search processes
+      for (const proc of activeSearchProcs) {
+        try { proc.kill(); } catch { /* ignore */ }
+      }
+      activeSearchProcs.clear();
 
       // Disconnect WebSocket
       wsClient.disconnect();
