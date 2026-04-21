@@ -685,6 +685,15 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     if (task.model) {
       (options as Record<string, unknown>).model = task.model;
     }
+    // effort is typed as EffortLevel in the SDK's RunOptions — cast matches the pattern
+    // used for model/systemPrompt above (Parameters<typeof query>[0]['options'] narrows too early).
+    if (task.effort) {
+      if (task.effort === 'xhigh') {
+        throw new Error(`effort='xhigh' is not supported by Claude SDK (use 'low', 'medium', 'high', or 'max')`);
+      }
+      (options as Record<string, unknown>).effort = task.effort;
+      console.log(`[claude-sdk] Fast path: using effort=${task.effort}`);
+    }
 
     // Build prompt with conversation history
     let effectivePrompt = task.prompt;
@@ -1005,6 +1014,15 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // Apply explicit model selection if provided (new relay protocol field)
     if (task.model) {
       (options as Record<string, unknown>).model = task.model;
+    }
+    // effort is typed as EffortLevel in the SDK's RunOptions — cast matches the pattern
+    // used for model/systemPrompt above (Parameters<typeof query>[0]['options'] narrows too early).
+    if (task.effort) {
+      if (task.effort === 'xhigh') {
+        throw new Error(`effort='xhigh' is not supported by Claude SDK (use 'low', 'medium', 'high', or 'max')`);
+      }
+      (options as Record<string, unknown>).effort = task.effort;
+      console.log(`[claude-sdk] Executing with effort=${task.effort}`);
     }
 
     // Load MCP servers from config if available
