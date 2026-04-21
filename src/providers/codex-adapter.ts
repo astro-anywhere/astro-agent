@@ -557,6 +557,7 @@ export class CodexAdapter implements ProviderAdapter {
         'exec',
         '-s', 'danger-full-access',       // Full filesystem + network access
         ...(model ? ['-m', model] : []),   // Explicit model selection
+        ...(task.effort ? ['--reasoning-effort', task.effort] : []),
         ...(!isGitRepo ? ['--skip-git-repo-check'] : []),
         '--json',                         // JSONL output for structured parsing
         // Pass images via --image flag if available (Codex CLI feature)

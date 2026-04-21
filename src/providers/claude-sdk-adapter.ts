@@ -685,6 +685,9 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     if (task.model) {
       (options as Record<string, unknown>).model = task.model;
     }
+    if (task.effort) {
+      (options as Record<string, unknown>).effort = task.effort;
+    }
 
     // Build prompt with conversation history
     let effectivePrompt = task.prompt;
@@ -1005,6 +1008,9 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     // Apply explicit model selection if provided (new relay protocol field)
     if (task.model) {
       (options as Record<string, unknown>).model = task.model;
+    }
+    if (task.effort) {
+      (options as Record<string, unknown>).effort = task.effort;
     }
 
     // Load MCP servers from config if available

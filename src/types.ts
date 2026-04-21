@@ -147,6 +147,13 @@ export interface Task {
   /** Explicit model selection — e.g. 'claude-sonnet-4-20250514' */
   model?: string;
 
+  /**
+   * Reasoning/thinking effort level.
+   * - Claude: 'low' | 'medium' | 'high' | 'max' (max = Opus only)
+   * - Codex: 'low' | 'medium' | 'high' | 'xhigh' (xhigh not available on small models)
+   */
+  effort?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
+
   /** How results should be delivered: 'pr' | 'push' | 'branch' | 'copy' | 'direct' */
   deliveryMode?: 'pr' | 'push' | 'branch' | 'copy' | 'direct';
 
