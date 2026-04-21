@@ -41,6 +41,9 @@ import type {
   DirectoryListResponseMessage,
   CreateDirectoryRequestMessage,
   CreateDirectoryResponseMessage,
+  ContentSearchRequestMessage,
+  ContentSearchResponseMessage,
+  ContentSearchMatch,
   RepoSetupRequestMessage,
   RepoSetupResponseMessage,
   SlashCommandsRequestMessage,
@@ -119,6 +122,7 @@ export interface WebSocketClientOptions {
   onFileUploadChunk?: (correlationId: string, chunkIndex: number, encoding: 'utf-8' | 'base64', content: string) => void;
   onDirectoryList?: (path: string, correlationId: string) => void;
   onCreateDirectory?: (parentPath: string, name: string, correlationId: string) => void;
+  onContentSearch?: (root: string, pattern: string, correlationId: string, opts?: { caseSensitive?: boolean; maxMatchesPerFile?: number; limit?: number }) => void;
   onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
   onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
   onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
@@ -173,6 +177,7 @@ type IncomingMessage =
   | FileUploadChunkMessage
   | DirectoryListRequestMessage
   | CreateDirectoryRequestMessage
+  | ContentSearchRequestMessage
   | RepoSetupRequestMessage
   | SlashCommandsRequestMessage
   | RepoDetectRequestMessage
@@ -223,6 +228,7 @@ export class WebSocketClient {
   private onFileUploadChunk?: (correlationId: string, chunkIndex: number, encoding: 'utf-8' | 'base64', content: string) => void;
   private onDirectoryList?: (path: string, correlationId: string) => void;
   private onCreateDirectory?: (parentPath: string, name: string, correlationId: string) => void;
+  private onContentSearch?: (root: string, pattern: string, correlationId: string, opts?: { caseSensitive?: boolean; maxMatchesPerFile?: number; limit?: number }) => void;
   private onRepoSetup?: (payload: RepoSetupRequestMessage['payload']) => void;
   private onSlashCommands?: (correlationId: string, workingDirectory?: string) => void;
   private onRepoDetect?: (payload: RepoDetectRequestMessage['payload']) => void;
@@ -264,6 +270,7 @@ export class WebSocketClient {
     this.onFileUploadChunk = options.onFileUploadChunk;
     this.onDirectoryList = options.onDirectoryList;
     this.onCreateDirectory = options.onCreateDirectory;
+    this.onContentSearch = options.onContentSearch;
     this.onRepoSetup = options.onRepoSetup;
     this.onSlashCommands = options.onSlashCommands;
     this.onRepoDetect = options.onRepoDetect;
@@ -1004,6 +1011,9 @@ export class WebSocketClient {
       case 'create_directory_request':
         this.handleCreateDirectoryRequest(message as CreateDirectoryRequestMessage);
         break;
+      case 'content_search_request':
+        this.handleContentSearchRequest(message as ContentSearchRequestMessage);
+        break;
       case 'repo_setup_request':
         this.handleRepoSetupRequest(message as RepoSetupRequestMessage);
         break;
@@ -1409,6 +1419,20 @@ export class WebSocketClient {
   private handleCreateDirectoryRequest(message: CreateDirectoryRequestMessage): void {
     const { parentPath, name, correlationId } = message.payload;
     this.onCreateDirectory?.(parentPath, name, correlationId);
+  }
+
+  private handleContentSearchRequest(message: ContentSearchRequestMessage): void {
+    const { root, pattern, correlationId, caseSensitive, maxMatchesPerFile, limit } = message.payload;
+    this.onContentSearch?.(root, pattern, correlationId, { caseSensitive, maxMatchesPerFile, limit });
+  }
+
+  sendContentSearchResponse(correlationId: string, matches: ContentSearchMatch[], error?: string): void {
+    const msg: ContentSearchResponseMessage = {
+      type: 'content_search_response',
+      timestamp: new Date().toISOString(),
+      payload: { correlationId, matches, error },
+    };
+    this.send(msg);
   }
 
   /**

@@ -756,6 +756,82 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         wsClient.sendSlashCommandsResponse(correlationId, []);
       }
     },
+    onContentSearch: (root: string, pattern: string, correlationId: string, opts?: { caseSensitive?: boolean; maxMatchesPerFile?: number; limit?: number }) => {
+      log('debug', `Content search request: pattern=${pattern} root=${root}`, logLevel);
+      try {
+        // Prefer @vscode/ripgrep (ships pre-built rg binary), fall back to system rg
+        let rgBin: string;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          rgBin = (require('@vscode/ripgrep') as { rgPath: string }).rgPath;
+        } catch {
+          rgBin = 'rg'; // fall back to system ripgrep
+        }
+
+        const args: string[] = [
+          '--json',
+          '--max-count', String(opts?.maxMatchesPerFile ?? 5),
+          '--max-filesize', '1M',
+          '--glob', '!node_modules',
+          '--glob', '!.git',
+          '--glob', '!dist',
+          '--glob', '!build',
+          '--glob', '!.next',
+          '--glob', '!target',
+        ];
+        if (!opts?.caseSensitive) args.push('--ignore-case');
+        args.push(pattern, root);
+
+        const proc = spawn(rgBin, args, { stdio: ['ignore', 'pipe', 'ignore'] });
+        const matches: Array<{ path: string; lineNo: number; line: string; matchStart: number; matchEnd: number }> = [];
+        const limit = opts?.limit ?? 500;
+        let buf = '';
+
+        proc.stdout.on('data', (chunk: Buffer) => {
+          if (matches.length >= limit) return;
+          buf += chunk.toString();
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.trim() || matches.length >= limit) continue;
+            try {
+              const obj = JSON.parse(line) as {
+                type: string;
+                data: {
+                  path: { text: string };
+                  line_number: number;
+                  lines: { text: string };
+                  submatches: Array<{ start: number; end: number }>;
+                };
+              };
+              if (obj.type === 'match') {
+                const sub = obj.data.submatches[0];
+                matches.push({
+                  path: obj.data.path.text,
+                  lineNo: obj.data.line_number,
+                  line: obj.data.lines.text.trimEnd(),
+                  matchStart: sub?.start ?? 0,
+                  matchEnd: sub?.end ?? 0,
+                });
+              }
+            } catch { /* skip malformed rg output */ }
+          }
+        });
+
+        proc.on('close', () => {
+          log('debug', `Content search found ${matches.length} matches for: ${pattern}`, logLevel);
+          wsClient.sendContentSearchResponse(correlationId, matches.slice(0, limit));
+        });
+
+        proc.on('error', (err) => {
+          log('warn', `Content search failed: ${err.message}`, logLevel);
+          wsClient.sendContentSearchResponse(correlationId, [], err.message);
+        });
+      } catch (error) {
+        log('warn', `Content search error: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendContentSearchResponse(correlationId, [], String(error));
+      }
+    },
     onRepoSetup: (payload: RepoSetupRequestMessage['payload']) => {
       const { correlationId, projectId, workingDirectory, repository } = payload;
       log('info', `Repo setup request: dir=${workingDirectory || '(none)'} repo=${repository || '(none)'}`, logLevel);
