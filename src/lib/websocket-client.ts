@@ -944,6 +944,17 @@ export class WebSocketClient {
         return;
       }
 
+      // Handle content_search.request (dot notation from relay)
+      if (raw.type === 'content_search.request') {
+        const searchMsg: ContentSearchRequestMessage = {
+          type: 'content_search_request',
+          timestamp: raw.timestamp as string ?? new Date().toISOString(),
+          payload: raw.payload as ContentSearchRequestMessage['payload'],
+        };
+        this.handleContentSearchRequest(searchMsg);
+        return;
+      }
+
       // Handle channel.* (dot notation from relay) — normalize to underscore
       if (typeof raw.type === 'string' && raw.type.startsWith('channel.')) {
         const normalized = {

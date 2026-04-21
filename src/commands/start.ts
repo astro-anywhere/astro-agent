@@ -8,7 +8,7 @@ import { spawn, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, renameSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import os from 'node:os';
 import { homedir } from 'node:os';
 import { config } from '../lib/config.js';
@@ -759,15 +759,17 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     onContentSearch: (root: string, pattern: string, correlationId: string, opts?: { caseSensitive?: boolean; maxMatchesPerFile?: number; limit?: number }) => {
       log('debug', `Content search request: pattern=${pattern} root=${root}`, logLevel);
       try {
-        // Security: reject path traversal
-        if (root.includes('..')) {
+        // Security: resolve to absolute path first, then validate
+        const resolvedRoot = resolve(root.startsWith('~') ? root.replace(/^~/, homedir()) : root);
+
+        // Security: reject path traversal (check both raw and resolved)
+        if (root.includes('..') || resolvedRoot.includes('..')) {
           wsClient.sendContentSearchResponse(correlationId, [], 'Path traversal not allowed');
           return;
         }
 
         // Security: reject sensitive paths
         const sensitivePaths = ['/etc/', '/.ssh/', '/usr/', '/bin/', '/sbin/', '/root/', '/var/'];
-        const resolvedRoot = root.startsWith('~') ? root.replace(/^~/, homedir()) : root;
         if (sensitivePaths.some(p => resolvedRoot.includes(p))) {
           wsClient.sendContentSearchResponse(correlationId, [], 'Search in sensitive path not allowed');
           return;
@@ -812,7 +814,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
 
         proc.stdout.on('data', (chunk: Buffer) => {
           if (matches.length >= limit) {
-            proc.kill();
+            if (!proc.killed) proc.kill();
             return;
           }
           buf += chunk.toString();
