@@ -441,6 +441,10 @@ export class OpenCodeAdapter implements ProviderAdapter {
       effectivePrompt = `${conversationContext}\n\nHuman: ${effectivePrompt}`;
     }
 
+    if (task.effort) {
+      console.warn(`[opencode] effort=${task.effort} is not supported by the OpenCode CLI — ignored`);
+    }
+
     const args = [
       'run',
       '--print',

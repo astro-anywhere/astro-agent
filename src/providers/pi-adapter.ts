@@ -228,6 +228,10 @@ export class PiAdapter implements ProviderAdapter {
     const startedAt = new Date().toISOString();
     this.activeTasks++;
 
+    if (task.effort) {
+      console.warn(`[pi] effort=${task.effort} is not supported by the Pi SDK — ignored`);
+    }
+
     try {
       const { createAgentSession, SessionManager } = await import('@mariozechner/pi-coding-agent');
 

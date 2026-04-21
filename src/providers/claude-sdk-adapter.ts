@@ -685,8 +685,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     if (task.model) {
       (options as Record<string, unknown>).model = task.model;
     }
+    // effort is typed as EffortLevel in the SDK's RunOptions — cast matches the pattern
+    // used for model/systemPrompt above (Parameters<typeof query>[0]['options'] narrows too early).
     if (task.effort) {
       (options as Record<string, unknown>).effort = task.effort;
+      console.log(`[claude-sdk] Fast path: using effort=${task.effort}`);
     }
 
     // Build prompt with conversation history
@@ -1009,8 +1012,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
     if (task.model) {
       (options as Record<string, unknown>).model = task.model;
     }
+    // effort is typed as EffortLevel in the SDK's RunOptions — cast matches the pattern
+    // used for model/systemPrompt above (Parameters<typeof query>[0]['options'] narrows too early).
     if (task.effort) {
       (options as Record<string, unknown>).effort = task.effort;
+      console.log(`[claude-sdk] Executing with effort=${task.effort}`);
     }
 
     // Load MCP servers from config if available

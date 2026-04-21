@@ -149,8 +149,10 @@ export interface Task {
 
   /**
    * Reasoning/thinking effort level.
-   * - Claude: 'low' | 'medium' | 'high' | 'max' (max = Opus only)
-   * - Codex: 'low' | 'medium' | 'high' | 'xhigh' (xhigh not available on small models)
+   * - claude-sdk: 'low' | 'medium' | 'high' | 'max' (max = Opus only). Maps to SDK's EffortLevel.
+   * - codex: 'low' | 'medium' | 'high' | 'xhigh' (xhigh not available on small/mini models). Maps to --reasoning-effort CLI flag.
+   * - openclaw (plan/llm-task mode): forwarded in HTTP payload; gateway ignores unknown fields.
+   * - openclaw (agent mode), opencode, pi: not supported — a warning is logged and the value is ignored.
    */
   effort?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
 
