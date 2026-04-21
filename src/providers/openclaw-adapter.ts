@@ -119,6 +119,9 @@ export class OpenClawAdapter implements ProviderAdapter {
       // For plan generation with outputFormat, use the llm-task HTTP endpoint
       if (task.type === 'plan' && task.outputFormat) {
         try {
+          if (task.effort) {
+            console.log(`[openclaw] Plan task: forwarding effort=${task.effort} in llm-task payload`);
+          }
           const result = await this.runLlmTask(task, stream, signal);
           return {
             taskId: task.id,
@@ -133,6 +136,11 @@ export class OpenClawAdapter implements ProviderAdapter {
           // Fall through to agent mode
           console.warn('[openclaw] llm-task failed, falling back to agent mode:', err);
         }
+      }
+
+      // Agent-mode WebSocket protocol (chat.send) doesn't expose per-request effort control.
+      if (task.effort) {
+        console.warn(`[openclaw] effort=${task.effort} is not supported in agent mode — ignored`);
       }
 
       stream.status('running', 0, 'Connecting to OpenClaw gateway');
@@ -718,6 +726,7 @@ export class OpenClawAdapter implements ProviderAdapter {
         prompt: effectivePrompt,
         schema: task.outputFormat!.schema,
         ...(task.model ? { model: task.model } : {}),
+        ...(task.effort ? { effort: task.effort } : {}),
       },
     });
 

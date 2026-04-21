@@ -553,10 +553,15 @@ export class CodexAdapter implements ProviderAdapter {
       // special character escaping issues with large plan/chat prompts.
       const useStdin = effectivePrompt.length > 4096;
 
+      if (task.effort === 'max') {
+        throw new Error(`effort='max' is not supported by Codex (use 'low', 'medium', 'high', or 'xhigh')`);
+      }
+
       const args = [
         'exec',
         '-s', 'danger-full-access',       // Full filesystem + network access
         ...(model ? ['-m', model] : []),   // Explicit model selection
+        ...(task.effort ? ['--reasoning-effort', task.effort] : []),
         ...(!isGitRepo ? ['--skip-git-repo-check'] : []),
         '--json',                         // JSONL output for structured parsing
         // Pass images via --image flag if available (Codex CLI feature)
@@ -584,7 +589,7 @@ export class CodexAdapter implements ProviderAdapter {
         return;
       }
 
-      console.log(`[codex] Task ${task.id}: spawning codex exec, promptLen=${effectivePrompt.length}, useStdin=${useStdin}, cwd=${task.workingDirectory || '(none)'}, model=${model || '(default)'}`);
+      console.log(`[codex] Task ${task.id}: spawning codex exec, promptLen=${effectivePrompt.length}, useStdin=${useStdin}, cwd=${task.workingDirectory || '(none)'}, model=${model || '(default)'}, effort=${task.effort || '(default)'}`);
 
       try {
         proc = spawn(this.codexPath!, args, {
