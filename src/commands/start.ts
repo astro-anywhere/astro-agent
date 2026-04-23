@@ -309,10 +309,9 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     console.log();
   }
 
-  // Set Claude OAuth token if configured (from `claude setup-token`)
-  const claudeOauthToken = config.getClaudeOauthToken();
-  if (claudeOauthToken && !process.env.CLAUDE_CODE_OAUTH_TOKEN) {
-    process.env.CLAUDE_CODE_OAUTH_TOKEN = claudeOauthToken;
+  // Claude OAuth is applied to each SDK query from config so token changes can
+  // take effect without restarting the long-running agent process.
+  if (config.getClaudeOauthToken()) {
     if (verbose) console.log(chalk.dim('  Using stored Claude OAuth token'));
   }
 

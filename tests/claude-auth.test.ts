@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { detectClaudeAuth, CLAUDE_AUTH_ENV_KEYS } from '../src/lib/claude-auth.js';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { applyStoredClaudeOauthToken, detectClaudeAuth, CLAUDE_AUTH_ENV_KEYS } from '../src/lib/claude-auth.js';
 
 describe('detectClaudeAuth', () => {
   // Helper: create a clean env with only the specified vars
@@ -269,5 +272,89 @@ describe('CLAUDE_AUTH_ENV_KEYS', () => {
     expect(CLAUDE_AUTH_ENV_KEYS).toContain('ANTHROPIC_DEFAULT_OPUS_MODEL');
     expect(CLAUDE_AUTH_ENV_KEYS).toContain('ANTHROPIC_DEFAULT_SONNET_MODEL');
     expect(CLAUDE_AUTH_ENV_KEYS).toContain('ANTHROPIC_DEFAULT_HAIKU_MODEL');
+  });
+});
+
+describe('applyStoredClaudeOauthToken', () => {
+  it('uses the stored token when no env token exists', () => {
+    const env: Record<string, string | undefined> = {
+      CLAUDE_CONFIG_DIR: join(tmpdir(), `missing-claude-config-${Date.now()}`),
+    };
+
+    const source = applyStoredClaudeOauthToken('stored-token', env);
+
+    expect(source).toBe('stored');
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('stored-token');
+  });
+
+  it('lets the stored token override an inherited env token', () => {
+    const env: Record<string, string | undefined> = {
+      CLAUDE_CONFIG_DIR: join(tmpdir(), `missing-claude-config-${Date.now()}`),
+      CLAUDE_CODE_OAUTH_TOKEN: 'stale-env-token',
+    };
+
+    const source = applyStoredClaudeOauthToken('stored-token', env);
+
+    expect(source).toBe('stored');
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('stored-token');
+  });
+
+  it('keeps the inherited env token when no stored token exists', () => {
+    const env: Record<string, string | undefined> = {
+      CLAUDE_CONFIG_DIR: join(tmpdir(), `missing-claude-config-${Date.now()}`),
+      CLAUDE_CODE_OAUTH_TOKEN: 'env-token',
+    };
+
+    const source = applyStoredClaudeOauthToken(undefined, env);
+
+    expect(source).toBe('env');
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe('env-token');
+  });
+
+  it('reports none when neither token source exists', () => {
+    const env: Record<string, string | undefined> = {
+      CLAUDE_CONFIG_DIR: join(tmpdir(), `missing-claude-config-${Date.now()}`),
+    };
+
+    const source = applyStoredClaudeOauthToken(undefined, env);
+
+    expect(source).toBe('none');
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+  });
+
+  it('lets native Claude credentials take priority over an inherited env token', () => {
+    const claudeConfigDir = mkdtempSync(join(tmpdir(), 'claude-config-'));
+    try {
+      writeFileSync(join(claudeConfigDir, '.credentials.json'), '{"claudeAiOauth":{}}');
+      const env: Record<string, string | undefined> = {
+        CLAUDE_CONFIG_DIR: claudeConfigDir,
+        CLAUDE_CODE_OAUTH_TOKEN: 'stale-env-token',
+      };
+
+      const source = applyStoredClaudeOauthToken(undefined, env);
+
+      expect(source).toBe('native-credentials');
+      expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    } finally {
+      rmSync(claudeConfigDir, { recursive: true, force: true });
+    }
+  });
+
+  it('lets native Claude credentials override the stored token', () => {
+    const claudeConfigDir = mkdtempSync(join(tmpdir(), 'claude-config-'));
+    try {
+      writeFileSync(join(claudeConfigDir, '.credentials.json'), '{"claudeAiOauth":{}}');
+      const env: Record<string, string | undefined> = {
+        CLAUDE_CONFIG_DIR: claudeConfigDir,
+        CLAUDE_CODE_OAUTH_TOKEN: 'stale-env-token',
+      };
+
+      const source = applyStoredClaudeOauthToken('stored-token', env);
+
+      expect(source).toBe('native-credentials');
+      expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
+    } finally {
+      rmSync(claudeConfigDir, { recursive: true, force: true });
+    }
   });
 });

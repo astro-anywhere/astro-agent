@@ -45,6 +45,7 @@ import { buildReferenceFolderDenyHook } from '../lib/reference-folder-guard.js';
 import { buildHpcContext, type HpcContext } from '../lib/hpc-context.js';
 import type { SlurmJobMonitor } from '../lib/slurm-job-monitor.js';
 import { config } from '../lib/config.js';
+import { applyStoredClaudeOauthToken } from '../lib/claude-auth.js';
 
 /** Shell execution tools whose output may contain real sbatch submissions */
 const SHELL_TOOLS = new Set(['Bash', 'bash', 'shell', 'execute_command', 'terminal']);
@@ -94,6 +95,19 @@ interface ActiveQuery {
 
 /** How long to preserve completed session state for potential steering (ms) */
 const SESSION_PRESERVE_MS = 10 * 60 * 1000; // 10 minutes
+
+function buildClaudeQueryEnv(extraEnv: Record<string, string | undefined> = {}): Record<string, string | undefined> {
+  const env = {
+    ...process.env,
+    ...extraEnv,
+  };
+
+  // Read from config for each SDK query so `astro-agent auth` or native
+  // Claude credential switches are picked up without restarting this process.
+  applyStoredClaudeOauthToken(config.getClaudeOauthToken(), env);
+
+  return env;
+}
 
 
 export class ClaudeSdkAdapter implements ProviderAdapter {
@@ -155,7 +169,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           tools: [],
           persistSession: true,
           ...(claudeExecutablePath ? { pathToClaudeCodeExecutable: claudeExecutablePath } : {}),
-          env: { ...process.env },
+          env: buildClaudeQueryEnv(),
         },
       });
 
@@ -382,14 +396,13 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         settingSources: ['user', 'project', 'local'],
         persistSession: true,
         ...(hasWorkdir ? { cwd: workingDirectory, additionalDirectories: [workingDirectory] } : {}),
-        env: {
-          ...process.env,
+        env: buildClaudeQueryEnv({
           CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
           // Inject Astro auth so astro-cli works inside the session without
           // a separate login step (works on local and remote machines).
           ...(config.getAccessToken() ? { ASTRO_AUTH_TOKEN: config.getAccessToken()! } : {}),
           ASTRO_SERVER_URL: config.getApiUrl(),
-        },
+        }),
       };
 
       // Resume the previous session
@@ -601,6 +614,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         permissionMode: 'plan',
         persistSession: true,
         ...(workingDirectory ? { cwd: workingDirectory } : {}),
+        env: buildClaudeQueryEnv(),
       };
 
       // Resume the execution session so the model has full context
@@ -671,12 +685,11 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           console.error(`[claude-sdk][stderr][${task.id.slice(0, 8)}] ${trimmed}`);
         }
       },
-      env: {
-        ...process.env,
+      env: buildClaudeQueryEnv({
         ...task.environment,
         // Ensure bundled astro-cli version is found before any global/outdated install
         PATH: getAugmentedPath(),
-      },
+      }),
     };
 
     if (task.systemPrompt) {
@@ -862,8 +875,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           console.error(`[claude-sdk][stderr][${task.id.slice(0, 8)}] ${trimmed}`);
         }
       },
-      env: {
-        ...process.env,
+      env: buildClaudeQueryEnv({
         ...task.environment,
         PATH: getAugmentedPath(),
         CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1', // Enable additional directories for CLAUDE.md loading
@@ -873,7 +885,7 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
         ...(config.getAccessToken() ? { ASTRO_AUTH_TOKEN: config.getAccessToken()! } : {}),
         ASTRO_SERVER_URL: config.getApiUrl(),
         ASTRO_EXECUTION_ID: task.id,
-      },
+      }),
       // Intercept built-in AskUserQuestion to handle approvals (following Cyrus pattern)
       canUseTool: async (toolName: string, input: Record<string, unknown>, options: { toolUseID: string; signal: AbortSignal }) => {
         // Deny write/edit/bash calls that target read-only reference folders.

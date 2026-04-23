@@ -6,6 +6,10 @@
  * authenticate with the appropriate backend (Anthropic cloud, Bedrock, Vertex, etc.).
  */
 
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
 /** Supported Claude Code authentication methods */
 export type ClaudeAuthMethod =
   | 'bedrock'        // AWS Bedrock: CLAUDE_CODE_USE_BEDROCK=1
@@ -22,6 +26,52 @@ export interface ClaudeAuthDetection {
   complete: boolean;
   /** Missing env vars (if incomplete) */
   missing?: string[];
+}
+
+export type StoredClaudeOauthTokenSource = 'stored' | 'native-credentials' | 'env' | 'none';
+
+function getClaudeConfigDir(env: Record<string, string | undefined>): string {
+  return env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+}
+
+function hasNativeClaudeOauthCredentials(env: Record<string, string | undefined>): boolean {
+  const configDir = getClaudeConfigDir(env);
+  const hasConfigDirOverride = !!env.CLAUDE_CONFIG_DIR;
+
+  return (
+    existsSync(join(configDir, '.credentials.json')) ||
+    existsSync(join(configDir, '.claude.json')) ||
+    (!hasConfigDirOverride && existsSync(join(homedir(), '.claude.json')))
+  );
+}
+
+/**
+ * Apply the Claude OAuth token from the agent config to the environment used by
+ * the Claude Agent SDK.
+ *
+ * Claude's native credentials are intentionally authoritative because Claude
+ * Code account switchers update ~/.claude between invocations. When those
+ * files exist, remove any explicit token from the SDK subprocess env so the
+ * spawned Claude Code process reads the current native credentials.
+ *
+ * If native credentials are absent, fall back to Astro's stored token, then an
+ * inherited CLAUDE_CODE_OAUTH_TOKEN.
+ */
+export function applyStoredClaudeOauthToken(
+  storedToken: string | undefined,
+  env: Record<string, string | undefined> = process.env,
+): StoredClaudeOauthTokenSource {
+  if (hasNativeClaudeOauthCredentials(env)) {
+    delete env.CLAUDE_CODE_OAUTH_TOKEN;
+    return 'native-credentials';
+  }
+
+  if (storedToken) {
+    env.CLAUDE_CODE_OAUTH_TOKEN = storedToken;
+    return 'stored';
+  }
+
+  return env.CLAUDE_CODE_OAUTH_TOKEN ? 'env' : 'none';
 }
 
 /**
