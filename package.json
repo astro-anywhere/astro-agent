@@ -17,6 +17,7 @@
   },
   "scripts": {
     "build": "tsc && chmod +x dist/cli.js",
+    "build:binary": "tsup src/cli.ts --format cjs --no-splitting --out-dir dist-bundle && pkg dist-bundle/cli.cjs --target node22-linux-x64 --output dist/astro-agent-linux-x64 --compress GZip",
     "dev": "tsc --watch",
     "start": "node dist/cli.js",
     "typecheck": "tsc --noEmit",
@@ -60,6 +61,8 @@
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.10.0",
     "@types/ws": "^8.5.13",
+    "@yao-pkg/pkg": "^5.12.0",
+    "tsup": "^8.0.0",
     "typescript": "^5.6.3",
     "vitest": "^3.0.0"
   },
