@@ -839,9 +839,12 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
             if (!proc.killed) proc.kill();
             return;
           }
-          buf += chunk.toString();
-          if (buf.length > MAX_BUF_SIZE) {
-            log('warn', `Content search line buffer exceeded ${MAX_BUF_SIZE} bytes, aborting`, logLevel);
+          // Check BEFORE append so a single huge chunk cannot blow past the
+          // cap before we notice. chunk.length is a byte count and buf.length
+          // is a UTF-16 unit count; bytes are always >= chars so this is a
+          // conservative overestimate, which is the safe direction.
+          if (buf.length + chunk.length > MAX_BUF_SIZE) {
+            log('warn', `Content search line buffer would exceed ${MAX_BUF_SIZE} bytes, aborting`, logLevel);
             if (!proc.killed) proc.kill();
             if (!responseSent) {
               responseSent = true;
@@ -850,6 +853,7 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
             }
             return;
           }
+          buf += chunk.toString();
           const lines = buf.split('\n');
           buf = lines.pop() ?? '';
           for (const line of lines) {

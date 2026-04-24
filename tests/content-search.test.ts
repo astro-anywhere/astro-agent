@@ -152,8 +152,8 @@ function makeHandler(
           if (!proc.killed) proc.kill()
           return
         }
-        buf += chunk.toString()
-        if (buf.length > MAX_BUF_SIZE) {
+        // Check before append so a single huge chunk cannot blow past the cap
+        if (buf.length + chunk.length > MAX_BUF_SIZE) {
           if (!proc.killed) proc.kill()
           if (!responseSent) {
             responseSent = true
@@ -162,6 +162,7 @@ function makeHandler(
           }
           return
         }
+        buf += chunk.toString()
         const lines = buf.split('\n')
         buf = lines.pop() ?? ''
         for (const line of lines) {
@@ -681,6 +682,37 @@ describe('Content search — robustness', () => {
     const huge = 'A'.repeat(1024 * 1024 + 50)
     proc.emitStdout(huge)
 
+    expect(proc.killed).toBe(true)
+    expect(sent).toHaveLength(1)
+    expect(sent[0].error).toBe('Search aborted: output line exceeded buffer limit')
+  })
+
+  it('buffer cap is enforced BEFORE append (single oversized chunk rejected without growth)', () => {
+    // Regression: previously `buf += chunk; if (buf.length > MAX)` let one
+    // huge chunk grow buf past the cap before the check ran. Now the check
+    // runs before the append — buf must remain empty when a chunk by itself
+    // would exceed the cap.
+    handler(tmpDir, 'x', 'c-buf-pre')
+    const proc = spawned[0]
+    const MAX_BUF_SIZE = 1024 * 1024
+    // One chunk that, if appended, would exceed MAX_BUF_SIZE — must be
+    // rejected before any append happens.
+    const oversized = 'A'.repeat(MAX_BUF_SIZE + 100)
+    proc.emitStdout(oversized)
+
+    expect(proc.killed).toBe(true)
+    expect(sent).toHaveLength(1)
+    expect(sent[0].error).toBe('Search aborted: output line exceeded buffer limit')
+  })
+
+  it('cumulative buffer cap: multiple chunks together exceeding cap trigger abort before the over-sized append', () => {
+    handler(tmpDir, 'x', 'c-buf-cumul')
+    const proc = spawned[0]
+    const half = 'B'.repeat(600 * 1024) // 600KB
+    proc.emitStdout(half) // buf = 600KB (OK)
+    expect(sent).toHaveLength(0)
+    expect(proc.killed).toBe(false)
+    proc.emitStdout(half) // 600KB + 600KB = 1.2MB > 1MB -> abort BEFORE append
     expect(proc.killed).toBe(true)
     expect(sent).toHaveLength(1)
     expect(sent[0].error).toBe('Search aborted: output line exceeded buffer limit')
