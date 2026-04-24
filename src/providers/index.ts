@@ -2,6 +2,12 @@
  * Provider adapters index
  */
 
+// Defense-in-depth: run HIPAA preflight before any adapter that touches the
+// Claude SDK is re-exported or instantiated. `claude-sdk-adapter.ts` imports
+// the preflight first too; listing it here as well means consumers that reach
+// the SDK via this index still get fail-closed behavior in source order.
+import './hipaa-preflight.js';
+
 export type { ProviderAdapter, TaskOutputStream, ProviderStatus } from './base-adapter.js';
 export { ClaudeSdkAdapter } from './claude-sdk-adapter.js';
 export { CodexAdapter } from './codex-adapter.js';
