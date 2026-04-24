@@ -362,6 +362,7 @@ export type WSMessageType =
   | 'file_upload_response'
   | 'directory_list_response'
   | 'create_directory_response'
+  | 'content_search_response'
   | 'slash_commands_response'
   | 'repo_detect_response'
   | 'branch_list_response'
@@ -389,6 +390,7 @@ export type WSMessageType =
   | 'file_upload_chunk'
   | 'directory_list_request'
   | 'create_directory_request'
+  | 'content_search_request'
   | 'repo_setup_request'
   | 'repo_setup_response'
   | 'slash_commands_request'
@@ -773,6 +775,42 @@ export interface CreateDirectoryResponseMessage extends WSMessage {
     correlationId: string;
     success: boolean;
     path?: string;
+    error?: string;
+  };
+}
+
+/** Request the agent to run ripgrep inside `root` for `pattern`. */
+export interface ContentSearchRequestMessage extends WSMessage {
+  type: 'content_search_request';
+  payload: {
+    root: string;
+    pattern: string;
+    correlationId: string;
+    caseSensitive?: boolean;
+    /** Max results returned per file (default 20). */
+    maxMatchesPerFile?: number;
+    /** Total result cap across all files (default 500). */
+    limit?: number;
+  };
+}
+
+/** A single line match returned by ripgrep. */
+export interface ContentSearchMatch {
+  path: string;
+  lineNo: number;
+  line: string;
+  /** Byte offset of the match start within `line`. */
+  matchStart: number;
+  /** Byte offset of the match end within `line`. */
+  matchEnd: number;
+}
+
+/** Agent response carrying the ripgrep results or an error string. */
+export interface ContentSearchResponseMessage extends WSMessage {
+  type: 'content_search_response';
+  payload: {
+    correlationId: string;
+    matches: ContentSearchMatch[];
     error?: string;
   };
 }
