@@ -833,6 +833,8 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         let buf = '';
         let responseSent = false;
         let parseErrors = 0;
+        const PARSE_ERROR_LOG_LIMIT = 3;
+        let parseErrorSuppressionLogged = false;
 
         proc.stdout.on('data', (chunk: Buffer) => {
           if (matches.length >= limit) {
@@ -879,7 +881,17 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
                   matchEnd: sub.end,
                 });
               }
-            } catch { parseErrors++; }
+            } catch (parseErr) {
+              parseErrors++;
+              if (parseErrors <= PARSE_ERROR_LOG_LIMIT) {
+                const truncated = line.length > 200 ? line.slice(0, 200) + '…' : line;
+                const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+                log('debug', `ripgrep JSON parse error #${parseErrors} (cid=${correlationId}): ${msg} | line: ${truncated}`, logLevel);
+              } else if (!parseErrorSuppressionLogged) {
+                parseErrorSuppressionLogged = true;
+                log('debug', `ripgrep JSON parse errors exceeded ${PARSE_ERROR_LOG_LIMIT}; further errors suppressed for cid=${correlationId}`, logLevel);
+              }
+            }
           }
         });
 

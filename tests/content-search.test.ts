@@ -78,10 +78,13 @@ type SendFn = (
   error?: string,
 ) => void
 
+type LogFn = (level: 'debug' | 'warn' | 'info', msg: string) => void
+
 function makeHandler(
   spawnFn: SpawnFn,
   sendFn: SendFn,
   activeSearchProcs: Map<string, FakeProc>,
+  logFn: LogFn = () => {},
 ) {
   return function onContentSearch(
     root: string,
@@ -146,6 +149,8 @@ function makeHandler(
       let buf = ''
       let responseSent = false
       let parseErrors = 0
+      const PARSE_ERROR_LOG_LIMIT = 3
+      let parseErrorSuppressionLogged = false
 
       proc.stdout.on('data', (chunk: Buffer) => {
         if (matches.length >= limit) {
@@ -188,7 +193,17 @@ function makeHandler(
                 matchEnd: sub.end,
               })
             }
-          } catch { parseErrors++ }
+          } catch (parseErr) {
+            parseErrors++
+            if (parseErrors <= PARSE_ERROR_LOG_LIMIT) {
+              const truncated = line.length > 200 ? line.slice(0, 200) + '…' : line
+              const msg = parseErr instanceof Error ? parseErr.message : String(parseErr)
+              logFn('debug', `ripgrep JSON parse error #${parseErrors} (cid=${correlationId}): ${msg} | line: ${truncated}`)
+            } else if (!parseErrorSuppressionLogged) {
+              parseErrorSuppressionLogged = true
+              logFn('debug', `ripgrep JSON parse errors exceeded ${PARSE_ERROR_LOG_LIMIT}; further errors suppressed for cid=${correlationId}`)
+            }
+          }
         }
       })
 
@@ -765,6 +780,69 @@ describe('Content search — robustness', () => {
     // Only the valid match line should appear in results
     expect(sent[0].matches).toHaveLength(1)
     expect(sent[0].matches[0].path).toBe('/p/ok.ts')
+  })
+
+  it('logs first 3 JSON parse errors and then a single suppression notice (per correlationId)', () => {
+    const logs: Array<{ level: string; msg: string }> = []
+    const localLog: LogFn = (level, msg) => { logs.push({ level, msg }) }
+    const localHandler = makeHandler(spawnFn, sendFn, procs, localLog)
+    localHandler(tmpDir, 'x', 'c-parse-log')
+    const proc = spawned[0]
+    // 5 malformed lines — expect 3 per-error logs + 1 suppression log = 4 total
+    proc.emitStdout('{bad1}\n{bad2}\n{bad3}\n{bad4}\n{bad5}\n')
+    proc.close(0)
+
+    const parseLogs = logs.filter(l => l.msg.includes('parse error #'))
+    const suppressLogs = logs.filter(l => l.msg.includes('suppressed'))
+    expect(parseLogs).toHaveLength(3)
+    expect(suppressLogs).toHaveLength(1)
+    // First 3 logs include an error number, a cid, and a truncated line snippet
+    expect(parseLogs[0].msg).toContain('#1')
+    expect(parseLogs[0].msg).toContain('cid=c-parse-log')
+    expect(parseLogs[0].msg).toContain('{bad1}')
+    expect(parseLogs[1].msg).toContain('#2')
+    expect(parseLogs[2].msg).toContain('#3')
+    expect(suppressLogs[0].msg).toContain('cid=c-parse-log')
+  })
+
+  it('truncates very long malformed lines in parse-error logs', () => {
+    const logs: Array<{ level: string; msg: string }> = []
+    const localLog: LogFn = (_level, msg) => { logs.push({ level: _level, msg }) }
+    const localHandler = makeHandler(spawnFn, sendFn, procs, localLog)
+    localHandler(tmpDir, 'x', 'c-parse-trunc')
+    const proc = spawned[0]
+    const longLine = '{bad:' + 'A'.repeat(500) + '}'
+    proc.emitStdout(longLine + '\n')
+    proc.close(0)
+
+    const parseLogs = logs.filter(l => l.msg.includes('parse error #'))
+    expect(parseLogs).toHaveLength(1)
+    // Truncated marker should appear and the full 500-char payload should not
+    expect(parseLogs[0].msg).toContain('…')
+    expect(parseLogs[0].msg.length).toBeLessThan(longLine.length + 200)
+  })
+
+  it('parse-error counters are per-invocation, not global', () => {
+    // Each handler call gets its own parseErrors counter; a second call with
+    // a different correlationId logs from #1 again, not from #4.
+    const logs: Array<{ level: string; msg: string }> = []
+    const localLog: LogFn = (_level, msg) => { logs.push({ level: _level, msg }) }
+    const localHandler = makeHandler(spawnFn, sendFn, procs, localLog)
+
+    localHandler(tmpDir, 'x', 'c-parse-a')
+    spawned[0].emitStdout('{junkA}\n')
+    spawned[0].close(0)
+
+    localHandler(tmpDir, 'x', 'c-parse-b')
+    spawned[1].emitStdout('{junkB}\n')
+    spawned[1].close(0)
+
+    const parseLogs = logs.filter(l => l.msg.includes('parse error #'))
+    expect(parseLogs).toHaveLength(2)
+    expect(parseLogs[0].msg).toContain('#1')
+    expect(parseLogs[0].msg).toContain('cid=c-parse-a')
+    expect(parseLogs[1].msg).toContain('#1')
+    expect(parseLogs[1].msg).toContain('cid=c-parse-b')
   })
 
   it('ignores non-match event types (begin/end/summary)', () => {
