@@ -804,10 +804,21 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         if (!opts?.caseSensitive) args.push('--ignore-case');
         args.push(pattern, resolvedRoot);
 
+        // Defensive: kill any pre-existing process for this correlationId to
+        // prevent orphaned ripgrep processes if a duplicate request arrives.
+        const existing = activeSearchProcs.get(correlationId);
+        if (existing && !existing.killed) {
+          existing.kill();
+        }
+
         const proc = spawn(rgBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
         activeSearchProcs.set(correlationId, proc);
         const matches: Array<{ path: string; lineNo: number; line: string; matchStart: number; matchEnd: number }> = [];
         const limit = opts?.limit ?? 500;
+        // Prevent memory exhaustion from excessively long lines (e.g. minified
+        // files, binary content with no newlines). 1MB is well above any
+        // legitimate source-line length.
+        const MAX_BUF_SIZE = 1024 * 1024;
         let buf = '';
         let responseSent = false;
         let parseErrors = 0;
@@ -818,6 +829,16 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
             return;
           }
           buf += chunk.toString();
+          if (buf.length > MAX_BUF_SIZE) {
+            log('warn', `Content search line buffer exceeded ${MAX_BUF_SIZE} bytes, aborting`, logLevel);
+            if (!proc.killed) proc.kill();
+            if (!responseSent) {
+              responseSent = true;
+              activeSearchProcs.delete(correlationId);
+              wsClient.sendContentSearchResponse(correlationId, matches, 'Search aborted: output line exceeded buffer limit');
+            }
+            return;
+          }
           const lines = buf.split('\n');
           buf = lines.pop() ?? '';
           for (const line of lines) {
