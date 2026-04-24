@@ -99,8 +99,17 @@ function makeHandler(
         return
       }
 
-      const sensitivePaths = ['/etc/', '/.ssh/', '/usr/', '/bin/', '/sbin/', '/root/', '/var/']
-      if (sensitivePaths.some(p => resolvedRoot.includes(p))) {
+      // Prefix comparison so bare roots like '/etc' are blocked too.
+      // Unix-oriented; mirrors the handler in src/commands/start.ts.
+      const SENSITIVE_ROOTS = ['/etc', '/var', '/root', '/usr', '/bin', '/sbin', '/sys', '/proc', '/boot', '/dev']
+      const HOME_SENSITIVE = ['.ssh', '.aws', '.gnupg', '.kube', '.config/gcloud']
+      const isSensitive =
+        SENSITIVE_ROOTS.some(r => resolvedRoot === r || resolvedRoot.startsWith(r + '/')) ||
+        HOME_SENSITIVE.some(h => {
+          const p = join(homedir(), h)
+          return resolvedRoot === p || resolvedRoot.startsWith(p + '/')
+        })
+      if (isSensitive) {
         sendFn(correlationId, [], 'Search in sensitive path not allowed')
         return
       }
@@ -309,26 +318,18 @@ describe('Content search — security validation', () => {
   })
 
   it('rejects nested /etc/ paths', () => {
-    // Nested form (e.g. /etc/ssh) so the '/etc/' substring check hits.
-    // Bare '/etc/' resolves to '/etc' and currently slips past the substring
-    // check — see "behavior notes" at end of file.
     handler('/etc/ssh/', 'root', 'c-3')
     expect(sent[0].error).toBe('Search in sensitive path not allowed')
     expect(spawned).toHaveLength(0)
   })
 
   it('rejects paths containing /.ssh/ (nested)', () => {
-    // NOTE: Uses a nested path because resolve('~/.ssh/') strips the trailing
-    // slash, producing '/home/u/.ssh' which does NOT contain '/.ssh/' as a
-    // substring. See "behavior notes" at the end of this file.
     handler('~/.ssh/known_hosts_dir/', 'id_rsa', 'c-4')
     expect(sent[0].error).toBe('Search in sensitive path not allowed')
     expect(spawned).toHaveLength(0)
   })
 
   it('rejects nested sensitive paths (/root/sub, /var/sub)', () => {
-    // Same trailing-slash normalization caveat as above — test the nested
-    // forms that reliably trip the substring check.
     handler('/root/home/', 'x', 'c-5')
     handler('/var/log/', 'x', 'c-6')
     expect(sent.map(s => s.error)).toEqual([
@@ -336,6 +337,66 @@ describe('Content search — security validation', () => {
       'Search in sensitive path not allowed',
     ])
     expect(spawned).toHaveLength(0)
+  })
+
+  // Security: bare sensitive roots must also be rejected. Previously the
+  // substring check ('/etc/'.includes) let these through because
+  // path.resolve() strips trailing slashes.
+  it('rejects bare /etc root', () => {
+    handler('/etc', 'x', 'c-bare-etc')
+    expect(sent[0].error).toBe('Search in sensitive path not allowed')
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('rejects bare /etc/ root (trailing slash)', () => {
+    handler('/etc/', 'x', 'c-bare-etc-slash')
+    expect(sent[0].error).toBe('Search in sensitive path not allowed')
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('rejects bare /var, /root, /sys, /proc roots', () => {
+    handler('/var', 'x', 'c-bare-var')
+    handler('/root', 'x', 'c-bare-root')
+    handler('/sys', 'x', 'c-bare-sys')
+    handler('/proc', 'x', 'c-bare-proc')
+    expect(sent.map(s => s.error)).toEqual([
+      'Search in sensitive path not allowed',
+      'Search in sensitive path not allowed',
+      'Search in sensitive path not allowed',
+      'Search in sensitive path not allowed',
+    ])
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('rejects bare ~/.ssh root', () => {
+    handler('~/.ssh', 'id_rsa', 'c-bare-ssh')
+    expect(sent[0].error).toBe('Search in sensitive path not allowed')
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('rejects ~/.aws, ~/.gnupg, ~/.kube bare roots', () => {
+    handler('~/.aws', 'x', 'c-bare-aws')
+    handler('~/.gnupg', 'x', 'c-bare-gpg')
+    handler('~/.kube', 'x', 'c-bare-kube')
+    expect(sent.map(s => s.error)).toEqual([
+      'Search in sensitive path not allowed',
+      'Search in sensitive path not allowed',
+      'Search in sensitive path not allowed',
+    ])
+    expect(spawned).toHaveLength(0)
+  })
+
+  it('does NOT reject unrelated paths that happen to share a prefix substring', () => {
+    // '/etcd-data' or '/varnish' must not be caught by the sensitive check
+    // (prefix comparison requires an exact match or a '/' boundary).
+    const tmp = mkdtempSync(join(TMP_ROOT, 'cs-prefix-'))
+    // We can't realistically create /etcd-data, but we can verify the logic
+    // falls past the sensitive check for a non-sensitive resolved path.
+    // Using a safe tmp path demonstrates the guard lets legitimate paths
+    // through to the existsSync check.
+    handler(tmp, 'x', 'c-prefix-safe')
+    // Should have spawned (passed the sensitive check)
+    expect(spawned).toHaveLength(1)
   })
 
   it('rejects non-existent root', () => {
@@ -669,28 +730,4 @@ describe('Content search — robustness', () => {
   })
 })
 
-// ============================================================================
-// Behavior notes (for reviewers)
-//
-// While writing these tests, a few gaps were observed in the current
-// sensitive-path check (src/commands/start.ts:772-775). Tests above are
-// written to reflect *actual current behavior* so they pass today.
-//
-//   1. The sensitive-path entries include a trailing slash (e.g. '/etc/',
-//      '/var/', '/root/'), but `resolve('/etc/')` strips trailing slashes,
-//      yielding '/etc' — which does NOT contain '/etc/' as a substring.
-//      Consequence: a request for a bare sensitive root (e.g. `/etc`, `/var`,
-//      `~/.ssh`) currently slips past this guard and falls through to the
-//      existsSync/isDirectory check. Nested paths (e.g. '/etc/ssh') are
-//      correctly blocked.
-//
-//   2. `/.ssh/` is checked as a substring, which means it only matches when
-//      there is another path segment after `.ssh` (e.g. `~/.ssh/keys`). A
-//      direct search rooted at `~/.ssh` is not blocked.
-//
-// Recommended fix (left out of scope for this test-only PR): normalize the
-// resolved root (strip/add a trailing slash) before the substring check, or
-// switch to prefix comparison against the bare sensitive roots ('/etc',
-// '/root', etc.).
-// ============================================================================
 

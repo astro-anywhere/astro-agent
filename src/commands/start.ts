@@ -768,9 +768,20 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
           return;
         }
 
-        // Security: reject sensitive paths
-        const sensitivePaths = ['/etc/', '/.ssh/', '/usr/', '/bin/', '/sbin/', '/root/', '/var/'];
-        if (sensitivePaths.some(p => resolvedRoot.includes(p))) {
+        // Security: reject sensitive paths.
+        // NOTE: Prefix comparison (not substring) so bare roots like '/etc' are
+        // blocked. path.resolve() strips trailing slashes, so the previous
+        // '/etc/'-substring check let bare sensitive roots slip through.
+        // Unix-oriented: absolute roots are compared as POSIX-style prefixes.
+        const SENSITIVE_ROOTS = ['/etc', '/var', '/root', '/usr', '/bin', '/sbin', '/sys', '/proc', '/boot', '/dev'];
+        const HOME_SENSITIVE = ['.ssh', '.aws', '.gnupg', '.kube', '.config/gcloud'];
+        const isSensitive =
+          SENSITIVE_ROOTS.some(r => resolvedRoot === r || resolvedRoot.startsWith(r + '/')) ||
+          HOME_SENSITIVE.some(h => {
+            const p = join(homedir(), h);
+            return resolvedRoot === p || resolvedRoot.startsWith(p + '/');
+          });
+        if (isSensitive) {
           wsClient.sendContentSearchResponse(correlationId, [], 'Search in sensitive path not allowed');
           return;
         }
