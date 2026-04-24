@@ -15,13 +15,18 @@ export function assertHipaaBedrockEnv(env: NodeJS.ProcessEnv = process.env): voi
   if (env.CLAUDE_CODE_USE_BEDROCK !== '1') missing.push('CLAUDE_CODE_USE_BEDROCK=1');
   if (!env.AWS_REGION) missing.push('AWS_REGION');
   if (!env.ANTHROPIC_MODEL) missing.push('ANTHROPIC_MODEL (must be Bedrock model id)');
+
+  const forbidden: string[] = [];
   if (env.ANTHROPIC_API_KEY) {
-    missing.push('(forbidden) ANTHROPIC_API_KEY must not be set in HIPAA mode');
+    forbidden.push('ANTHROPIC_API_KEY must not be set in HIPAA mode');
   }
 
-  if (missing.length > 0) {
+  if (missing.length > 0 || forbidden.length > 0) {
+    const parts: string[] = [];
+    if (missing.length > 0) parts.push(`missing required: ${missing.join(', ')}`);
+    if (forbidden.length > 0) parts.push(`forbidden present: ${forbidden.join(', ')}`);
     throw new Error(
-      `HIPAA mode requires Bedrock routing. Problems: ${missing.join(', ')}`,
+      `HIPAA mode requires Bedrock routing. ${parts.join('; ')}`,
     );
   }
 
