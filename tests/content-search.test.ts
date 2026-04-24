@@ -195,7 +195,10 @@ function makeHandler(
       proc.stderr.on('data', () => { /* swallow — handler only debug-logs */ })
 
       proc.on('close', (code: number | null) => {
-        activeSearchProcs.delete(correlationId)
+        // Only delete if this proc still owns the slot (duplicate-request race).
+        if (activeSearchProcs.get(correlationId) === proc) {
+          activeSearchProcs.delete(correlationId)
+        }
         if (responseSent) return
         responseSent = true
         if (code !== 0 && code !== 1 && code !== null) {
@@ -206,7 +209,9 @@ function makeHandler(
       })
 
       proc.on('error', (err: Error) => {
-        activeSearchProcs.delete(correlationId)
+        if (activeSearchProcs.get(correlationId) === proc) {
+          activeSearchProcs.delete(correlationId)
+        }
         if (responseSent) return
         responseSent = true
         const msg = err.message.includes('ENOENT')
@@ -587,6 +592,36 @@ describe('Content search — process lifecycle', () => {
     expect(first.killed).toBe(true)
     expect(spawned).toHaveLength(2)
     expect(procs.get('dup-corr')).toBe(spawned[1])
+  })
+
+  it('late close from replaced proc does NOT evict the current owner', () => {
+    // Regression: previously the close handler unconditionally did
+    // activeSearchProcs.delete(correlationId). If a second request replaced
+    // the map entry, the first proc's late close would orphan the second.
+    handler(tmpDir, 'a', 'race-corr')
+    const first = spawned[0]
+    handler(tmpDir, 'b', 'race-corr')
+    const second = spawned[1]
+    expect(procs.get('race-corr')).toBe(second)
+
+    // Now the FIRST (replaced) proc's close fires late. It must NOT delete
+    // the map entry that now points to `second`.
+    first.close(null)
+    expect(procs.get('race-corr')).toBe(second)
+
+    // When the second proc closes normally, it *should* clean up.
+    second.close(0)
+    expect(procs.has('race-corr')).toBe(false)
+  })
+
+  it('late error event from replaced proc also preserves current owner', () => {
+    handler(tmpDir, 'a', 'race-err')
+    const first = spawned[0]
+    handler(tmpDir, 'b', 'race-err')
+    const second = spawned[1]
+
+    first.fail(new Error('late error from orphaned proc'))
+    expect(procs.get('race-err')).toBe(second)
   })
 
   it('close(0) after responseSent (e.g. via buffer abort) does not send twice', () => {

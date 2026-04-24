@@ -888,7 +888,12 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         });
 
         proc.on('close', (code) => {
-          activeSearchProcs.delete(correlationId);
+          // Only delete if *this* proc still owns the slot. A duplicate
+          // request with the same correlationId may have replaced us; a late
+          // close from the prior proc must not orphan the new one.
+          if (activeSearchProcs.get(correlationId) === proc) {
+            activeSearchProcs.delete(correlationId);
+          }
           if (responseSent) return;
           responseSent = true;
           if (code !== 0 && code !== 1 && code !== null) {
@@ -902,7 +907,9 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         });
 
         proc.on('error', (err) => {
-          activeSearchProcs.delete(correlationId);
+          if (activeSearchProcs.get(correlationId) === proc) {
+            activeSearchProcs.delete(correlationId);
+          }
           if (responseSent) return;
           responseSent = true;
           const msg = err.message.includes('ENOENT')
