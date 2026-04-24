@@ -38,6 +38,13 @@ function resolveClaudeExecutable(): string | undefined {
 
 /** Cached result of resolveClaudeExecutable() — computed once at module load. */
 const claudeExecutablePath = resolveClaudeExecutable();
+
+import { assertHipaaBedrockEnv } from './hipaa-startup-check.js';
+
+// Fail-closed: if HIPAA mode is enabled but Bedrock env vars are misconfigured,
+// abort module load so the agent-runner never starts in a non-compliant state.
+assertHipaaBedrockEnv();
+
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, getAugmentedPath } from './base-adapter.js';
