@@ -1226,7 +1226,7 @@ export class TaskExecutor {
             stream,
             abortController.signal,
           );
-          if (resumeResult.success) {
+          if (resumeResult.success && resumeResult.output.trim()) {
             result = {
               taskId: taskWithWorkspace.id,
               status: 'completed',
@@ -1234,6 +1234,12 @@ export class TaskExecutor {
               startedAt: resumeStartedAt,
               completedAt: new Date().toISOString(),
             };
+          } else if (resumeResult.success && !resumeResult.output.trim()) {
+            // Resume reported success but produced no output — the session was
+            // likely expired or already completed. Fall back to fresh execution.
+            console.warn(`[executor] Task ${task.id}: resume returned success but empty output, falling back to fresh execution`);
+            stream.operational?.('Session expired, starting fresh session', 'astro');
+            result = await adapter.execute(taskWithWorkspace, stream, abortController.signal);
           } else {
             // Resume resolved but failed (e.g. Codex session expired, CLI error) —
             // fall back to fresh execution. Codex/OpenCode adapters resolve with

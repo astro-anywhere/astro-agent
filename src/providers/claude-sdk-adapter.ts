@@ -431,11 +431,16 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
       let success = true;
       let errorMessage: string | undefined;
       let newSessionId = sessionId;
+      // Track whether we received a system.init — if the SDK skips straight to
+      // result.success without init, the session was already complete and the
+      // new prompt was never processed.
+      let receivedInit = false;
       // Map tool_use_id → tool name for matching results back to uses
       const resumeToolUseNames = new Map<string, string>();
 
       for await (const msg of gen) {
         if (msg.type === 'system' && msg.subtype === 'init') {
+          receivedInit = true;
           newSessionId = (msg as unknown as Record<string, unknown>).session_id as string ?? sessionId;
           this.activeQueries.set(taskId, { query: gen, sessionId: newSessionId, workingDirectory });
           stream.sessionInit(newSessionId, msg.model);
@@ -479,6 +484,15 @@ export class ClaudeSdkAdapter implements ProviderAdapter {
           }
           break;
         }
+      }
+
+      // Detect empty resume: the SDK returned result.success without ever
+      // sending system.init or any assistant content. This happens when
+      // the session is already in a terminal state (completed, expired).
+      // Report as failure so the caller falls back to fresh execution.
+      if (success && !receivedInit && !output) {
+        console.warn(`[claude-sdk] Task ${taskId}: resume returned success but no init/output — session ${sessionId} is likely expired or already completed`);
+        return { success: false, output: '', error: 'Session expired — no response from resumed session' };
       }
 
       // Preserve context after resume completes
