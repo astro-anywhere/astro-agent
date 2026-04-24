@@ -6,18 +6,15 @@
  * Supports mid-execution steering via Query.streamInput().
  */
 
+// HIPAA preflight MUST be imported before the Claude SDK. ES modules evaluate
+// static imports in source order, so this import runs `assertHipaaBedrockEnv()`
+// and throws (when misconfigured) BEFORE `@anthropic-ai/claude-agent-sdk` is
+// loaded. Do not reorder — this is the fail-closed guarantee.
+import './hipaa-preflight.js';
 import { query, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { execSync } from 'node:child_process';
-
-import { assertHipaaBedrockEnv } from './hipaa-startup-check.js';
-
-// Fail-closed: if HIPAA mode is enabled but Bedrock env vars are misconfigured,
-// abort module load before any other side effects (including `which claude`
-// subprocess + stdout logs) so the agent-runner never starts in a
-// non-compliant state.
-assertHipaaBedrockEnv();
 
 /**
  * Resolve the path to the Claude Code executable.
