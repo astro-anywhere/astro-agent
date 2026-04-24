@@ -95,6 +95,43 @@ describe('assertHipaaBedrockEnv', () => {
     throw new Error('expected assertHipaaBedrockEnv to throw');
   });
 
+  it('reports the actual invalid value when CLAUDE_CODE_USE_BEDROCK is a truthy non-"1" string', () => {
+    expect(() =>
+      assertHipaaBedrockEnv({
+        ASTRO_HIPAA_MODE: 'true',
+        CLAUDE_CODE_USE_BEDROCK: 'true',
+        AWS_REGION: 'us-east-1',
+        ANTHROPIC_MODEL: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+      }),
+    ).toThrow(/CLAUDE_CODE_USE_BEDROCK=1 \(got "true", must be exactly "1"\)/);
+  });
+
+  it('omits the hint when CLAUDE_CODE_USE_BEDROCK is unset', () => {
+    try {
+      assertHipaaBedrockEnv({
+        ASTRO_HIPAA_MODE: 'true',
+        AWS_REGION: 'us-east-1',
+        ANTHROPIC_MODEL: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+      });
+    } catch (err) {
+      expect((err as Error).message).toMatch(/CLAUDE_CODE_USE_BEDROCK=1(?!\s*\()/);
+      expect((err as Error).message).not.toMatch(/got "/);
+      return;
+    }
+    throw new Error('expected assertHipaaBedrockEnv to throw');
+  });
+
+  it('reports the actual invalid value for other non-"1" strings like "yes"', () => {
+    expect(() =>
+      assertHipaaBedrockEnv({
+        ASTRO_HIPAA_MODE: 'true',
+        CLAUDE_CODE_USE_BEDROCK: 'yes',
+        AWS_REGION: 'us-east-1',
+        ANTHROPIC_MODEL: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+      }),
+    ).toThrow(/got "yes", must be exactly "1"/);
+  });
+
   it('does not throw when all Bedrock env vars are correctly configured', () => {
     expect(() =>
       assertHipaaBedrockEnv({

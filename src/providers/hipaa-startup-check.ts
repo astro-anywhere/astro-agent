@@ -12,7 +12,15 @@ export function assertHipaaBedrockEnv(env: NodeJS.ProcessEnv = process.env): voi
   if (env.ASTRO_HIPAA_MODE !== 'true') return;
 
   const missing: string[] = [];
-  if (env.CLAUDE_CODE_USE_BEDROCK !== '1') missing.push('CLAUDE_CODE_USE_BEDROCK=1');
+  if (env.CLAUDE_CODE_USE_BEDROCK !== '1') {
+    // The Claude SDK only accepts the exact string "1" (not "true"/"yes").
+    // Surface the actual value so operators do not have to guess why a
+    // truthy-looking setting was rejected.
+    const hint = env.CLAUDE_CODE_USE_BEDROCK
+      ? ` (got "${env.CLAUDE_CODE_USE_BEDROCK}", must be exactly "1")`
+      : '';
+    missing.push(`CLAUDE_CODE_USE_BEDROCK=1${hint}`);
+  }
   if (!env.AWS_REGION) missing.push('AWS_REGION');
   if (!env.ANTHROPIC_MODEL) missing.push('ANTHROPIC_MODEL (must be Bedrock model id)');
 
