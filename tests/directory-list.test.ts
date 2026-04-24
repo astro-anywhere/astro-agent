@@ -318,11 +318,17 @@ describe('onDirectoryList callback logic', () => {
     expect(hiddenEntries).toHaveLength(0)
   })
 
-  it('entries are sorted alphabetically by name', () => {
+  it('entries are sorted alphabetically by name within each group (directories, then files)', () => {
+    // The handler sorts directories-first, then alphabetically within each group —
+    // not fully alphabetically across the whole list. Verify per-group ordering.
     const result = handleDirectoryList(homedir())
     if (result.entries.length > 1) {
       for (let i = 1; i < result.entries.length; i++) {
-        expect(result.entries[i].name.localeCompare(result.entries[i - 1].name)).toBeGreaterThanOrEqual(0)
+        const prev = result.entries[i - 1]
+        const curr = result.entries[i]
+        if (prev.isDirectory === curr.isDirectory) {
+          expect(curr.name.localeCompare(prev.name)).toBeGreaterThanOrEqual(0)
+        }
       }
     }
   })
