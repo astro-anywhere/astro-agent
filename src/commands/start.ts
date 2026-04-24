@@ -8,7 +8,7 @@ import { spawn, execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync, readdirSync, existsSync, statSync, writeFileSync, renameSync, mkdirSync, unlinkSync, openSync, closeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import os from 'node:os';
 import { homedir } from 'node:os';
 import { config } from '../lib/config.js';
@@ -756,6 +756,185 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         wsClient.sendSlashCommandsResponse(correlationId, []);
       }
     },
+    onContentSearch: (root: string, pattern: string, correlationId: string, opts?: { caseSensitive?: boolean; maxMatchesPerFile?: number; limit?: number }) => {
+      log('debug', `Content search request: pattern=${pattern} root=${root}`, logLevel);
+      try {
+        // Security: resolve to absolute path first, then validate
+        const resolvedRoot = resolve(root.startsWith('~') ? root.replace(/^~/, homedir()) : root);
+
+        // Security: reject path traversal (check both raw and resolved)
+        if (root.includes('..') || resolvedRoot.includes('..')) {
+          wsClient.sendContentSearchResponse(correlationId, [], 'Path traversal not allowed');
+          return;
+        }
+
+        // Security: reject sensitive paths.
+        // NOTE: Prefix comparison (not substring) so bare roots like '/etc' are
+        // blocked. path.resolve() strips trailing slashes, so the previous
+        // '/etc/'-substring check let bare sensitive roots slip through.
+        // Unix-oriented: absolute roots are compared as POSIX-style prefixes.
+        const SENSITIVE_ROOTS = ['/etc', '/var', '/root', '/usr', '/bin', '/sbin', '/sys', '/proc', '/boot', '/dev'];
+        const HOME_SENSITIVE = ['.ssh', '.aws', '.gnupg', '.kube', '.config/gcloud'];
+        const isSensitive =
+          SENSITIVE_ROOTS.some(r => resolvedRoot === r || resolvedRoot.startsWith(r + '/')) ||
+          HOME_SENSITIVE.some(h => {
+            const p = join(homedir(), h);
+            return resolvedRoot === p || resolvedRoot.startsWith(p + '/');
+          });
+        if (isSensitive) {
+          wsClient.sendContentSearchResponse(correlationId, [], 'Search in sensitive path not allowed');
+          return;
+        }
+
+        // Validate root exists and is a directory
+        if (!existsSync(resolvedRoot) || !statSync(resolvedRoot).isDirectory()) {
+          wsClient.sendContentSearchResponse(correlationId, [], 'Invalid search root: not a directory');
+          return;
+        }
+
+        // Prefer @vscode/ripgrep (ships pre-built rg binary), fall back to system rg
+        let rgBin: string;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          rgBin = (require('@vscode/ripgrep') as { rgPath: string }).rgPath;
+        } catch {
+          rgBin = 'rg'; // fall back to system ripgrep
+        }
+
+        const args: string[] = [
+          '--json',
+          '--max-count', String(opts?.maxMatchesPerFile ?? 20),
+          '--max-filesize', '1M',
+          '--glob', '!node_modules',
+          '--glob', '!.git',
+          '--glob', '!dist',
+          '--glob', '!build',
+          '--glob', '!.next',
+          '--glob', '!target',
+        ];
+        if (!opts?.caseSensitive) args.push('--ignore-case');
+        args.push(pattern, resolvedRoot);
+
+        // Defensive: kill any pre-existing process for this correlationId to
+        // prevent orphaned ripgrep processes if a duplicate request arrives.
+        const existing = activeSearchProcs.get(correlationId);
+        if (existing && !existing.killed) {
+          existing.kill();
+        }
+
+        const proc = spawn(rgBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+        activeSearchProcs.set(correlationId, proc);
+        const matches: Array<{ path: string; lineNo: number; line: string; matchStart: number; matchEnd: number }> = [];
+        const limit = opts?.limit ?? 500;
+        // Prevent memory exhaustion from excessively long lines (e.g. minified
+        // files, binary content with no newlines). 1MB is well above any
+        // legitimate source-line length.
+        const MAX_BUF_SIZE = 1024 * 1024;
+        let buf = '';
+        let responseSent = false;
+        let parseErrors = 0;
+        const PARSE_ERROR_LOG_LIMIT = 3;
+        let parseErrorSuppressionLogged = false;
+
+        proc.stdout.on('data', (chunk: Buffer) => {
+          if (matches.length >= limit) {
+            if (!proc.killed) proc.kill();
+            return;
+          }
+          // Check BEFORE append so a single huge chunk cannot blow past the
+          // cap before we notice. chunk.length is a byte count and buf.length
+          // is a UTF-16 unit count; bytes are always >= chars so this is a
+          // conservative overestimate, which is the safe direction.
+          if (buf.length + chunk.length > MAX_BUF_SIZE) {
+            log('warn', `Content search line buffer would exceed ${MAX_BUF_SIZE} bytes, aborting`, logLevel);
+            if (!proc.killed) proc.kill();
+            if (!responseSent) {
+              responseSent = true;
+              activeSearchProcs.delete(correlationId);
+              wsClient.sendContentSearchResponse(correlationId, matches, 'Search aborted: output line exceeded buffer limit');
+            }
+            return;
+          }
+          buf += chunk.toString();
+          const lines = buf.split('\n');
+          buf = lines.pop() ?? '';
+          for (const line of lines) {
+            if (!line.trim() || matches.length >= limit) continue;
+            try {
+              const obj = JSON.parse(line) as {
+                type: string;
+                data: {
+                  path: { text: string };
+                  line_number: number;
+                  lines: { text: string };
+                  submatches: Array<{ start: number; end: number }>;
+                };
+              };
+              if (obj.type === 'match') {
+                const sub = obj.data.submatches[0];
+                if (sub === undefined) continue;
+                matches.push({
+                  path: obj.data.path.text,
+                  lineNo: obj.data.line_number,
+                  line: obj.data.lines.text.trimEnd(),
+                  matchStart: sub.start,
+                  matchEnd: sub.end,
+                });
+              }
+            } catch (parseErr) {
+              parseErrors++;
+              if (parseErrors <= PARSE_ERROR_LOG_LIMIT) {
+                const truncated = line.length > 200 ? line.slice(0, 200) + '…' : line;
+                const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+                log('debug', `ripgrep JSON parse error #${parseErrors} (cid=${correlationId}): ${msg} | line: ${truncated}`, logLevel);
+              } else if (!parseErrorSuppressionLogged) {
+                parseErrorSuppressionLogged = true;
+                log('debug', `ripgrep JSON parse errors exceeded ${PARSE_ERROR_LOG_LIMIT}; further errors suppressed for cid=${correlationId}`, logLevel);
+              }
+            }
+          }
+        });
+
+        proc.stderr?.on('data', (chunk: Buffer) => {
+          log('debug', `ripgrep stderr: ${chunk.toString().trimEnd()}`, logLevel);
+        });
+
+        proc.on('close', (code) => {
+          // Only delete if *this* proc still owns the slot. A duplicate
+          // request with the same correlationId may have replaced us; a late
+          // close from the prior proc must not orphan the new one.
+          if (activeSearchProcs.get(correlationId) === proc) {
+            activeSearchProcs.delete(correlationId);
+          }
+          if (responseSent) return;
+          responseSent = true;
+          if (code !== 0 && code !== 1 && code !== null) {
+            // rg exits 1 for no matches (not an error), null when killed (limit reached)
+            log('warn', `ripgrep exited with code ${code}`, logLevel);
+            wsClient.sendContentSearchResponse(correlationId, [], `Search failed (exit ${code})`);
+          } else {
+            log('debug', `Content search found ${matches.length} matches for: ${pattern}${parseErrors > 0 ? ` (${parseErrors} parse errors)` : ''}`, logLevel);
+            wsClient.sendContentSearchResponse(correlationId, matches);
+          }
+        });
+
+        proc.on('error', (err) => {
+          if (activeSearchProcs.get(correlationId) === proc) {
+            activeSearchProcs.delete(correlationId);
+          }
+          if (responseSent) return;
+          responseSent = true;
+          const msg = err.message.includes('ENOENT')
+            ? 'ripgrep not found — install ripgrep or @vscode/ripgrep'
+            : err.message;
+          log('warn', `Content search failed: ${msg}`, logLevel);
+          wsClient.sendContentSearchResponse(correlationId, [], msg);
+        });
+      } catch (error) {
+        log('warn', `Content search error: ${error instanceof Error ? error.message : String(error)}`, logLevel);
+        wsClient.sendContentSearchResponse(correlationId, [], String(error));
+      }
+    },
     onRepoSetup: (payload: RepoSetupRequestMessage['payload']) => {
       const { correlationId, projectId, workingDirectory, repository } = payload;
       log('info', `Repo setup request: dir=${workingDirectory || '(none)'} repo=${repository || '(none)'}`, logLevel);
@@ -1211,6 +1390,9 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
     hpcCapability,
   });
 
+  // Track in-flight ripgrep processes by correlationId for shutdown cleanup
+  const activeSearchProcs = new Map<string, ReturnType<typeof spawn>>();
+
   // Handle graceful shutdown
   let isShuttingDown = false;
 
@@ -1238,6 +1420,12 @@ export async function startCommand(options: StartOptions = {}): Promise<void> {
         log('info', `Cancelling ${counts.running} running and ${counts.queued} queued tasks`, logLevel);
         taskExecutor.cancelAll();
       }
+
+      // Kill any in-flight ripgrep search processes
+      for (const proc of activeSearchProcs.values()) {
+        try { proc.kill(); } catch { /* ignore */ }
+      }
+      activeSearchProcs.clear();
 
       // Disconnect WebSocket
       wsClient.disconnect();

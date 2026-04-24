@@ -6,6 +6,11 @@
  * Supports mid-execution steering via Query.streamInput().
  */
 
+// HIPAA preflight MUST be imported before the Claude SDK. ES modules evaluate
+// static imports in source order, so this import runs `assertHipaaBedrockEnv()`
+// and throws (when misconfigured) BEFORE `@anthropic-ai/claude-agent-sdk` is
+// loaded. Do not reorder — this is the fail-closed guarantee.
+import './hipaa-preflight.js';
 import { query, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -38,6 +43,7 @@ function resolveClaudeExecutable(): string | undefined {
 
 /** Cached result of resolveClaudeExecutable() — computed once at module load. */
 const claudeExecutablePath = resolveClaudeExecutable();
+
 import type { Task, TaskResult, TaskArtifact, ExecutionSummary, HpcCapability } from '../types.js';
 import { writeImagesToDir, cleanupImages } from '../lib/image-utils.js';
 import { type ProviderAdapter, type NormalizedTask, type TaskOutputStream, type ProviderStatus, SUMMARY_PROMPT, SUMMARY_TIMEOUT_MS, parseSummaryResponse, getAugmentedPath } from './base-adapter.js';

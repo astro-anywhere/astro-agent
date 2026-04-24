@@ -4,10 +4,15 @@
  * Requires:
  *   - `pi` installed and `~/.pi/agent/auth.json` configured (e.g. via `pi /login`)
  *   - Network access to the LLM provider
+ *   - `RUN_PI_INTEGRATION=1` environment variable (opt-in)
  *
- * Run with: npx vitest run tests/pi-integration.test.ts
+ * Run with: RUN_PI_INTEGRATION=1 npx vitest run tests/pi-integration.test.ts
  *
- * Skipped automatically if Pi SDK is not available or auth is not configured.
+ * Skipped automatically unless `RUN_PI_INTEGRATION=1` is set AND auth is configured.
+ * The opt-in flag is required because these tests hit a live LLM provider whose
+ * response latency is unpredictable — tool-using prompts routinely exceed the
+ * 90s vitest timeout on slower models, causing flaky `npm test` failures on
+ * developer machines that happen to have Pi auth configured.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -16,9 +21,11 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import type { TaskOutputStream } from '../src/providers/base-adapter.js';
 
-// Skip the entire suite if auth is not configured
+// Skip the entire suite unless explicitly opted in AND auth is configured
 const authPath = join(homedir(), '.pi', 'agent', 'auth.json');
 const hasAuth = existsSync(authPath);
+const optedIn = process.env.RUN_PI_INTEGRATION === '1';
+const shouldRun = hasAuth && optedIn;
 
 // Collect all stream calls for assertions
 function createRecordingStream() {
@@ -44,7 +51,7 @@ function createRecordingStream() {
   return { stream, calls };
 }
 
-describe.skipIf(!hasAuth)('PiAdapter integration', () => {
+describe.skipIf(!shouldRun)('PiAdapter integration', () => {
   let adapter: any;
 
   afterEach(() => {
