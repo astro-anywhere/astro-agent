@@ -6,6 +6,11 @@
  * correct env vars are set; we enforce those here and fail closed at boot if
  * any are missing or if a direct-Anthropic API key is present.
  *
+ * Scope: the Claude SDK is the only provider that natively supports Bedrock,
+ * so it is the only provider this check gates. Codex/OpenClaw/OpenCode/Pi
+ * call non-Bedrock services and are intentionally out of HIPAA scope — they
+ * are expected to be disabled by deployment configuration in HIPAA mode.
+ *
  * See Phase 3 of the HIPAA compliance plan.
  */
 export function assertHipaaBedrockEnv(env: NodeJS.ProcessEnv = process.env): void {
@@ -38,5 +43,10 @@ export function assertHipaaBedrockEnv(env: NodeJS.ProcessEnv = process.env): voi
     );
   }
 
-  console.log('[claude-sdk] HIPAA mode: Bedrock env vars verified');
+  // Success path: stay silent by default to avoid broadcasting the HIPAA
+  // posture of the deployment in logs. Gate on DEBUG/VERBOSE for operators
+  // who want explicit confirmation.
+  if (process.env.DEBUG || process.env.VERBOSE) {
+    console.log('[claude-sdk] HIPAA mode: Bedrock env vars verified');
+  }
 }
