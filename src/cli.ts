@@ -233,9 +233,17 @@ program
   .requiredOption('--host <alias>', 'SSH config alias of the target host')
   .action(async (options) => {
     // Token bundle is read from stdin as JSON. This avoids exposing tokens
-    // via process arguments. See packages/agent-runner/src/commands/ssh-install.ts
-    // for the protocol.
-    await sshInstallCommand({ host: options.host });
+    // via process arguments. See src/commands/ssh-install.ts for the protocol.
+    try {
+      await sshInstallCommand({ host: options.host });
+    } catch (error) {
+      // Last-ditch error event so consumers always see a terminal NDJSON line
+      // even if a top-level throw escaped sshInstallCommand. Inside the
+      // command we always emit before exit; this covers logic bugs only.
+      const message = error instanceof Error ? error.message : String(error);
+      process.stdout.write(JSON.stringify({ event: 'error', code: 'unhandled', message }) + '\n');
+      process.exit(1);
+    }
   });
 
 // Config command (show/edit config)

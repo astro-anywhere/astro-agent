@@ -16,15 +16,32 @@ vi.mock('../../lib/ssh-discovery.js', () => ({
 
 const packAndInstall = vi.fn();
 const startRemoteAgents = vi.fn();
-const hasControlMaster = vi.fn(async () => true);
-const establishControlMaster = vi.fn(async () => true);
+const buildSshArgs = vi.fn(
+  (host: { name: string }, command: string) => ['-o', 'BatchMode=yes', host.name, command],
+);
 
 vi.mock('../../lib/ssh-installer.js', () => ({
   packAndInstall: (...args: Parameters<typeof packAndInstall>) => packAndInstall(...args),
   startRemoteAgents: (...args: Parameters<typeof startRemoteAgents>) => startRemoteAgents(...args),
-  hasControlMaster: (...args: Parameters<typeof hasControlMaster>) => hasControlMaster(...args),
-  establishControlMaster: (...args: Parameters<typeof establishControlMaster>) => establishControlMaster(...args),
+  buildSshArgs: (...args: Parameters<typeof buildSshArgs>) => buildSshArgs(...args),
 }));
+
+// Mock execFile so the preflight `ssh <alias> echo astro-preflight-ok` can
+// be steered per-test. Default: succeed.
+const execFileImpl = vi.fn<
+  (cmd: string, args: string[], opts: unknown, cb: (err: Error | null, out: { stdout: string; stderr: string }) => void) => void
+>((_cmd, _args, _opts, cb) => {
+  cb(null, { stdout: 'astro-preflight-ok\n', stderr: '' });
+});
+
+vi.mock('node:child_process', async (orig) => {
+  const actual = await orig<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFile: (cmd: string, args: string[], opts: unknown, cb: (err: Error | null, out: { stdout: string; stderr: string }) => void) =>
+      execFileImpl(cmd, args, opts, cb),
+  };
+});
 
 import { sshInstallCommand, type TokenBundle } from '../ssh-install.js';
 
@@ -66,6 +83,10 @@ describe('sshInstallCommand', () => {
   beforeEach(() => {
     packAndInstall.mockReset();
     startRemoteAgents.mockReset();
+    execFileImpl.mockReset();
+    execFileImpl.mockImplementation((_cmd, _args, _opts, cb) => {
+      cb(null, { stdout: 'astro-preflight-ok\n', stderr: '' });
+    });
     vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
       throw new Error(`__exit:${code ?? 0}`);
     }) as never);
@@ -100,7 +121,7 @@ describe('sshInstallCommand', () => {
     const stepNames = events.filter((e) => e.event === 'step').map((e) => e.name);
 
     expect(stepNames).toEqual(
-      expect.arrayContaining(['pack', 'upload', 'install', 'configure', 'stop-existing', 'start', 'verify']),
+      expect.arrayContaining(['preflight', 'pack', 'upload', 'install', 'configure', 'stop-existing', 'start', 'verify']),
     );
     const last = events[events.length - 1];
     expect(last.event).toBe('done');
@@ -167,6 +188,67 @@ describe('sshInstallCommand', () => {
     expect(errEvent).toMatchObject({ event: 'error', code: 'start-failed' });
     expect(String(errEvent?.message)).toContain('Agent process not found');
     expect(String(thrown)).toContain('__exit:1');
+  });
+
+  it('emits {event:"error", code:"auth-required"} when preflight detects 2FA / password auth', async () => {
+    execFileImpl.mockImplementation((_cmd, _args, _opts, cb) => {
+      const err = Object.assign(new Error('exit 255'), {
+        stderr: 'Permission denied (publickey,keyboard-interactive).\n',
+      });
+      cb(err, { stdout: '', stderr: 'Permission denied (publickey,keyboard-interactive).\n' });
+    });
+
+    const cap = captureStdout();
+    let thrown: unknown;
+    try {
+      await sshInstallCommand({ host: 'demo', tokens: validTokens });
+    } catch (err) {
+      thrown = err;
+    } finally {
+      cap.restore();
+    }
+
+    const events = cap.lines();
+    const errEvent = events.find((e) => e.event === 'error');
+    expect(errEvent).toMatchObject({ event: 'error', code: 'auth-required' });
+    expect(String(thrown)).toContain('__exit:1');
+    expect(packAndInstall).not.toHaveBeenCalled();
+  });
+
+  it('emits {event:"error", code:"start-failed"} when startRemoteAgents itself throws after install completes', async () => {
+    packAndInstall.mockResolvedValue(undefined);
+    startRemoteAgents.mockRejectedValue(new Error('connection lost during verify'));
+
+    const cap = captureStdout();
+    let thrown: unknown;
+    try {
+      await sshInstallCommand({ host: 'demo', tokens: validTokens });
+    } catch (err) {
+      thrown = err;
+    } finally {
+      cap.restore();
+    }
+
+    const events = cap.lines();
+    const errEvent = events.find((e) => e.event === 'error');
+    expect(errEvent).toMatchObject({ event: 'error', code: 'start-failed' });
+    expect(String(errEvent?.message)).toContain('connection lost');
+    expect(String(thrown)).toContain('__exit:1');
+  });
+
+  it('trims whitespace on the host alias', async () => {
+    packAndInstall.mockResolvedValue(undefined);
+    startRemoteAgents.mockResolvedValue([{ host: { name: 'demo' }, success: true, message: 'ok' }]);
+
+    const cap = captureStdout();
+    try {
+      await sshInstallCommand({ host: '  demo  ', tokens: validTokens });
+    } finally {
+      cap.restore();
+    }
+
+    const events = cap.lines();
+    expect(events[events.length - 1]).toMatchObject({ event: 'done' });
   });
 
   it('rejects token bundles missing required fields', async () => {

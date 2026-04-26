@@ -27,21 +27,23 @@
  * derived from the discovered host record.
  */
 
+import { execFile as execFileCb } from 'node:child_process';
+import { promisify } from 'node:util';
 import { discoverRemoteHosts } from '../lib/ssh-discovery.js';
 import {
   packAndInstall,
   startRemoteAgents,
-  establishControlMaster,
-  hasControlMaster,
+  buildSshArgs,
   type InstallOptions,
 } from '../lib/ssh-installer.js';
 import type { DiscoveredHost } from '../types.js';
 
+const execFile = promisify(execFileCb);
+
 export interface SshInstallOptions {
   host: string;
-  /** Read JSON token bundle from stdin. Default true. */
-  stdin?: boolean;
-  /** Token bundle passed in-process (used by tests / library callers). */
+  /** Token bundle passed in-process (used by tests / library callers). When
+   * omitted, the bundle is read from stdin as JSON. */
   tokens?: TokenBundle;
 }
 
@@ -63,10 +65,20 @@ function emit(ev: NdjsonEvent): void {
   process.stdout.write(JSON.stringify(ev) + '\n');
 }
 
+/** Cap stdin reads so a buggy or hostile producer can't OOM us. The token
+ * bundle is six short strings (~600 bytes); 16KB is generous. */
+const STDIN_MAX_BYTES = 16 * 1024;
+
 async function readStdinJson(): Promise<unknown> {
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > STDIN_MAX_BYTES) {
+      throw new Error(`stdin exceeded ${STDIN_MAX_BYTES} bytes — expected a small JSON token bundle`);
+    }
+    chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString('utf8').trim();
   if (!raw) throw new Error('empty stdin — expected JSON token bundle');
@@ -105,11 +117,52 @@ async function resolveHost(alias: string): Promise<DiscoveredHost> {
   return match;
 }
 
+/**
+ * Verify the host accepts non-interactive SSH (key-based / agent / existing
+ * ControlMaster). We deliberately do NOT call `establishControlMaster` here:
+ * it uses `stdio: 'inherit'` to surface 2FA prompts, which silently hangs
+ * for ~2 minutes when this command is spawned by a non-TTY orchestrator
+ * (e.g., Electron). For 2FA hosts the orchestrator must establish the
+ * authenticated session first (via `ssh <alias>` or `astro-agent setup`),
+ * then call this command.
+ */
+async function preflightAuth(host: DiscoveredHost): Promise<void> {
+  const args = buildSshArgs(host, 'echo astro-preflight-ok');
+  try {
+    const { stdout } = await execFile('ssh', args, { timeout: 15_000 });
+    if (!stdout.includes('astro-preflight-ok')) {
+      throw Object.assign(new Error('preflight echo did not return expected token'), {
+        code: 'auth-required',
+      });
+    }
+  } catch (err) {
+    const stderr = (err as { stderr?: string }).stderr ?? '';
+    const msg = (err as Error).message ?? String(err);
+    const looksLikeAuth =
+      /Permission denied|publickey|keyboard-interactive|password/i.test(stderr) ||
+      /Permission denied|publickey|keyboard-interactive|password/i.test(msg);
+    throw Object.assign(
+      new Error(
+        looksLikeAuth
+          ? `host '${host.name}' rejected non-interactive auth — open an authenticated session first (e.g. \`ssh ${host.name}\` to complete 2FA, or set up key-based login)`
+          : `preflight failed for '${host.name}': ${stderr || msg}`,
+      ),
+      { code: looksLikeAuth ? 'auth-required' : 'preflight-failed' },
+    );
+  }
+}
+
 export async function sshInstallCommand(opts: SshInstallOptions): Promise<void> {
+  const alias = opts.host.trim();
+  if (!alias) {
+    emit({ event: 'error', code: 'bad-args', message: '--host alias must be non-empty' });
+    process.exit(1);
+  }
+
   // Resolve host first so we fail fast on bad alias.
   let host: DiscoveredHost;
   try {
-    host = await resolveHost(opts.host);
+    host = await resolveHost(alias);
   } catch (err) {
     const e = err as Error & { code?: string };
     emit({ event: 'error', code: e.code ?? 'host-not-found', message: e.message });
@@ -134,22 +187,17 @@ export async function sshInstallCommand(opts: SshInstallOptions): Promise<void> 
     process.exit(1);
   }
 
-  // Establish ControlMaster up-front for 2FA hosts. This is a no-op if the
-  // host doesn't need 2FA — packAndInstall and sshExec both route through
-  // the socket if it exists.
+  // Preflight: verify non-interactive SSH works. Fails fast with a clear
+  // code if the host needs interactive auth, instead of hanging deep inside
+  // packAndInstall when it tries to scp/ssh and waits forever for a 2FA
+  // prompt that has nowhere to render.
+  emit({ event: 'step', name: 'preflight', message: `Checking SSH access to ${host.name}` });
   try {
-    if (!(await hasControlMaster(host))) {
-      emit({ event: 'step', name: 'control-master', message: `Opening multiplexed SSH session to ${host.name}` });
-      await establishControlMaster(host);
-    }
+    await preflightAuth(host);
   } catch (err) {
-    // Non-fatal: many hosts work fine without ControlMaster. Surface as a
-    // step note so the orchestrator can show it, but keep going.
-    emit({
-      event: 'step',
-      name: 'control-master',
-      message: `Skipped multiplexing: ${err instanceof Error ? err.message : String(err)}`,
-    });
+    const e = err as Error & { code?: string };
+    emit({ event: 'error', code: e.code ?? 'preflight-failed', message: e.message });
+    process.exit(1);
   }
 
   // Step: pack + scp + npm install + token push.
@@ -179,20 +227,29 @@ export async function sshInstallCommand(opts: SshInstallOptions): Promise<void> 
     process.exit(1);
   }
 
-  // Step: start the remote agent + verify it's running.
-  const [result] = await startRemoteAgents(
-    [host],
-    {},
-    (_hostName, msg) => {
+  // Step: start the remote agent + verify it's running. Wrap in try/catch
+  // because startRemoteAgents may throw if its underlying SSH calls reject
+  // (e.g., network drop after install completes). Without this, the NDJSON
+  // stream would truncate without an error event.
+  let agentStatus: unknown;
+  try {
+    const [result] = await startRemoteAgents([host], {}, (_hostName, msg) => {
       emit({ event: 'step', name: classifyStartStep(msg), message: msg });
-    },
-  );
-
-  if (!result || !result.success) {
+    });
+    if (!result || !result.success) {
+      emit({
+        event: 'error',
+        code: 'start-failed',
+        message: result?.message ?? 'unknown start failure',
+      });
+      process.exit(1);
+    }
+    agentStatus = result.agentStatus;
+  } catch (err) {
     emit({
       event: 'error',
       code: 'start-failed',
-      message: result?.message ?? 'unknown start failure',
+      message: err instanceof Error ? err.message : String(err),
     });
     process.exit(1);
   }
@@ -200,7 +257,7 @@ export async function sshInstallCommand(opts: SshInstallOptions): Promise<void> 
   emit({
     event: 'done',
     machineId: tokens.machineId,
-    agentStatus: result.agentStatus,
+    agentStatus,
   });
 }
 
