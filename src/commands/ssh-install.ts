@@ -31,7 +31,7 @@ import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { discoverRemoteHosts } from '../lib/ssh-discovery.js';
 import {
-  packAndInstall,
+  directInstall,
   startRemoteAgents,
   buildSshArgs,
   type InstallOptions,
@@ -212,10 +212,10 @@ export async function sshInstallCommand(opts: SshInstallOptions): Promise<void> 
   };
 
   try {
-    await packAndInstall(installOptions, (msg) => {
-      // packAndInstall's progress messages are already human-readable.
-      // We classify them into stable step names so consumers can render
-      // a fixed progress bar without parsing free text.
+    await directInstall(installOptions, (msg) => {
+      // directInstall's progress messages are human-readable. We classify
+      // them into stable step names so consumers can render a fixed
+      // progress bar without parsing free text.
       emit({ event: 'step', name: classifyInstallStep(msg), message: msg });
     });
   } catch (err) {
@@ -263,11 +263,11 @@ export async function sshInstallCommand(opts: SshInstallOptions): Promise<void> 
 
 function classifyInstallStep(msg: string): string {
   const m = msg.toLowerCase();
-  if (m.startsWith('packing')) return 'pack';
-  if (m.startsWith('copying')) return 'upload';
-  if (m.startsWith('installing')) return 'install';
-  if (m.startsWith('running setup')) return 'configure';
-  if (m.startsWith('configuring tokens')) return 'configure';
+  if (m.startsWith('locating node')) return 'detect-node';
+  if (m.startsWith('preparing')) return 'prepare';
+  if (m.startsWith('uploading')) return 'upload';
+  if (m.startsWith('installing wrappers')) return 'install';
+  if (m.startsWith('configuring')) return 'configure';
   if (m.startsWith('done')) return 'install-done';
   return 'install';
 }
