@@ -28,6 +28,7 @@ import {
   stopCommand,
   mcpCommand,
   logsCommand,
+  sshInstallCommand,
 } from './commands/index.js';
 
 const program = new Command();
@@ -222,6 +223,26 @@ program
       console.log(chalk.dim('  Restart the agent runner to apply'));
     } else {
       console.log(chalk.yellow('No token provided'));
+    }
+  });
+
+// ssh-install command (non-interactive remote install for orchestrators)
+program
+  .command('ssh-install')
+  .description('Install astro-agent on a remote SSH host non-interactively (NDJSON progress on stdout)')
+  .requiredOption('--host <alias>', 'SSH config alias of the target host')
+  .action(async (options) => {
+    // Token bundle is read from stdin as JSON. This avoids exposing tokens
+    // via process arguments. See src/commands/ssh-install.ts for the protocol.
+    try {
+      await sshInstallCommand({ host: options.host });
+    } catch (error) {
+      // Last-ditch error event so consumers always see a terminal NDJSON line
+      // even if a top-level throw escaped sshInstallCommand. Inside the
+      // command we always emit before exit; this covers logic bugs only.
+      const message = error instanceof Error ? error.message : String(error);
+      process.stdout.write(JSON.stringify({ event: 'error', code: 'unhandled', message }) + '\n');
+      process.exit(1);
     }
   });
 
