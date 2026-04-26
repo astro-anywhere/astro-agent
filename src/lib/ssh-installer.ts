@@ -9,9 +9,11 @@
 import { execFile as execFileCb, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import { networkInterfaces, homedir } from 'node:os';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import type { DiscoveredHost } from '../types.js';
 
@@ -393,6 +395,172 @@ export async function packAndInstall(
 }
 
 // ============================================================================
+// Direct install — SCP bundles + wrapper, no remote npm
+// ============================================================================
+
+/**
+ * Discover the absolute path to `node` on the remote, sourcing the user's
+ * login shell so PATH includes nvm/asdf/Homebrew/~/.local etc. Returns null
+ * if Node isn't available at all.
+ *
+ * The remote BatchMode SSH session uses a non-interactive non-login shell by
+ * default, so `which node` from within `sshExec` would miss anything not in
+ * /usr/bin or /usr/local/bin. `bash -lc` runs a login shell that sources the
+ * profile files, exposing the user's full PATH.
+ */
+async function findRemoteNodePath(host: DiscoveredHost): Promise<string | null> {
+  // Try bash first (most macOS/Linux). Fall back to sh for minimal systems
+  // (e.g. Alpine without bash). `command -v` is portable.
+  const cmd = `bash -lc 'command -v node' 2>/dev/null || sh -lc 'command -v node' 2>/dev/null || true`;
+  try {
+    const { stdout } = await sshExec(host, cmd);
+    const path = stdout.trim().split('\n').pop()?.trim() ?? '';
+    return path.length > 0 ? path : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the local paths to the bundled astro-agent.mjs and astro-cli.mjs
+ * files. Two install contexts:
+ *
+ *   1. Bundled inside an Electron app: both files are siblings in
+ *      ~/.astro/bin/ (or wherever the user installed them). The currently-
+ *      running file IS astro-agent (with or without .mjs extension).
+ *   2. npx @astroanywhere/agent: the agent is installed as an npm package;
+ *      the CLI is a separate npm package. Resolve via require.resolve.
+ *
+ * Throws with an actionable error if neither path resolves.
+ */
+function resolveLocalBundlePaths(): { agentMjs: string; cliMjs: string } {
+  const agentMjs = fileURLToPath(import.meta.url);
+  const dir = dirname(agentMjs);
+
+  // Sibling-bundle case: try common names with and without extension.
+  for (const name of ['astro-cli.mjs', 'astro-cli', 'astro-cli.cmd']) {
+    const candidate = join(dir, name);
+    if (existsSync(candidate)) {
+      return { agentMjs, cliMjs: candidate };
+    }
+  }
+
+  // npm-package case: resolve @astroanywhere/cli via the agent-runner's
+  // module resolution.
+  try {
+    const req = createRequire(import.meta.url);
+    const cliMjs = req.resolve('@astroanywhere/cli/dist/cli.js');
+    return { agentMjs, cliMjs };
+  } catch {
+    throw new Error(
+      'Could not locate astro-cli bundle. Expected a sibling file in the same directory as astro-agent, or @astroanywhere/cli installed as a dependency.',
+    );
+  }
+}
+
+/** SCP a local file to a remote path, using ControlMaster if available. */
+async function scpFile(
+  host: DiscoveredHost,
+  localPath: string,
+  remotePath: string,
+): Promise<void> {
+  const args = buildScpArgs(host, localPath, remotePath);
+  await execFile('scp', args, { timeout: 120_000 });
+}
+
+/**
+ * Pipe a string to a file on the remote via stdin (avoids exposing tokens
+ * in process arguments). The remote shell uses `cat > <path>` to write.
+ */
+async function pipeToRemoteFile(
+  host: DiscoveredHost,
+  remotePath: string,
+  contents: string,
+  opts: { mode?: string } = {},
+): Promise<void> {
+  const chmod = opts.mode ? `chmod ${opts.mode} ${remotePath} && ` : '';
+  const cmd = `cat > ${remotePath} && ${chmod}true`;
+  const args = buildSshArgs(host, cmd);
+  return new Promise<void>((resolve, reject) => {
+    const child = execFileCb('ssh', args, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+    child.stdin?.write(contents);
+    child.stdin?.end();
+  });
+}
+
+/**
+ * Direct-install path: SCP bundled .mjs files + write wrapper scripts that
+ * hardcode the discovered remote Node path. No `npm install`, no remote
+ * `astro-agent setup --skip-auth`, no shell-PATH dependence at runtime.
+ *
+ * Steps:
+ *   1. Discover remote node via login shell
+ *   2. mkdir -p ~/.astro/bin ~/.astro/logs on remote
+ *   3. pkill any existing agent (always, per the always-stop-and-restart rule)
+ *   4. SCP astro-agent.mjs + astro-cli.mjs
+ *   5. Write wrapper scripts that exec the discovered node path
+ *   6. chmod +x on all four files
+ *   7. Pipe config.json (with all tokens) directly via stdin
+ *
+ * Compatible with InstallOptions for drop-in replacement of packAndInstall.
+ */
+export async function directInstall(
+  opts: InstallOptions,
+  onProgress?: (msg: string) => void,
+): Promise<void> {
+  const { host, apiUrl, relayUrl, accessToken, refreshToken, wsToken, machineId } = opts;
+  const log = onProgress ?? (() => {});
+
+  // 1. Find Node on the remote.
+  log(`Locating node on ${host.name}...`);
+  const nodePath = await findRemoteNodePath(host);
+  if (!nodePath) {
+    throw new Error(
+      `Node.js not found on ${host.name}. Install Node 18+ on the remote (e.g. via nvm, Homebrew, or your package manager) and retry.`,
+    );
+  }
+
+  // 2. Resolve local bundles.
+  const { agentMjs, cliMjs } = resolveLocalBundlePaths();
+
+  // 3. Prepare remote layout + always-stop-and-restart.
+  log(`Preparing ~/.astro on ${host.name}...`);
+  await sshExec(host, 'mkdir -p $HOME/.astro/bin $HOME/.astro/logs');
+  await sshExec(host, 'pkill -f "[a]stro-agent start" 2>/dev/null || true').catch(() => {});
+  await new Promise((r) => setTimeout(r, 500));
+
+  // 4. SCP the bundles.
+  log(`Uploading bundles to ${host.name}...`);
+  await scpFile(host, agentMjs, '$HOME/.astro/bin/astro-agent.mjs');
+  await scpFile(host, cliMjs, '$HOME/.astro/bin/astro-cli.mjs');
+
+  // 5. Wrapper scripts that pin the discovered node path.
+  log(`Installing wrappers on ${host.name}...`);
+  const agentWrapper = `#!/bin/sh\nexec ${nodePath} "$HOME/.astro/bin/astro-agent.mjs" "$@"\n`;
+  const cliWrapper = `#!/bin/sh\nexec ${nodePath} "$HOME/.astro/bin/astro-cli.mjs" "$@"\n`;
+  await pipeToRemoteFile(host, '$HOME/.astro/bin/astro-agent', agentWrapper, { mode: '755' });
+  await pipeToRemoteFile(host, '$HOME/.astro/bin/astro-cli', cliWrapper, { mode: '755' });
+
+  // 6. Pipe config.json with all tokens.
+  log(`Configuring ${host.name}...`);
+  const config = JSON.stringify({
+    apiUrl,
+    relayUrl,
+    accessToken,
+    refreshToken,
+    wsToken,
+    machineId,
+    setupCompleted: true,
+  });
+  await pipeToRemoteFile(host, '$HOME/.astro/config.json', config, { mode: '600' });
+
+  log(`Done — ${host.name} is configured`);
+}
+
+// ============================================================================
 // SSH / SCP helpers
 // ============================================================================
 
@@ -498,8 +666,9 @@ export async function startRemoteAgents(
     await new Promise((r) => setTimeout(r, 1000));
 
     // 2. Build start command with forwarded options
-    // Use full path to avoid PATH resolution issues across different shells (zsh, bash)
-    const agentBin = '$HOME/.local/bin/astro-agent';
+    // Use the wrapper script written by directInstall — it hardcodes the
+    // discovered node path so it works regardless of the SSH session's PATH.
+    const agentBin = '$HOME/.astro/bin/astro-agent';
     const flags: string[] = ['--foreground'];
     if (options.maxTasks) flags.push(`--max-tasks ${options.maxTasks}`);
     if (options.logLevel) flags.push(`--log-level ${options.logLevel}`);
@@ -510,7 +679,7 @@ export async function startRemoteAgents(
     try {
       await sshExec(
         host,
-        `export PATH="$HOME/.local/bin:$PATH" && mkdir -p $HOME/.astro/logs && nohup ${startCmd} > $HOME/.astro/logs/agent-runner.log 2>&1 & disown`,
+        `mkdir -p $HOME/.astro/logs && nohup ${startCmd} > $HOME/.astro/logs/agent-runner.log 2>&1 & disown`,
       );
     } catch {
       // nohup + & disown may cause SSH to exit with non-zero even when the
