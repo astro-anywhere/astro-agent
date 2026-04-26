@@ -28,6 +28,7 @@ import {
   stopCommand,
   mcpCommand,
   logsCommand,
+  sshInstallCommand,
 } from './commands/index.js';
 
 const program = new Command();
@@ -223,6 +224,18 @@ program
     } else {
       console.log(chalk.yellow('No token provided'));
     }
+  });
+
+// ssh-install command (non-interactive remote install for orchestrators)
+program
+  .command('ssh-install')
+  .description('Install astro-agent on a remote SSH host non-interactively (NDJSON progress on stdout)')
+  .requiredOption('--host <alias>', 'SSH config alias of the target host')
+  .action(async (options) => {
+    // Token bundle is read from stdin as JSON. This avoids exposing tokens
+    // via process arguments. See packages/agent-runner/src/commands/ssh-install.ts
+    // for the protocol.
+    await sshInstallCommand({ host: options.host });
   });
 
 // Config command (show/edit config)
