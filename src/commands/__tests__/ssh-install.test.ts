@@ -1,7 +1,7 @@
 /**
  * Tests for the ssh-install command's NDJSON contract.
  *
- * We don't exercise real SSH here — `packAndInstall` and `startRemoteAgents`
+ * We don't exercise real SSH here — `directInstall` and `startRemoteAgents`
  * are mocked so we can verify the orchestration: emitted event sequence,
  * step classification, error handling, and exit codes.
  */
@@ -14,14 +14,14 @@ vi.mock('../../lib/ssh-discovery.js', () => ({
   ]),
 }));
 
-const packAndInstall = vi.fn();
+const directInstall = vi.fn();
 const startRemoteAgents = vi.fn();
 const buildSshArgs = vi.fn(
   (host: { name: string }, command: string) => ['-o', 'BatchMode=yes', host.name, command],
 );
 
 vi.mock('../../lib/ssh-installer.js', () => ({
-  packAndInstall: (...args: Parameters<typeof packAndInstall>) => packAndInstall(...args),
+  directInstall: (...args: Parameters<typeof directInstall>) => directInstall(...args),
   startRemoteAgents: (...args: Parameters<typeof startRemoteAgents>) => startRemoteAgents(...args),
   buildSshArgs: (...args: Parameters<typeof buildSshArgs>) => buildSshArgs(...args),
 }));
@@ -81,7 +81,7 @@ function captureStdout(): { lines: () => CapturedEvent[]; restore: () => void } 
 
 describe('sshInstallCommand', () => {
   beforeEach(() => {
-    packAndInstall.mockReset();
+    directInstall.mockReset();
     startRemoteAgents.mockReset();
     execFileImpl.mockReset();
     execFileImpl.mockImplementation((_cmd, _args, _opts, cb) => {
@@ -97,11 +97,12 @@ describe('sshInstallCommand', () => {
   });
 
   it('emits step → done events on a successful install', async () => {
-    packAndInstall.mockImplementation(async (_opts, onProgress) => {
-      onProgress?.('Packing agent-runner...');
-      onProgress?.('Copying to demo...');
-      onProgress?.('Installing on demo...');
-      onProgress?.('Configuring tokens on demo...');
+    directInstall.mockImplementation(async (_opts, onProgress) => {
+      onProgress?.('Locating node on demo...');
+      onProgress?.('Preparing ~/.astro on demo...');
+      onProgress?.('Uploading bundles to demo...');
+      onProgress?.('Installing wrappers on demo...');
+      onProgress?.('Configuring demo...');
     });
     startRemoteAgents.mockImplementation(async (_hosts, _opts, onProgress) => {
       onProgress?.('demo', 'Stopping existing agent (if any)...');
@@ -121,7 +122,7 @@ describe('sshInstallCommand', () => {
     const stepNames = events.filter((e) => e.event === 'step').map((e) => e.name);
 
     expect(stepNames).toEqual(
-      expect.arrayContaining(['preflight', 'pack', 'upload', 'install', 'configure', 'stop-existing', 'start', 'verify']),
+      expect.arrayContaining(['preflight', 'detect-node', 'prepare', 'upload', 'install', 'configure', 'stop-existing', 'start', 'verify']),
     );
     const last = events[events.length - 1];
     expect(last.event).toBe('done');
@@ -146,8 +147,8 @@ describe('sshInstallCommand', () => {
     expect(String(thrown)).toContain('__exit:1');
   });
 
-  it('emits {event:"error", code:"install-failed"} when packAndInstall throws', async () => {
-    packAndInstall.mockRejectedValue(new Error('scp: permission denied'));
+  it('emits {event:"error", code:"install-failed"} when directInstall throws', async () => {
+    directInstall.mockRejectedValue(new Error('scp: permission denied'));
 
     const cap = captureStdout();
     let thrown: unknown;
@@ -168,7 +169,7 @@ describe('sshInstallCommand', () => {
   });
 
   it('emits {event:"error", code:"start-failed"} when remote start verification fails', async () => {
-    packAndInstall.mockResolvedValue(undefined);
+    directInstall.mockResolvedValue(undefined);
     startRemoteAgents.mockResolvedValue([
       { host: { name: 'demo' }, success: false, message: 'Agent process not found after start' },
     ]);
@@ -212,11 +213,11 @@ describe('sshInstallCommand', () => {
     const errEvent = events.find((e) => e.event === 'error');
     expect(errEvent).toMatchObject({ event: 'error', code: 'auth-required' });
     expect(String(thrown)).toContain('__exit:1');
-    expect(packAndInstall).not.toHaveBeenCalled();
+    expect(directInstall).not.toHaveBeenCalled();
   });
 
   it('emits {event:"error", code:"start-failed"} when startRemoteAgents itself throws after install completes', async () => {
-    packAndInstall.mockResolvedValue(undefined);
+    directInstall.mockResolvedValue(undefined);
     startRemoteAgents.mockRejectedValue(new Error('connection lost during verify'));
 
     const cap = captureStdout();
@@ -237,7 +238,7 @@ describe('sshInstallCommand', () => {
   });
 
   it('trims whitespace on the host alias', async () => {
-    packAndInstall.mockResolvedValue(undefined);
+    directInstall.mockResolvedValue(undefined);
     startRemoteAgents.mockResolvedValue([{ host: { name: 'demo' }, success: true, message: 'ok' }]);
 
     const cap = captureStdout();
