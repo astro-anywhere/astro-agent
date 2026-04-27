@@ -8,14 +8,23 @@
 
 import { readFile, readdir, copyFile, mkdir } from 'node:fs/promises';
 import { join, relative } from 'node:path';
-import { createRequire } from 'node:module';
+// Static import so esbuild can bundle the module inline. The previous
+// createRequire('ignore') pattern left it as a runtime require, which
+// fails when the bundled .mjs ships without an adjacent node_modules/.
+//
+// `ignore` is a CJS module exporting a callable function with an
+// attached namespace. Under `module: "NodeNext"` TypeScript merges
+// the function and namespace into a single namespace type, so the
+// default import isn't typed as callable. The runtime value IS the
+// factory function — cast through unknown to tell TS.
+import ignoreImport from 'ignore';
 
-const require = createRequire(import.meta.url);
-const ignore = require('ignore') as { default: (opts?: object) => Ignore };
 type Ignore = {
   add(patterns: string | readonly string[]): Ignore;
   ignores(pathname: string): boolean;
 };
+type IgnoreFactory = (options?: object) => Ignore;
+const ignoreLib = ignoreImport as unknown as IgnoreFactory;
 
 export interface WorktreeIncludeOptions {
   gitRoot: string;
@@ -38,8 +47,8 @@ export async function applyWorktreeInclude({
     return; // No .gitignore — nothing would be both included and ignored
   }
 
-  const includeMatcher = ignore.default().add(includeContent);
-  const ignoreMatcher = ignore.default().add(gitignoreContent);
+  const includeMatcher = ignoreLib().add(includeContent);
+  const ignoreMatcher = ignoreLib().add(gitignoreContent);
 
   const filesToCopy = await walkAndMatch(gitRoot, includeMatcher, ignoreMatcher);
 
